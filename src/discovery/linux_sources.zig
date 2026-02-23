@@ -172,3 +172,43 @@ fn resolveExecutablePath(allocator: std.mem.Allocator, executable: []const u8) !
 
     return allocator.dupe(u8, executable);
 }
+
+test "collect returns empty on non-linux hosts" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const hits = try collect(allocator, &.{ .chrome, .firefox, .brave });
+    defer allocator.free(hits);
+
+    try std.testing.expectEqual(@as(usize, 0), hits.len);
+}
+
+test "find exec line parses desktop entry" {
+    const data =
+        \\[Desktop Entry]
+        \\Name=Browser
+        \\Exec=/usr/bin/firefox %u
+        \\Type=Application
+    ;
+
+    const exec_line = findExecLine(data);
+    try std.testing.expect(exec_line != null);
+    try std.testing.expect(std.mem.eql(u8, exec_line.?, "/usr/bin/firefox %u"));
+}
+
+test "parse exec binary handles quoted and unquoted command" {
+    const allocator = std.testing.allocator;
+
+    const quoted = parseExecBinary(allocator, "\"/opt/My Browser/browser\" --arg") orelse return error.TestUnexpectedResult;
+    defer allocator.free(quoted);
+    try std.testing.expect(std.mem.eql(u8, quoted, "/opt/My Browser/browser"));
+
+    const unquoted = parseExecBinary(allocator, "firefox --new-window") orelse return error.TestUnexpectedResult;
+    defer allocator.free(unquoted);
+    try std.testing.expect(std.mem.eql(u8, unquoted, "firefox"));
+}
+
+test "matches executable name checks basename only" {
+    try std.testing.expect(matchesExecutableName("/usr/bin/firefox", &.{"firefox"}));
+    try std.testing.expect(!matchesExecutableName("/usr/bin/firefox", &.{"google-chrome"}));
+}

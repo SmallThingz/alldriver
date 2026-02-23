@@ -41,7 +41,8 @@ pub fn freeWebViewRuntimes(allocator: std.mem.Allocator, runtimes: []types.WebVi
 
 pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session {
     const adapter_kind = common.preferredAdapterForEngine(opts.install.engine);
-    const capabilities = capabilitiesFor(opts.install.engine, adapter_kind);
+    const transport = common.transportForAdapter(adapter_kind);
+    const capability_set = capabilitiesFor(opts.install.engine, adapter_kind);
 
     var raw_args: std.ArrayList([]const u8) = .empty;
     defer raw_args.deinit(allocator);
@@ -54,11 +55,14 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
 
     try raw_args.append(allocator, opts.install.path);
 
-    try appendDefaultArgs(allocator, &raw_args, &temp_owned_strings, opts, adapter_kind);
+    const debug_port = if (adapter_kind == .cdp and opts.install.engine == .chromium)
+        try reserveLocalPort(allocator)
+    else
+        null;
 
-    for (opts.args) |arg| {
-        try raw_args.append(allocator, arg);
-    }
+    try appendDefaultArgs(allocator, &raw_args, &temp_owned_strings, opts, adapter_kind, debug_port);
+
+    for (opts.args) |arg| try raw_args.append(allocator, arg);
 
     const final_args = try extensions.applyLaunchArgs(allocator, opts, raw_args.items);
     errdefer {
@@ -85,22 +89,25 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     };
 
     const id = session_mod.nextSessionId();
-    const endpoint = try buildEndpoint(allocator, adapter_kind, id);
+    const endpoint = try buildEndpoint(allocator, adapter_kind, id, debug_port);
 
     const session = Session{
         .allocator = allocator,
         .id = id,
+        .mode = .browser,
+        .transport = transport,
         .install = install_copy,
-        .capabilities = capabilities,
+        .capability_set = capability_set,
         .adapter_kind = adapter_kind,
         .endpoint = endpoint,
         .current_url = null,
+        .browsing_context_id = null,
+        .request_id = 0,
         .child = child,
         .owned_argv = final_args,
     };
 
     extensions.notifySessionInit(session.id);
-
     return session;
 }
 
@@ -109,7 +116,7 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
     var engine: types.EngineKind = .unknown;
     var kind: types.BrowserKind = .chrome;
 
-    if (std.mem.startsWith(u8, endpoint, "cdp://")) {
+    if (std.mem.startsWith(u8, endpoint, "cdp://") or std.mem.startsWith(u8, endpoint, "ws://")) {
         adapter_kind = .cdp;
         engine = .chromium;
         kind = .chrome;
@@ -117,17 +124,19 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
         adapter_kind = .bidi;
         engine = .gecko;
         kind = .firefox;
-    } else if (std.mem.startsWith(u8, endpoint, "webdriver://")) {
+    } else if (std.mem.startsWith(u8, endpoint, "webdriver://") or std.mem.startsWith(u8, endpoint, "http://")) {
         adapter_kind = .webdriver;
         engine = .webkit;
         kind = .safari;
     }
 
-    const capabilities = capabilitiesFor(engine, adapter_kind);
+    const capability_set = capabilitiesFor(engine, adapter_kind);
 
     return Session{
         .allocator = allocator,
         .id = session_mod.nextSessionId(),
+        .mode = .browser,
+        .transport = common.transportForAdapter(adapter_kind),
         .install = .{
             .kind = kind,
             .engine = engine,
@@ -135,10 +144,12 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
             .version = null,
             .source = .explicit,
         },
-        .capabilities = capabilities,
+        .capability_set = capability_set,
         .adapter_kind = adapter_kind,
         .endpoint = try allocator.dupe(u8, endpoint),
         .current_url = null,
+        .browsing_context_id = null,
+        .request_id = 0,
         .child = null,
         .owned_argv = null,
     };
@@ -147,11 +158,13 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
 pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOptions) !Session {
     const engine = webview_discovery.engineForWebView(opts.kind);
     const adapter_kind = adapterForWebViewKind(opts.kind);
-    const capabilities = capabilitiesFor(engine, adapter_kind);
+    const capability_set = capabilitiesFor(engine, adapter_kind);
 
     return Session{
         .allocator = allocator,
         .id = session_mod.nextSessionId(),
+        .mode = .webview,
+        .transport = common.transportForAdapter(adapter_kind),
         .install = .{
             .kind = browserKindForWebView(opts.kind),
             .engine = engine,
@@ -159,10 +172,12 @@ pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOpti
             .version = null,
             .source = .explicit,
         },
-        .capabilities = capabilities,
+        .capability_set = capability_set,
         .adapter_kind = adapter_kind,
         .endpoint = try allocator.dupe(u8, opts.endpoint),
         .current_url = null,
+        .browsing_context_id = null,
+        .request_id = 0,
         .child = null,
         .owned_argv = null,
     };
@@ -171,7 +186,7 @@ pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOpti
 pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunchOptions) !Session {
     const engine = webview_discovery.engineForWebView(opts.kind);
     const adapter_kind = adapterForWebViewKind(opts.kind);
-    const capabilities = capabilitiesFor(engine, adapter_kind);
+    const capability_set = capabilitiesFor(engine, adapter_kind);
 
     var argv_list: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -179,9 +194,7 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         argv_list.deinit(allocator);
     }
     try argv_list.append(allocator, try allocator.dupe(u8, opts.host_executable));
-    for (opts.args) |arg| {
-        try argv_list.append(allocator, try allocator.dupe(u8, arg));
-    }
+    for (opts.args) |arg| try argv_list.append(allocator, try allocator.dupe(u8, arg));
     const argv = try argv_list.toOwnedSlice(allocator);
     errdefer {
         for (argv) |arg| allocator.free(arg);
@@ -207,6 +220,8 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
     return Session{
         .allocator = allocator,
         .id = id,
+        .mode = .webview,
+        .transport = common.transportForAdapter(adapter_kind),
         .install = .{
             .kind = browserKindForWebView(opts.kind),
             .engine = engine,
@@ -214,13 +229,45 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
             .version = null,
             .source = .explicit,
         },
-        .capabilities = capabilities,
+        .capability_set = capability_set,
         .adapter_kind = adapter_kind,
         .endpoint = endpoint,
         .current_url = null,
+        .browsing_context_id = null,
+        .request_id = 0,
         .child = child,
         .owned_argv = argv,
     };
+}
+
+pub fn attachAndroidWebView(allocator: std.mem.Allocator, opts: types.AndroidWebViewAttachOptions) !Session {
+    const endpoint = if (opts.endpoint) |ep|
+        ep
+    else if (opts.socket_name) |socket|
+        try std.fmt.allocPrint(allocator, "cdp://127.0.0.1:9222/devtools/page/{s}", .{socket})
+    else if (opts.pid) |pid|
+        try std.fmt.allocPrint(allocator, "cdp://127.0.0.1:9222/devtools/page/{d}", .{pid})
+    else
+        return error.InvalidEndpoint;
+    defer if (opts.endpoint == null) allocator.free(endpoint);
+    _ = opts.device_id;
+
+    return attachWebView(allocator, .{ .kind = .android_webview, .endpoint = endpoint });
+}
+
+pub fn attachIosWebView(allocator: std.mem.Allocator, opts: types.IosWebViewAttachOptions) !Session {
+    const endpoint = if (opts.endpoint) |ep|
+        ep
+    else if (opts.page_id) |page_id|
+        try std.fmt.allocPrint(allocator, "webdriver://127.0.0.1:9221/session/{s}", .{page_id})
+    else if (opts.app_bundle_id) |bundle|
+        try std.fmt.allocPrint(allocator, "webdriver://127.0.0.1:9221/session/{s}", .{bundle})
+    else
+        return error.InvalidEndpoint;
+    defer if (opts.endpoint == null) allocator.free(endpoint);
+    _ = opts.udid;
+
+    return attachWebView(allocator, .{ .kind = .ios_wkwebview, .endpoint = endpoint });
 }
 
 fn appendDefaultArgs(
@@ -229,6 +276,7 @@ fn appendDefaultArgs(
     temp_owned_strings: *std.ArrayList([]u8),
     opts: types.LaunchOptions,
     adapter: common.AdapterKind,
+    debug_port: ?u16,
 ) !void {
     if (opts.headless) {
         switch (opts.install.engine) {
@@ -263,7 +311,10 @@ fn appendDefaultArgs(
     }
 
     if (adapter == .cdp and opts.install.engine == .chromium) {
-        try args.append(allocator, "--remote-debugging-port=0");
+        const port = debug_port orelse 9222;
+        const flag = try std.fmt.allocPrint(allocator, "--remote-debugging-port={d}", .{port});
+        try temp_owned_strings.append(allocator, flag);
+        try args.append(allocator, flag);
     }
 }
 
@@ -275,11 +326,11 @@ fn capabilitiesFor(engine: types.EngineKind, adapter: common.AdapterKind) types.
     };
 }
 
-fn buildEndpoint(allocator: std.mem.Allocator, adapter: common.AdapterKind, session_id: u64) ![]u8 {
+fn buildEndpoint(allocator: std.mem.Allocator, adapter: common.AdapterKind, session_id: u64, debug_port: ?u16) ![]u8 {
     return switch (adapter) {
-        .cdp => std.fmt.allocPrint(allocator, "cdp://session/{d}", .{session_id}),
-        .webdriver => std.fmt.allocPrint(allocator, "webdriver://session/{d}", .{session_id}),
-        .bidi => std.fmt.allocPrint(allocator, "bidi://session/{d}", .{session_id}),
+        .cdp => std.fmt.allocPrint(allocator, "cdp://127.0.0.1:{d}/", .{debug_port orelse 9222}),
+        .webdriver => std.fmt.allocPrint(allocator, "webdriver://127.0.0.1:4444/session/{d}", .{session_id}),
+        .bidi => std.fmt.allocPrint(allocator, "bidi://127.0.0.1:9223/session/{d}", .{session_id}),
     };
 }
 
@@ -298,12 +349,22 @@ fn browserKindForWebView(kind: types.WebViewKind) types.BrowserKind {
     };
 }
 
+fn reserveLocalPort(allocator: std.mem.Allocator) !u16 {
+    _ = allocator;
+    var address = try std.net.Address.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(.{});
+    defer server.deinit();
+
+    const real = server.listen_address.in.sa;
+    return std.mem.bigToNative(u16, real.port);
+}
+
 test "attach infers adapter" {
     const allocator = std.testing.allocator;
     var s = try attach(allocator, "cdp://localhost:9222");
     defer s.deinit();
     try std.testing.expect(s.adapter_kind == .cdp);
-    try std.testing.expect(s.capabilities.dom);
+    try std.testing.expect(s.capabilities().dom);
 }
 
 test "appendDefaultArgs adds chromium flags for persistent profile and cdp" {
@@ -330,10 +391,10 @@ test "appendDefaultArgs adds chromium flags for persistent profile and cdp" {
         .profile_dir = "/tmp/driver-profile",
         .headless = true,
         .args = &.{},
-    }, .cdp);
+    }, .cdp, 9333);
 
     try std.testing.expect(hasArg(args.items, "--headless=new"));
-    try std.testing.expect(hasArg(args.items, "--remote-debugging-port=0"));
+    try std.testing.expect(hasArg(args.items, "--remote-debugging-port=9333"));
     try std.testing.expect(hasPrefixArg(args.items, "--user-data-dir=/tmp/driver-profile"));
 }
 
@@ -356,7 +417,7 @@ test "launch spawns process and returns webdriver endpoint for unknown engine" {
     });
     defer session.deinit();
 
-    try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "webdriver://session/"));
+    try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "webdriver://session/") or std.mem.startsWith(u8, session.endpoint.?, "webdriver://127.0.0.1"));
     try std.testing.expect(session.child != null);
 }
 
@@ -387,6 +448,32 @@ test "launchWebViewHost spawns host process" {
     try std.testing.expectEqual(types.EngineKind.webkit, session.install.engine);
     try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "webview://session/"));
     try std.testing.expect(session.child != null);
+}
+
+test "attachAndroidWebView builds CDP webview session" {
+    const allocator = std.testing.allocator;
+    var session = try attachAndroidWebView(allocator, .{
+        .device_id = "emulator-5554",
+        .pid = 123,
+    });
+    defer session.deinit();
+
+    try std.testing.expect(session.mode == .webview);
+    try std.testing.expect(session.transport == .cdp_ws);
+    try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "cdp://"));
+}
+
+test "attachIosWebView builds webdriver webview session" {
+    const allocator = std.testing.allocator;
+    var session = try attachIosWebView(allocator, .{
+        .udid = "sim-udid",
+        .page_id = "42",
+    });
+    defer session.deinit();
+
+    try std.testing.expect(session.mode == .webview);
+    try std.testing.expect(session.transport == .webdriver_http);
+    try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "webdriver://"));
 }
 
 fn hasArg(args: []const []const u8, expected: []const u8) bool {

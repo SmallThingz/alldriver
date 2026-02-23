@@ -1,9 +1,9 @@
-# Support Matrix (Desktop v1)
+# Support Matrix (Desktop/WebView v1)
 
 ## Guarantee Model
-- Guarantees are by engine adapter, not by browser brand.
-- Tier 1 targets full core-capability coverage.
-- Tier 2 is best-effort with typed unsupported-capability errors where needed.
+- Guarantees are validated per browser and per platform in the manual GA matrix.
+- Tier 1 and Tier 2 are both release-gating for GA.
+- If any in-scope Tier 2 browser fails functional validation, GA is blocked.
 
 ## Tier 1
 | Engine | Browsers | Platforms |
@@ -12,14 +12,23 @@
 | Gecko | Firefox | Windows, macOS, Linux |
 | WebKit | Safari (via `safaridriver` + WebDriver) | macOS |
 
-## Tier 2
+## Tier 2 (GA-Blocking in Strict Mode)
 | Browser | Engine Family | Expected Contract |
 |---|---|---|
-| Tor Browser | Gecko-derived | Launch/discovery + best-effort automation surfaces |
-| Mullvad Browser | Gecko-derived | Launch/discovery + best-effort automation surfaces |
-| LibreWolf | Gecko-derived | Launch/discovery + best-effort automation surfaces |
-| Pale Moon | Gecko-derived fork | Limited support; subset depends on exposed protocol surface |
-| SigmaOS | Closed-shell / unknown | Discovery/launch coverage; automation depends on exposed interfaces |
+| Tor Browser | Gecko-derived | Full functional suite pass required for GA |
+| Mullvad Browser | Gecko-derived | Full functional suite pass required for GA |
+| LibreWolf | Gecko-derived | Full functional suite pass required for GA |
+| Pale Moon | Gecko-derived fork | Full functional suite pass required for GA |
+| SigmaOS | Closed-shell / unknown | Full functional suite pass required for GA |
+
+## WebView Coverage
+| Runtime | Platform | GA Requirement |
+|---|---|---|
+| WebView2 | Windows | Attach/launch smoke + basic interaction |
+| WKWebView | macOS | Attach/launch smoke + basic interaction |
+| WebKitGTK | Linux | Attach/launch smoke + basic interaction |
+| Android WebView bridge | Linux/macOS host with Android tooling | Discovery + attach/evaluate smoke |
+| iOS WKWebView bridge | macOS host with iOS bridge tooling | Discovery + attach/evaluate smoke |
 
 ## Desktop Target Matrix
 | OS | Architectures |

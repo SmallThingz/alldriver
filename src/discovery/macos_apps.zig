@@ -109,3 +109,13 @@ fn scanApplicationDirs(allocator: std.mem.Allocator, kind: types.BrowserKind, hi
 
     return out.toOwnedSlice(allocator);
 }
+
+test "collect returns empty on non-macos hosts" {
+    if (builtin.os.tag == .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const hits = try collect(allocator, &.{ .safari, .chrome, .firefox });
+    defer allocator.free(hits);
+
+    try std.testing.expectEqual(@as(usize, 0), hits.len);
+}

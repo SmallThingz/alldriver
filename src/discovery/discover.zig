@@ -375,6 +375,85 @@ test "sort prioritizes higher score then path" {
     try std.testing.expect(std.mem.eql(u8, candidates.items[1].install.path, "/tmp/a"));
 }
 
+test "sort prioritizes version before path when scores tie" {
+    const allocator = std.testing.allocator;
+
+    var candidates: std.ArrayList(Candidate) = .empty;
+    defer {
+        for (candidates.items) |candidate| {
+            allocator.free(candidate.install.path);
+            if (candidate.install.version) |v| allocator.free(v);
+        }
+        candidates.deinit(allocator);
+    }
+
+    try candidates.append(allocator, .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, "/tmp/no-version"),
+            .version = null,
+            .source = .known_path,
+        },
+        .score = 50,
+    });
+    try candidates.append(allocator, .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, "/tmp/with-version-low"),
+            .version = try allocator.dupe(u8, "120.1"),
+            .source = .known_path,
+        },
+        .score = 50,
+    });
+    try candidates.append(allocator, .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, "/tmp/with-version-high"),
+            .version = try allocator.dupe(u8, "121.0"),
+            .source = .known_path,
+        },
+        .score = 50,
+    });
+
+    std.sort.heap(Candidate, candidates.items, {}, lessThan);
+
+    try std.testing.expect(std.mem.eql(u8, candidates.items[0].install.path, "/tmp/with-version-high"));
+    try std.testing.expect(std.mem.eql(u8, candidates.items[1].install.path, "/tmp/with-version-low"));
+    try std.testing.expect(std.mem.eql(u8, candidates.items[2].install.path, "/tmp/no-version"));
+}
+
+test "infer kind from path recognizes major browser names case-insensitively" {
+    const kinds = [_]types.BrowserKind{
+        .chrome,
+        .edge,
+        .safari,
+        .firefox,
+        .brave,
+        .tor,
+        .duckduckgo,
+        .mullvad,
+        .librewolf,
+        .epic,
+        .arc,
+        .vivaldi,
+        .sigmaos,
+        .sidekick,
+        .shift,
+        .operagx,
+        .palemoon,
+    };
+
+    try std.testing.expectEqual(types.BrowserKind.firefox, inferKindFromPath("/tmp/FireFox", &kinds));
+    try std.testing.expectEqual(types.BrowserKind.safari, inferKindFromPath("/Applications/Safari", &kinds));
+    try std.testing.expectEqual(types.BrowserKind.edge, inferKindFromPath("C:\\Program Files\\MSEdge.EXE", &kinds));
+    try std.testing.expectEqual(types.BrowserKind.vivaldi, inferKindFromPath("/opt/vivaldi-stable", &kinds));
+    try std.testing.expectEqual(types.BrowserKind.brave, inferKindFromPath("/usr/bin/brave-browser", &kinds));
+    try std.testing.expectEqual(types.BrowserKind.palemoon, inferKindFromPath("/usr/bin/PaleMoon", &kinds));
+}
+
 test "discover returns explicit path and infers kind" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

@@ -95,3 +95,13 @@ fn collectProgramFilesCandidates(allocator: std.mem.Allocator, kind: types.Brows
 
     return out.toOwnedSlice(allocator);
 }
+
+test "collect returns empty on non-windows hosts" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const hits = try collect(allocator, &.{ .chrome, .edge, .firefox });
+    defer allocator.free(hits);
+
+    try std.testing.expectEqual(@as(usize, 0), hits.len);
+}

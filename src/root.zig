@@ -6,6 +6,7 @@ const types = @import("types.zig");
 const runtime = @import("runtime.zig");
 const session_mod = @import("core/session.zig");
 const extensions = @import("extensions/api.zig");
+const errors = @import("errors.zig");
 
 pub const BrowserKind = types.BrowserKind;
 pub const EngineKind = types.EngineKind;
@@ -17,18 +18,35 @@ pub const DiscoveryOptions = types.DiscoveryOptions;
 pub const BrowserInstall = types.BrowserInstall;
 pub const LaunchOptions = types.LaunchOptions;
 pub const CapabilitySet = types.CapabilitySet;
+pub const CapabilityFeature = types.CapabilityFeature;
 pub const BrowserInstallSource = types.BrowserInstallSource;
+pub const InterceptAction = types.InterceptAction;
+pub const NetworkRule = types.NetworkRule;
+pub const RequestEvent = types.RequestEvent;
+pub const ResponseEvent = types.ResponseEvent;
 pub const WebViewKind = types.WebViewKind;
 pub const WebViewRuntimeSource = types.WebViewRuntimeSource;
 pub const WebViewPreference = types.WebViewPreference;
 pub const WebViewRuntime = types.WebViewRuntime;
 pub const WebViewAttachOptions = types.WebViewAttachOptions;
 pub const WebViewLaunchOptions = types.WebViewLaunchOptions;
+pub const AndroidWebViewAttachOptions = types.AndroidWebViewAttachOptions;
+pub const IosWebViewAttachOptions = types.IosWebViewAttachOptions;
+
+pub const ProtocolError = errors.ProtocolError;
+pub const TransportError = errors.TransportError;
+pub const CapabilityError = errors.CapabilityError;
+pub const TimeoutError = errors.TimeoutError;
+pub const DiscoveryError = errors.DiscoveryError;
+pub const LaunchError = errors.LaunchError;
+pub const WebViewError = errors.WebViewError;
+pub const UnsupportedCapabilityInfo = errors.UnsupportedCapabilityInfo;
 
 pub const Session = session_mod.Session;
 
 pub const extension_hooks = extensions;
 pub const nodriver = @import("compat/nodriver_facade.zig");
+pub const async_api = @import("core/async.zig");
 
 pub fn discover(
     allocator: std.mem.Allocator,
@@ -68,6 +86,20 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: WebViewLaunchOption
     return runtime.launchWebViewHost(allocator, opts);
 }
 
+pub fn attachAndroidWebView(
+    allocator: std.mem.Allocator,
+    opts: AndroidWebViewAttachOptions,
+) !Session {
+    return runtime.attachAndroidWebView(allocator, opts);
+}
+
+pub fn attachIosWebView(
+    allocator: std.mem.Allocator,
+    opts: IosWebViewAttachOptions,
+) !Session {
+    return runtime.attachIosWebView(allocator, opts);
+}
+
 pub fn freeInstalls(allocator: std.mem.Allocator, installs: []BrowserInstall) void {
     runtime.freeInstalls(allocator, installs);
 }
@@ -95,7 +127,7 @@ test "attach via root API" {
     const allocator = std.testing.allocator;
     var s = try attach(allocator, "cdp://127.0.0.1:9222");
     defer s.deinit();
-    try std.testing.expect(s.capabilities.dom);
+    try std.testing.expect(s.capabilities().dom);
 }
 
 test "discoverWebViews root API" {
@@ -109,4 +141,12 @@ test "discoverWebViews root API" {
     defer freeWebViewRuntimes(allocator, runtimes);
 
     try std.testing.expectEqual(@as(usize, 0), runtimes.len);
+}
+
+test "platform matrix contracts" {
+    _ = @import("tests/platform_matrix.zig");
+}
+
+test "behavioral matrix contracts" {
+    _ = @import("tests/behavioral_matrix.zig");
 }

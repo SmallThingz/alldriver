@@ -73,6 +73,61 @@ pub const CapabilitySet = struct {
     bidi_events: bool,
 };
 
+pub const CapabilityFeature = enum {
+    dom,
+    js_eval,
+    network_intercept,
+    tracing,
+    downloads,
+    bidi_events,
+};
+
+pub const InterceptActionKind = enum {
+    block,
+    continue_request,
+    fulfill,
+    modify,
+};
+
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const InterceptAction = union(InterceptActionKind) {
+    block: void,
+    continue_request: void,
+    fulfill: struct {
+        status: u16,
+        body: []const u8 = "",
+        headers: []const Header = &.{},
+    },
+    modify: struct {
+        add_headers: []const Header = &.{},
+        remove_header_names: []const []const u8 = &.{},
+    },
+};
+
+pub const NetworkRule = struct {
+    id: []const u8,
+    url_pattern: []const u8,
+    action: InterceptAction,
+};
+
+pub const RequestEvent = struct {
+    request_id: []const u8,
+    method: []const u8,
+    url: []const u8,
+    headers_json: []const u8,
+};
+
+pub const ResponseEvent = struct {
+    request_id: []const u8,
+    status: u16,
+    url: []const u8,
+    headers_json: []const u8,
+};
+
 pub const WebViewRuntimeSource = enum {
     explicit,
     path_env,
@@ -109,6 +164,20 @@ pub const WebViewLaunchOptions = struct {
     kind: WebViewKind,
     host_executable: []const u8,
     args: []const []const u8 = &.{},
+    endpoint: ?[]const u8 = null,
+};
+
+pub const AndroidWebViewAttachOptions = struct {
+    device_id: []const u8,
+    socket_name: ?[]const u8 = null,
+    pid: ?u32 = null,
+    endpoint: ?[]const u8 = null,
+};
+
+pub const IosWebViewAttachOptions = struct {
+    udid: []const u8,
+    app_bundle_id: ?[]const u8 = null,
+    page_id: ?[]const u8 = null,
     endpoint: ?[]const u8 = null,
 };
 
