@@ -1,0 +1,124 @@
+const catalog = @import("catalog/browser_kind.zig");
+
+pub const BrowserKind = catalog.BrowserKind;
+pub const EngineKind = catalog.EngineKind;
+pub const Platform = catalog.Platform;
+pub const WebViewPlatform = enum {
+    windows,
+    macos,
+    linux,
+    android,
+    ios,
+};
+
+pub const WebViewKind = enum {
+    webview2,
+    wkwebview,
+    webkitgtk,
+    android_webview,
+    ios_wkwebview,
+};
+
+pub const ProfileMode = enum {
+    persistent,
+    ephemeral,
+};
+
+pub const BrowserPreference = struct {
+    kinds: []const BrowserKind,
+    channel: ?[]const u8 = null,
+    explicit_path: ?[]const u8 = null,
+    allow_managed_download: bool = false,
+    managed_cache_dir: ?[]const u8 = null,
+};
+
+pub const DiscoveryOptions = struct {
+    include_path_env: bool = true,
+    include_os_probes: bool = true,
+    include_known_paths: bool = true,
+};
+
+pub const BrowserInstallSource = enum {
+    explicit,
+    path_env,
+    known_path,
+    registry,
+    app_bundle,
+    package_db,
+    managed_cache,
+};
+
+pub const BrowserInstall = struct {
+    kind: BrowserKind,
+    engine: EngineKind,
+    path: []const u8,
+    version: ?[]const u8 = null,
+    source: BrowserInstallSource,
+};
+
+pub const LaunchOptions = struct {
+    install: BrowserInstall,
+    profile_mode: ProfileMode,
+    profile_dir: ?[]const u8 = null,
+    headless: bool = false,
+    args: []const []const u8 = &.{},
+};
+
+pub const CapabilitySet = struct {
+    dom: bool,
+    js_eval: bool,
+    network_intercept: bool,
+    tracing: bool,
+    downloads: bool,
+    bidi_events: bool,
+};
+
+pub const WebViewRuntimeSource = enum {
+    explicit,
+    path_env,
+    known_path,
+    system_framework,
+    package_db,
+    bridge_tool,
+};
+
+pub const WebViewPreference = struct {
+    kinds: []const WebViewKind = &.{},
+    explicit_runtime_path: ?[]const u8 = null,
+    include_path_env: bool = true,
+    include_known_paths: bool = true,
+    include_mobile_bridges: bool = true,
+};
+
+pub const WebViewRuntime = struct {
+    kind: WebViewKind,
+    engine: EngineKind,
+    platform: WebViewPlatform,
+    runtime_path: ?[]const u8 = null,
+    bridge_tool_path: ?[]const u8 = null,
+    source: WebViewRuntimeSource,
+    version: ?[]const u8 = null,
+};
+
+pub const WebViewAttachOptions = struct {
+    kind: WebViewKind,
+    endpoint: []const u8,
+};
+
+pub const WebViewLaunchOptions = struct {
+    kind: WebViewKind,
+    host_executable: []const u8,
+    args: []const []const u8 = &.{},
+    endpoint: ?[]const u8 = null,
+};
+
+pub const DiscoveryError = error{
+    OutOfMemory,
+    InvalidExplicitPath,
+};
+
+pub const LaunchError = error{
+    OutOfMemory,
+    UnsupportedEngine,
+    SpawnFailed,
+};
