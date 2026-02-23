@@ -71,11 +71,11 @@ fn extractBase64Screenshot(allocator: std.mem.Allocator, payload: []const u8) !?
     if (b64 == null) return null;
 
     const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64.?) catch return error.InvalidResponse;
-    var out = try allocator.alloc(u8, decoded_len);
+    const out = try allocator.alloc(u8, decoded_len);
     errdefer allocator.free(out);
 
-    const actual_len = std.base64.standard.Decoder.decode(out, b64.?) catch return error.InvalidResponse;
-    return out[0..actual_len];
+    std.base64.standard.Decoder.decode(out, b64.?) catch return error.InvalidResponse;
+    return out;
 }
 
 test "extract base64 screenshot payload" {
