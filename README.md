@@ -51,6 +51,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 ```
 
+## Examples
+- Many end-to-end usage examples live in `/home/a/projects/zig/browser_driver/examples/README.md`.
+- Build all examples with: `zig build examples`
+- Examples include discover/launch/attach, DOM actions, waits, async API, network interception, cookies/storage, screenshots/tracing, nodriver facade, and webview/mobile bridge attach flows.
+
 ## Build Option
 Use `-Denable_builtin_extension=true` to enable the built-in compile-time extension adapter.
 

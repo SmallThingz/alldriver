@@ -152,6 +152,37 @@ pub fn build(b: *std.Build) void {
         run_tools_cmd.addArgs(args);
     }
 
+    const example_specs = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "example-01-discover", .path = "examples/01_discover.zig" },
+        .{ .name = "example-02-launch-and-navigate", .path = "examples/02_launch_and_navigate.zig" },
+        .{ .name = "example-03-attach-existing-endpoint", .path = "examples/03_attach_existing_endpoint.zig" },
+        .{ .name = "example-04-dom-interactions-and-waits", .path = "examples/04_dom_interactions_and_waits.zig" },
+        .{ .name = "example-05-network-interception", .path = "examples/05_network_interception.zig" },
+        .{ .name = "example-06-cookies-and-storage", .path = "examples/06_cookies_and_storage.zig" },
+        .{ .name = "example-07-screenshots-and-tracing", .path = "examples/07_screenshots_and_tracing.zig" },
+        .{ .name = "example-08-async-api", .path = "examples/08_async_api.zig" },
+        .{ .name = "example-09-nodriver-facade", .path = "examples/09_nodriver_facade.zig" },
+        .{ .name = "example-10-webview-discovery-and-attach", .path = "examples/10_webview_discovery_and_attach.zig" },
+        .{ .name = "example-11-mobile-webview-attach", .path = "examples/11_mobile_webview_attach.zig" },
+        .{ .name = "example-12-managed-cache-and-profile-modes", .path = "examples/12_managed_cache_and_profile_modes.zig" },
+        .{ .name = "example-13-capability-aware-flow", .path = "examples/13_capability_aware_flow.zig" },
+    };
+    const examples_step = b.step("examples", "Build all library usage examples");
+    inline for (example_specs) |spec| {
+        const example_exe = b.addExecutable(.{
+            .name = spec.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(spec.path),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "browser_driver", .module = mod },
+                },
+            }),
+        });
+        examples_step.dependOn(&example_exe.step);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
