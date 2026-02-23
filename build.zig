@@ -21,6 +21,16 @@ pub fn build(b: *std.Build) void {
         "enable_builtin_extension",
         "Enable the built-in compile-time extension adapter",
     ) orelse false;
+    const vm_lab_dir = b.option(
+        []const u8,
+        "vm_lab_dir",
+        "Shared VM lab root directory (default: /home/a/vm_lab)",
+    ) orelse "/home/a/vm_lab";
+    const vm_host = b.option(
+        []const u8,
+        "vm_host",
+        "Registered remote host name for vm-remote-matrix step",
+    ) orelse "";
     const config = b.addOptions();
     config.addOption(bool, "enable_builtin_extension", enable_builtin_extension);
     // It's also possible to define more custom flags to toggle optional features
@@ -99,6 +109,16 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    const tools_exe = b.addExecutable(.{
+        .name = "browser_driver_tools",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(tools_exe);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -125,6 +145,13 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    const tools_step = b.step("tools", "Run browser_driver_tools commands (pass args after --)");
+    const run_tools_cmd = b.addRunArtifact(tools_exe);
+    tools_step.dependOn(&run_tools_cmd.step);
+    if (b.args) |args| {
+        run_tools_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
@@ -145,12 +172,77 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const tools_tests = b.addTest(.{
+        .root_module = tools_exe.root_module,
+    });
+    const run_tools_tests = b.addRunArtifact(tools_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_tools_tests.step);
+
+    const vm_prereq_cmd = b.addRunArtifact(tools_exe);
+    vm_prereq_cmd.addArgs(&.{"vm-check-prereqs"});
+    const vm_prereq_step = b.step("vm-prereqs", "Check VM/QEMU prerequisites");
+    vm_prereq_step.dependOn(&vm_prereq_cmd.step);
+
+    const vm_image_sources_cmd = b.addRunArtifact(tools_exe);
+    vm_image_sources_cmd.addArgs(&.{ "vm-image-sources", "--check" });
+    const vm_image_sources_step = b.step("vm-image-sources", "List and verify official VM image source links");
+    vm_image_sources_step.dependOn(&vm_image_sources_cmd.step);
+
+    const vm_init_cmd = b.addRunArtifact(tools_exe);
+    vm_init_cmd.addArgs(&.{ "vm-init-lab", "--project", "browser_driver", "--lab-dir", vm_lab_dir });
+    const vm_init_step = b.step("vm-init", "Initialize shared VM lab");
+    vm_init_step.dependOn(&vm_init_cmd.step);
+
+    const vm_linux_create_cmd = b.addRunArtifact(tools_exe);
+    vm_linux_create_cmd.addArgs(&.{ "vm-create-linux", "--project", "browser_driver", "--name", "linux-matrix", "--lab-dir", vm_lab_dir });
+    const vm_linux_create_step = b.step("vm-linux-create", "Create Linux matrix VM assets");
+    vm_linux_create_step.dependOn(&vm_linux_create_cmd.step);
+
+    const vm_linux_matrix_cmd = b.addRunArtifact(tools_exe);
+    vm_linux_matrix_cmd.addArgs(&.{ "vm-run-linux-matrix", "--project", "browser_driver", "--name", "linux-matrix", "--lab-dir", vm_lab_dir });
+    const vm_linux_matrix_step = b.step("vm-linux-matrix", "Run Linux matrix inside VM and collect artifacts");
+    vm_linux_matrix_step.dependOn(&vm_linux_matrix_cmd.step);
+
+    const vm_remote_matrix_cmd = b.addRunArtifact(tools_exe);
+    vm_remote_matrix_cmd.addArgs(&.{ "vm-run-remote-matrix", "--project", "browser_driver", "--host", vm_host, "--lab-dir", vm_lab_dir });
+    const vm_remote_matrix_step = b.step("vm-remote-matrix", "Run matrix on a registered remote host (set -Dvm_host=...)");
+    vm_remote_matrix_step.dependOn(&vm_remote_matrix_cmd.step);
+
+    const vm_ga_bundle_cmd = b.addRunArtifact(tools_exe);
+    vm_ga_bundle_cmd.addArgs(&.{ "vm-ga-collect-and-bundle", "--project", "browser_driver", "--linux-host", "linux-matrix", "--macos-host", "macos-host", "--windows-host", "windows-host", "--lab-dir", vm_lab_dir });
+    const vm_ga_bundle_step = b.step("vm-ga-bundle", "Collect Linux/macOS/Windows matrix evidence and build GA bundle");
+    vm_ga_bundle_step.dependOn(&vm_ga_bundle_cmd.step);
+
+    const production_gate_cmd = b.addRunArtifact(tools_exe);
+    production_gate_cmd.addArgs(&.{"production-gate"});
+    const production_gate_step = b.step("production-gate", "Run production readiness gate (tests, matrix policy, docs, markers, release bundle)");
+    production_gate_step.dependOn(&production_gate_cmd.step);
+
+    const qemu_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .linux,
+        .abi = .gnu,
+    });
+    const qemu_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = qemu_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "browser_driver_config", .module = config.createModule() },
+            },
+        }),
+    });
+    const run_qemu_tests = b.addRunArtifact(qemu_tests);
+    const qemu_step = b.step("test-qemu-aarch64", "Run tests for Linux aarch64 target (invoke with -fqemu)");
+    qemu_step.dependOn(&run_qemu_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
