@@ -7,6 +7,8 @@ const http = @import("../transport/http_client.zig");
 const json_rpc = @import("../transport/json_rpc.zig");
 
 const Session = @import("../core/session.zig").Session;
+const cdp_target_poll_timeout_ms: i64 = 8_000;
+const cdp_target_poll_sleep_ms: u64 = 100;
 
 pub fn navigate(session: *Session, url: []const u8) !void {
     switch (session.transport) {
@@ -15,14 +17,16 @@ pub fn navigate(session: *Session, url: []const u8) !void {
             defer session.allocator.free(escaped);
             const params = try std.fmt.allocPrint(session.allocator, "{{\"url\":\"{s}\"}}", .{escaped});
             defer session.allocator.free(params);
-            _ = try callCdp(session, "Page.navigate", params);
+            const raw = try callCdp(session, "Page.navigate", params);
+            defer session.allocator.free(raw);
         },
         .webdriver_http => {
             const escaped = try escapeJsonString(session.allocator, url);
             defer session.allocator.free(escaped);
             const body = try std.fmt.allocPrint(session.allocator, "{{\"url\":\"{s}\"}}", .{escaped});
             defer session.allocator.free(body);
-            _ = try callWebDriver(session, .POST, "/url", body);
+            const raw = try callWebDriver(session, .POST, "/url", body);
+            defer session.allocator.free(raw);
         },
         .bidi_ws => {
             const context_id = session.browsing_context_id orelse return error.SessionNotReady;
@@ -34,7 +38,8 @@ pub fn navigate(session: *Session, url: []const u8) !void {
                 .{ context_id, url_e },
             );
             defer session.allocator.free(params);
-            _ = try callBidi(session, "browsingContext.navigate", params);
+            const raw = try callBidi(session, "browsingContext.navigate", params);
+            defer session.allocator.free(raw);
         },
     }
 }
@@ -42,10 +47,12 @@ pub fn navigate(session: *Session, url: []const u8) !void {
 pub fn reload(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {
-            _ = try callCdp(session, "Page.reload", "{}");
+            const raw = try callCdp(session, "Page.reload", "{}");
+            defer session.allocator.free(raw);
         },
         .webdriver_http => {
-            _ = try callWebDriver(session, .POST, "/refresh", "{}");
+            const raw = try callWebDriver(session, .POST, "/refresh", "{}");
+            defer session.allocator.free(raw);
         },
         .bidi_ws => {
             const context_id = session.browsing_context_id orelse return error.SessionNotReady;
@@ -55,7 +62,8 @@ pub fn reload(session: *Session) !void {
                 .{context_id},
             );
             defer session.allocator.free(params);
-            _ = try callBidi(session, "browsingContext.reload", params);
+            const raw = try callBidi(session, "browsingContext.reload", params);
+            defer session.allocator.free(raw);
         },
     }
 }
@@ -78,7 +86,8 @@ pub fn click(session: *Session, selector: []const u8) !void {
             defer session.allocator.free(element_id);
             const suffix = try std.fmt.allocPrint(session.allocator, "/element/{s}/click", .{element_id});
             defer session.allocator.free(suffix);
-            _ = try callWebDriver(session, .POST, suffix, "{}");
+            const raw = try callWebDriver(session, .POST, suffix, "{}");
+            defer session.allocator.free(raw);
         },
         .bidi_ws => {
             const sel = try escapeJsonString(session.allocator, selector);
@@ -118,7 +127,8 @@ pub fn typeText(session: *Session, selector: []const u8, text: []const u8) !void
             defer session.allocator.free(suffix);
             const body = try std.fmt.allocPrint(session.allocator, "{{\"text\":\"{s}\"}}", .{txt});
             defer session.allocator.free(body);
-            _ = try callWebDriver(session, .POST, suffix, body);
+            const raw = try callWebDriver(session, .POST, suffix, body);
+            defer session.allocator.free(raw);
         },
         .bidi_ws => {
             const sel = try escapeJsonString(session.allocator, selector);
@@ -203,7 +213,8 @@ pub fn setCookie(session: *Session, cookie: types.Header, domain: []const u8, pa
                 .{ n, v, d, p },
             );
             defer session.allocator.free(params);
-            _ = try callCdp(session, "Network.setCookie", params);
+            const raw = try callCdp(session, "Network.setCookie", params);
+            defer session.allocator.free(raw);
         },
         .webdriver_http => {
             const n = try escapeJsonString(session.allocator, cookie.name);
@@ -220,7 +231,8 @@ pub fn setCookie(session: *Session, cookie: types.Header, domain: []const u8, pa
                 .{ n, v, d, p },
             );
             defer session.allocator.free(body);
-            _ = try callWebDriver(session, .POST, "/cookie", body);
+            const raw = try callWebDriver(session, .POST, "/cookie", body);
+            defer session.allocator.free(raw);
         },
         .bidi_ws => return error.UnsupportedProtocol,
     }
@@ -245,7 +257,8 @@ pub fn screenshot(session: *Session) ![]u8 {
 pub fn startTracing(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {
-            _ = try callCdp(session, "Tracing.start", "{}");
+            const raw = try callCdp(session, "Tracing.start", "{}");
+            defer session.allocator.free(raw);
         },
         else => return error.UnsupportedProtocol,
     }
@@ -261,11 +274,14 @@ pub fn stopTracing(session: *Session) ![]u8 {
 pub fn enableNetworkInterception(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {
-            _ = try callCdp(session, "Network.enable", "{}");
-            _ = try callCdp(session, "Fetch.enable", "{}");
+            const enable_raw = try callCdp(session, "Network.enable", "{}");
+            defer session.allocator.free(enable_raw);
+            const fetch_raw = try callCdp(session, "Fetch.enable", "{}");
+            defer session.allocator.free(fetch_raw);
         },
         .bidi_ws => {
-            _ = try callBidi(session, "session.subscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}");
+            const raw = try callBidi(session, "session.subscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}");
+            defer session.allocator.free(raw);
         },
         .webdriver_http => return error.UnsupportedProtocol,
     }
@@ -274,11 +290,14 @@ pub fn enableNetworkInterception(session: *Session) !void {
 pub fn disableNetworkInterception(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {
-            _ = try callCdp(session, "Fetch.disable", "{}");
-            _ = try callCdp(session, "Network.setBlockedURLs", "{\"urls\":[]}");
+            const fetch_raw = try callCdp(session, "Fetch.disable", "{}");
+            defer session.allocator.free(fetch_raw);
+            const blocked_raw = try callCdp(session, "Network.setBlockedURLs", "{\"urls\":[]}");
+            defer session.allocator.free(blocked_raw);
         },
         .bidi_ws => {
-            _ = try callBidi(session, "session.unsubscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}") catch {};
+            const raw = callBidi(session, "session.unsubscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}") catch null;
+            if (raw) |payload| session.allocator.free(payload);
         },
         .webdriver_http => return error.UnsupportedProtocol,
     }
@@ -298,7 +317,8 @@ pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
                         .{url_pattern},
                     );
                     defer session.allocator.free(params);
-                    _ = try callCdp(session, "Network.setBlockedURLs", params);
+                    const raw = try callCdp(session, "Network.setBlockedURLs", params);
+                    defer session.allocator.free(raw);
                 },
                 .continue_request, .modify, .fulfill => {
                     const params = try std.fmt.allocPrint(
@@ -307,7 +327,8 @@ pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
                         .{url_pattern},
                     );
                     defer session.allocator.free(params);
-                    _ = try callCdp(session, "Fetch.enable", params);
+                    const raw = try callCdp(session, "Fetch.enable", params);
+                    defer session.allocator.free(raw);
                 },
             }
         },
@@ -318,7 +339,8 @@ pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
                 .{url_pattern},
             );
             defer session.allocator.free(params);
-            _ = try callBidi(session, "network.addIntercept", params);
+            const raw = try callBidi(session, "network.addIntercept", params);
+            defer session.allocator.free(raw);
         },
         .webdriver_http => return error.UnsupportedProtocol,
     }
@@ -333,13 +355,7 @@ fn callCdp(session: *Session, method: []const u8, params_json: []const u8) ![]u8
     defer if (maybe_owned_path) |p| session.allocator.free(p);
 
     if (std.mem.eql(u8, actual_path, "/")) {
-        const version = try http.getJson(session.allocator, parsed.host, parsed.port, "/json/version");
-        defer session.allocator.free(version.body);
-
-        const ws_url = try extractJsonStringAlloc(session.allocator, version.body, "webSocketDebuggerUrl") orelse return error.InvalidResponse;
-        defer session.allocator.free(ws_url);
-
-        maybe_owned_path = try extractPathFromWebSocketUrl(session.allocator, ws_url);
+        maybe_owned_path = try resolveCdpPagePath(session.allocator, parsed.host, parsed.port);
         actual_path = maybe_owned_path.?;
     }
 
@@ -375,14 +391,8 @@ fn recvRpcResponse(session: *Session, client: *ws.Client, expected_id: u64) ![]u
         errdefer session.allocator.free(message);
 
         const envelope = json_rpc.decodeEnvelope(session.allocator, message) catch |err| switch (err) {
-            error.InvalidResponse => {
-                session.allocator.free(message);
-                return error.InvalidResponse;
-            },
-            else => {
-                session.allocator.free(message);
-                return err;
-            },
+            error.InvalidResponse => return error.InvalidResponse,
+            else => return err,
         };
 
         if (envelope.id == null) {
@@ -392,12 +402,10 @@ fn recvRpcResponse(session: *Session, client: *ws.Client, expected_id: u64) ![]u
         }
 
         if (envelope.id.? != expected_id) {
-            session.allocator.free(message);
             return error.ResponseIdMismatch;
         }
 
         if (envelope.has_error) {
-            session.allocator.free(message);
             return error.ProtocolCommandFailed;
         }
 
@@ -421,16 +429,62 @@ fn callWebDriver(
     errdefer session.allocator.free(res.body);
 
     if (res.status_code < 200 or res.status_code >= 300) {
-        session.allocator.free(res.body);
         return error.ProtocolCommandFailed;
     }
 
     if (try webDriverResponseHasError(session.allocator, res.body)) {
-        session.allocator.free(res.body);
         return error.ProtocolCommandFailed;
     }
 
     return res.body;
+}
+
+fn resolveCdpPagePath(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
+    const deadline = std.time.milliTimestamp() + cdp_target_poll_timeout_ms;
+
+    while (true) {
+        const list_response = http.getJson(allocator, host, port, "/json/list") catch |err| {
+            if (std.time.milliTimestamp() >= deadline) return err;
+            std.Thread.sleep(cdp_target_poll_sleep_ms * std.time.ns_per_ms);
+            continue;
+        };
+        defer allocator.free(list_response.body);
+
+        if (list_response.status_code >= 200 and list_response.status_code < 300) {
+            if (try extractPageWebSocketUrlAlloc(allocator, list_response.body)) |ws_url| {
+                defer allocator.free(ws_url);
+                return extractPathFromWebSocketUrl(allocator, ws_url);
+            }
+        }
+
+        if (std.time.milliTimestamp() >= deadline) return error.TargetNotFound;
+        std.Thread.sleep(cdp_target_poll_sleep_ms * std.time.ns_per_ms);
+    }
+}
+
+fn extractPageWebSocketUrlAlloc(allocator: std.mem.Allocator, json: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .array) return null;
+
+    var first_ws_url: ?[]const u8 = null;
+    for (root.array.items) |entry| {
+        if (entry != .object) continue;
+        const ws_url_value = entry.object.get("webSocketDebuggerUrl") orelse continue;
+        if (ws_url_value != .string) continue;
+
+        if (first_ws_url == null) first_ws_url = ws_url_value.string;
+
+        const target_type_value = entry.object.get("type") orelse continue;
+        if (target_type_value == .string and std.mem.eql(u8, target_type_value.string, "page")) {
+            return @as(?[]u8, try allocator.dupe(u8, ws_url_value.string));
+        }
+    }
+
+    if (first_ws_url) |url| return @as(?[]u8, try allocator.dupe(u8, url));
+    return null;
 }
 
 fn webDriverResponseHasError(allocator: std.mem.Allocator, payload: []const u8) !bool {
@@ -575,4 +629,36 @@ test "extract json string path alloc" {
 
     try std.testing.expect(value != null);
     try std.testing.expect(std.mem.eql(u8, value.?, "abc"));
+}
+
+test "extract page web socket url prefers page target" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\[
+        \\  {"id":"browser","type":"browser","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/abc"},
+        \\  {"id":"page-1","type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}
+        \\]
+    ;
+
+    const value = try extractPageWebSocketUrlAlloc(allocator, json);
+    defer if (value) |v| allocator.free(v);
+
+    try std.testing.expect(value != null);
+    try std.testing.expect(std.mem.eql(u8, value.?, "ws://127.0.0.1:9222/devtools/page/1"));
+}
+
+test "extract page web socket url falls back to first target" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\[
+        \\  {"id":"browser","type":"browser","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/abc"},
+        \\  {"id":"worker-1","type":"worker","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/worker/1"}
+        \\]
+    ;
+
+    const value = try extractPageWebSocketUrlAlloc(allocator, json);
+    defer if (value) |v| allocator.free(v);
+
+    try std.testing.expect(value != null);
+    try std.testing.expect(std.mem.eql(u8, value.?, "ws://127.0.0.1:9222/devtools/browser/abc"));
 }

@@ -300,6 +300,10 @@ fn mapGetOr(map: *const std.StringHashMap([]u8), key: []const u8, fallback: []co
     return map.get(key) orelse fallback;
 }
 
+fn strictGaEnabled(flags: *const std.StringHashMap([]u8), env_default: []const u8) bool {
+    return std.mem.eql(u8, mapGetOr(flags, "strict-ga", env_default), "1");
+}
+
 fn parseFlags(allocator: Allocator, args: []const []const u8) !std.StringHashMap([]u8) {
     var map = std.StringHashMap([]u8).init(allocator);
     var i: usize = 0;
@@ -471,6 +475,7 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
     var macos_ok = false;
     var linux_android_ok = false;
     var macos_ios_ok = false;
+    var strict_report_seen = false;
 
     for (reports.items) |report| {
         const report_data = try readFileAlloc(allocator, report, 8 * 1024 * 1024);
@@ -510,27 +515,30 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         defer allocator.free(platform);
         const strict_marker = try lineValue(allocator, report_data, "strict_ga:");
         defer allocator.free(strict_marker);
+        const is_strict_report = std.mem.eql(u8, strict_marker, "1");
 
         const behavioral_pass = containsLine(report_data, "- behavioral_matrix: PASS");
         const adb_ok = containsPrefixNonNotFound(report_data, "adb=");
         const ios_ok = containsPrefixNonNotFound(report_data, "ios_webkit_debug_proxy=") or containsPrefixNonNotFound(report_data, "tidevice=");
 
-        const strict_report_ok = std.mem.eql(u8, status, "PASS") and std.mem.eql(u8, sig_status, "VALID") and behavioral_pass and std.mem.eql(u8, strict_marker, "1");
+        const strict_report_ok = std.mem.eql(u8, status, "PASS") and std.mem.eql(u8, sig_status, "VALID") and behavioral_pass and is_strict_report;
 
         if (strict_ga) {
-            if (!strict_report_ok) strict_overall = false;
+            if (is_strict_report) {
+                strict_report_seen = true;
 
-            if (std.mem.eql(u8, platform, "linux")) {
-                if (strict_report_ok) {
-                    linux_ok = true;
-                    if (adb_ok) linux_android_ok = true;
-                }
-            } else if (std.mem.eql(u8, platform, "windows")) {
-                if (strict_report_ok) windows_ok = true;
-            } else if (std.mem.eql(u8, platform, "macos")) {
-                if (strict_report_ok) {
-                    macos_ok = true;
-                    if (ios_ok) macos_ios_ok = true;
+                if (std.mem.eql(u8, platform, "linux")) {
+                    if (strict_report_ok) {
+                        linux_ok = true;
+                        if (adb_ok) linux_android_ok = true;
+                    }
+                } else if (std.mem.eql(u8, platform, "windows")) {
+                    if (strict_report_ok) windows_ok = true;
+                } else if (std.mem.eql(u8, platform, "macos")) {
+                    if (strict_report_ok) {
+                        macos_ok = true;
+                        if (ios_ok) macos_ios_ok = true;
+                    }
                 }
             }
         }
@@ -552,6 +560,9 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
     }
 
     if (strict_ga) {
+        if (!strict_report_seen) {
+            strict_overall = false;
+        }
         if (!(linux_ok and windows_ok and macos_ok and linux_android_ok and macos_ios_ok)) {
             strict_overall = false;
         }
@@ -681,7 +692,7 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const strict_ga = std.mem.eql(u8, mapGetOr(&flags, "strict-ga", "0"), "1");
+    const strict_ga = strictGaEnabled(&flags, std.posix.getenv("STRICT_GA") orelse "0");
     const skip_marker_scan = std.mem.eql(u8, mapGetOr(&flags, "skip-marker-scan", "0"), "1");
     const skip_bundle = std.mem.eql(u8, mapGetOr(&flags, "skip-bundle", "0"), "1");
 
@@ -899,7 +910,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     const host_platform = getHostPlatform();
     const platform: []const u8 = flags.get("platform") orelse host_platform;
     const profile_mode = mapGetOr(&flags, "profile-mode", "ephemeral");
-    const strict_ga = std.mem.eql(u8, mapGetOr(&flags, "strict-ga", "0"), "1");
+    const strict_ga = strictGaEnabled(&flags, std.posix.getenv("STRICT_GA") orelse "0");
     const allow_platform_mismatch = std.mem.eql(u8, mapGetOr(&flags, "allow-platform-mismatch", "0"), "1");
 
     if (!allow_platform_mismatch and !std.mem.eql(u8, platform, host_platform) and !std.mem.eql(u8, host_platform, "unknown")) {
@@ -924,19 +935,32 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     const ts = try nowStamp(allocator);
     defer allocator.free(ts);
 
-    var out_dir = flags.get("out");
-    if (out_dir == null) {
-        out_dir = try pathJoin(allocator, &.{ root, "artifacts", "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ platform, ts }) });
-    }
-    try ensurePath(out_dir.?);
-    try ensurePath(try pathJoin(allocator, &.{ out_dir.?, "logs" }));
+    var out_dir_default: ?[]u8 = null;
+    defer if (out_dir_default) |p| allocator.free(p);
+    const out_dir_raw = flags.get("out") orelse blk: {
+        out_dir_default = try pathJoin(allocator, &.{ root, "artifacts", "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ platform, ts }) });
+        break :blk out_dir_default.?;
+    };
+    const out_dir = try toAbsolutePath(allocator, root, out_dir_raw);
+    defer allocator.free(out_dir);
+
+    try ensurePath(out_dir);
+    const logs_dir_init = try pathJoin(allocator, &.{ out_dir, "logs" });
+    defer allocator.free(logs_dir_init);
+    try ensurePath(logs_dir_init);
 
     var ok_all = true;
-    if (!(try runStepWithLog(allocator, root, &env, out_dir.?, "test_pass_1", &.{ "zig", "build", "test" }))) ok_all = false;
-    if (!(try runStepWithLog(allocator, root, &env, out_dir.?, "test_pass_2", &.{ "zig", "build", "test" }))) ok_all = false;
-    if (!(try runStepWithLog(allocator, root, &env, out_dir.?, "test_extension", &.{ "zig", "build", "test", "-Denable_builtin_extension=true" }))) ok_all = false;
-    if (!(try runStepWithLog(allocator, root, &env, out_dir.?, "run_binary", &.{ "zig", "build", "run" }))) ok_all = false;
-    if (!(try runStepWithLog(allocator, root, &env, out_dir.?, "release_gate", &.{ "zig", "build", "tools", "--", "release-gate" }))) ok_all = false;
+    if (!(try runStepWithLog(allocator, root, &env, out_dir, "test_pass_1", &.{ "zig", "build", "test" }))) ok_all = false;
+    if (!(try runStepWithLog(allocator, root, &env, out_dir, "test_pass_2", &.{ "zig", "build", "test" }))) ok_all = false;
+    if (!(try runStepWithLog(allocator, root, &env, out_dir, "test_extension", &.{ "zig", "build", "test", "-Denable_builtin_extension=true" }))) ok_all = false;
+    if (!(try runStepWithLog(allocator, root, &env, out_dir, "run_binary", &.{ "zig", "build", "run" }))) ok_all = false;
+
+    // Matrix runs may execute with STRICT_GA=1, but release-gate performs
+    // strict matrix collection and would become cyclic inside matrix-run.
+    var env_release_gate = try setDefaultZigGlobalCache(allocator, root);
+    defer env_release_gate.deinit();
+    try env_release_gate.put("STRICT_GA", "0");
+    if (!(try runStepWithLog(allocator, root, &env_release_gate, out_dir, "release_gate", &.{ "zig", "build", "tools", "--", "release-gate" }))) ok_all = false;
 
     var enable_behavioral = std.mem.eql(u8, env.get("MATRIX_ENABLE_BEHAVIORAL") orelse "0", "1");
     if (strict_ga) enable_behavioral = true;
@@ -959,10 +983,10 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
             }
         }
 
-        if (!(try runStepWithLog(allocator, root, &env, out_dir.?, "behavioral_matrix", &.{ "zig", "build", "tools", "--", "test-behavioral-matrix" }))) ok_all = false;
+        if (!(try runStepWithLog(allocator, root, &env, out_dir, "behavioral_matrix", &.{ "zig", "build", "tools", "--", "test-behavioral-matrix" }))) ok_all = false;
     }
 
-    const env_txt_path = try pathJoin(allocator, &.{ out_dir.?, "environment.txt" });
+    const env_txt_path = try pathJoin(allocator, &.{ out_dir, "environment.txt" });
     const head_commit = runCaptureTrimmed(allocator, &.{ "git", "rev-parse", "HEAD" }, root, null) catch try allocator.dupe(u8, "unknown");
     defer allocator.free(head_commit);
     const zig_ver = runCaptureTrimmed(allocator, &.{ "zig", "version" }, root, null) catch try allocator.dupe(u8, "unknown");
@@ -1010,7 +1034,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
 
     try writeFile(env_txt_path, env_txt.items);
 
-    const logs_dir = try pathJoin(allocator, &.{ out_dir.?, "logs" });
+    const logs_dir = try pathJoin(allocator, &.{ out_dir, "logs" });
     defer allocator.free(logs_dir);
 
     var overall = true;
@@ -1030,7 +1054,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         }
     }
 
-    const report = try pathJoin(allocator, &.{ out_dir.?, "matrix-report.txt" });
+    const report = try pathJoin(allocator, &.{ out_dir, "matrix-report.txt" });
     var rpt: std.ArrayList(u8) = .empty;
     defer rpt.deinit(allocator);
     try rpt.writer(allocator).print("Matrix Report\nplatform: {s}\ntimestamp_utc: {s}\ncommit: {s}\nprofile_mode: {s}\nstrict_ga: {d}\n\nChecks:\n", .{
@@ -1093,11 +1117,11 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     }
 
     if (!overall) {
-        std.debug.print("matrix run failed: {s}\n", .{out_dir.?});
+        std.debug.print("matrix run failed: {s}\n", .{out_dir});
         return ToolError.VerificationFailed;
     }
 
-    std.debug.print("matrix run complete: {s}\n", .{out_dir.?});
+    std.debug.print("matrix run complete: {s}\n", .{out_dir});
 }
 
 fn copyTree(allocator: Allocator, src_root: []const u8, dst_root: []const u8) !void {
@@ -2068,6 +2092,23 @@ test "parseFlags parses valued and boolean flags" {
     try std.testing.expect(std.mem.eql(u8, flags.get("platform").?, "linux"));
     try std.testing.expect(std.mem.eql(u8, flags.get("strict-ga").?, "1"));
     try std.testing.expect(std.mem.eql(u8, flags.get("out").?, "/tmp/out"));
+}
+
+test "strictGaEnabled honors env default and explicit override" {
+    const allocator = std.testing.allocator;
+
+    var flags_env_only = try parseFlags(allocator, &.{ "--platform", "linux" });
+    defer freeStringMap(allocator, &flags_env_only);
+    try std.testing.expect(strictGaEnabled(&flags_env_only, "1"));
+    try std.testing.expect(!strictGaEnabled(&flags_env_only, "0"));
+
+    var flags_override = try parseFlags(allocator, &.{ "--platform", "linux", "--strict-ga", "0" });
+    defer freeStringMap(allocator, &flags_override);
+    try std.testing.expect(!strictGaEnabled(&flags_override, "1"));
+
+    var flags_enable = try parseFlags(allocator, &.{ "--platform", "linux", "--strict-ga" });
+    defer freeStringMap(allocator, &flags_enable);
+    try std.testing.expect(strictGaEnabled(&flags_enable, "0"));
 }
 
 test "parseKvFile strips optional quotes" {

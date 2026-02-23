@@ -1,6 +1,8 @@
 const std = @import("std");
 const driver = @import("../root.zig");
 
+const example_url = "https://example.com/";
+
 fn envEnabled(name: []const u8) bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
     defer std.heap.page_allocator.free(value);
@@ -26,6 +28,27 @@ fn bridgeRequirement() BridgeRequirement {
     if (std.ascii.eqlIgnoreCase(value, "android")) return .android;
     if (std.ascii.eqlIgnoreCase(value, "ios")) return .ios;
     return .both;
+}
+
+fn fetchExampleAndAssert(session: *driver.Session, allocator: std.mem.Allocator) !void {
+    try session.navigate(example_url);
+    try session.waitFor(.dom_ready, 15_000);
+    session.waitFor(.network_idle, 10_000) catch {};
+
+    const probe = try session.evaluate(
+        "(function(){return [location.hostname, document.title, document.body ? document.body.innerText : ''].join('\\n');})();",
+    );
+    defer allocator.free(probe);
+
+    const has_domain = std.mem.indexOf(u8, probe, "example.com") != null or
+        std.mem.indexOf(u8, probe, "www.example.com") != null;
+    const has_title = std.mem.indexOf(u8, probe, "Example Domain") != null or
+        std.mem.indexOf(u8, probe, "example domain") != null or
+        std.mem.indexOf(u8, probe, "EXAMPLE DOMAIN") != null;
+
+    if (!has_domain or !has_title) {
+        return error.ExampleFetchAssertionFailed;
+    }
 }
 
 test "behavioral browser smoke matrix (opt-in)" {
@@ -54,7 +77,10 @@ test "behavioral browser smoke matrix (opt-in)" {
         .palemoon,
     };
 
-    var ran_any: bool = false;
+    var discovered_any: bool = false;
+    var fetched_any: bool = false;
+    var cdp_candidate_any: bool = false;
+    var webview_fetched_any: bool = false;
 
     for (all_kinds) |kind| {
         const installs = try driver.discover(allocator, .{
@@ -71,6 +97,7 @@ test "behavioral browser smoke matrix (opt-in)" {
             if (strict) return error.MissingBrowserInstall;
             continue;
         }
+        discovered_any = true;
 
         var session = driver.launch(allocator, .{
             .install = installs[0],
@@ -83,29 +110,37 @@ test "behavioral browser smoke matrix (opt-in)" {
         };
         defer session.deinit();
 
-        session.navigate("data:text/html,<html><body>driver-smoke</body></html>") catch |err| {
+        fetchExampleAndAssert(&session, allocator) catch |err| {
             if (strict) return err;
+            std.debug.print("behavioral fetch failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
             continue;
         };
-        session.waitFor(.dom_ready, 10_000) catch |err| {
-            if (strict) return err;
-            continue;
-        };
+        fetched_any = true;
 
-        const res = session.evaluate("document.body && document.body.textContent ? document.body.textContent : ''") catch |err| {
-            if (strict) return err;
-            continue;
-        };
-        defer allocator.free(res);
+        if (session.transport == .cdp_ws and session.endpoint != null) {
+            cdp_candidate_any = true;
+            var webview_session = driver.attachWebView(allocator, .{
+                .kind = .android_webview,
+                .endpoint = session.endpoint.?,
+            }) catch |err| {
+                if (strict) return err;
+                std.debug.print("behavioral webview attach failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
+                continue;
+            };
+            defer webview_session.deinit();
 
-        if (strict and std.mem.indexOf(u8, res, "driver-smoke") == null) {
-            return error.SmokeAssertionFailed;
+            fetchExampleAndAssert(&webview_session, allocator) catch |err| {
+                if (strict) return err;
+                std.debug.print("behavioral webview fetch failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
+                continue;
+            };
+            webview_fetched_any = true;
         }
-
-        ran_any = true;
     }
 
-    if (strict and !ran_any) return error.NoBehavioralRuns;
+    if (!discovered_any) return error.NoBehavioralRuns;
+    if (!fetched_any) return error.NoSuccessfulExampleFetch;
+    if (cdp_candidate_any and !webview_fetched_any) return error.NoSuccessfulWebViewExampleFetch;
 }
 
 test "behavioral webview bridge discovery smoke (opt-in)" {
