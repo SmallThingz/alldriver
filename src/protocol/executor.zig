@@ -9,6 +9,8 @@ const json_rpc = @import("../transport/json_rpc.zig");
 const Session = @import("../core/session.zig").Session;
 const cdp_target_poll_timeout_ms: i64 = 8_000;
 const cdp_target_poll_sleep_ms: u64 = 100;
+const startup_connect_retry_timeout_ms: i64 = 8_000;
+const startup_connect_retry_sleep_ms: u64 = 100;
 
 pub fn navigate(session: *Session, url: []const u8) !void {
     switch (session.transport) {
@@ -346,6 +348,107 @@ pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
     }
 }
 
+const RetryClock = struct {
+    ctx: *anyopaque,
+    now_ms_fn: *const fn (ctx: *anyopaque) i64,
+    sleep_ms_fn: *const fn (ctx: *anyopaque, interval_ms: u64) void,
+
+    fn nowMs(self: RetryClock) i64 {
+        return self.now_ms_fn(self.ctx);
+    }
+
+    fn sleepMs(self: RetryClock, interval_ms: u64) void {
+        self.sleep_ms_fn(self.ctx, interval_ms);
+    }
+};
+
+const WsConnectCtx = struct {
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    path: []const u8,
+};
+
+const WebDriverRequestCtx = struct {
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    method: http.HttpMethod,
+    path: []const u8,
+    body_json: ?[]const u8,
+};
+
+var system_retry_clock_dummy: u8 = 0;
+
+fn systemRetryClock() RetryClock {
+    return .{
+        .ctx = &system_retry_clock_dummy,
+        .now_ms_fn = systemNowMs,
+        .sleep_ms_fn = systemSleepMs,
+    };
+}
+
+fn systemNowMs(_: *anyopaque) i64 {
+    return std.time.milliTimestamp();
+}
+
+fn systemSleepMs(_: *anyopaque, interval_ms: u64) void {
+    std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+}
+
+fn connectWsAttempt(ctx: *const anyopaque) anyerror!ws.Client {
+    const connect_ctx: *const WsConnectCtx = @ptrCast(@alignCast(ctx));
+    return ws.Client.connect(connect_ctx.allocator, connect_ctx.host, connect_ctx.port, connect_ctx.path);
+}
+
+fn requestWebDriverAttempt(ctx: *const anyopaque) anyerror!http.Response {
+    const request_ctx: *const WebDriverRequestCtx = @ptrCast(@alignCast(ctx));
+    return http.requestJson(
+        request_ctx.allocator,
+        request_ctx.host,
+        request_ctx.port,
+        request_ctx.method,
+        request_ctx.path,
+        request_ctx.body_json,
+    );
+}
+
+fn retryTransientConnect(
+    comptime T: type,
+    attempt_ctx: *const anyopaque,
+    attempt_fn: *const fn (ctx: *const anyopaque) anyerror!T,
+    timeout_ms: i64,
+    interval_ms: u64,
+    clock: RetryClock,
+) !T {
+    const deadline_ms = clock.nowMs() + timeout_ms;
+
+    while (true) {
+        return attempt_fn(attempt_ctx) catch |err| {
+            if (!shouldRetryTransientConnect(err, clock.nowMs(), deadline_ms)) return err;
+            clock.sleepMs(interval_ms);
+            continue;
+        };
+    }
+}
+
+fn shouldRetryTransientConnect(err: anyerror, now_ms: i64, deadline_ms: i64) bool {
+    return isTransientStartupConnectError(err) and now_ms < deadline_ms;
+}
+
+fn isTransientStartupConnectError(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.ConnectionTimedOut,
+        error.NetworkUnreachable,
+        error.HostUnreachable,
+        => true,
+        else => false,
+    };
+}
+
 fn callCdp(session: *Session, method: []const u8, params_json: []const u8) ![]u8 {
     const endpoint = session.endpoint orelse return error.SessionNotReady;
     const parsed = try common.parseEndpoint(endpoint, .cdp);
@@ -359,7 +462,20 @@ fn callCdp(session: *Session, method: []const u8, params_json: []const u8) ![]u8
         actual_path = maybe_owned_path.?;
     }
 
-    var client = try ws.Client.connect(session.allocator, parsed.host, parsed.port, actual_path);
+    const connect_ctx = WsConnectCtx{
+        .allocator = session.allocator,
+        .host = parsed.host,
+        .port = parsed.port,
+        .path = actual_path,
+    };
+    var client = try retryTransientConnect(
+        ws.Client,
+        &connect_ctx,
+        connectWsAttempt,
+        startup_connect_retry_timeout_ms,
+        startup_connect_retry_sleep_ms,
+        systemRetryClock(),
+    );
     defer client.deinit();
 
     const request_id = session.nextRequestId();
@@ -374,7 +490,20 @@ fn callBidi(session: *Session, method: []const u8, params_json: []const u8) ![]u
     const endpoint = session.endpoint orelse return error.SessionNotReady;
     const parsed = try common.parseEndpoint(endpoint, .bidi);
 
-    var client = try ws.Client.connect(session.allocator, parsed.host, parsed.port, parsed.path);
+    const connect_ctx = WsConnectCtx{
+        .allocator = session.allocator,
+        .host = parsed.host,
+        .port = parsed.port,
+        .path = parsed.path,
+    };
+    var client = try retryTransientConnect(
+        ws.Client,
+        &connect_ctx,
+        connectWsAttempt,
+        startup_connect_retry_timeout_ms,
+        startup_connect_retry_sleep_ms,
+        systemRetryClock(),
+    );
     defer client.deinit();
 
     const request_id = session.nextRequestId();
@@ -425,7 +554,22 @@ fn callWebDriver(
     const full_path = try std.mem.concat(session.allocator, u8, &.{ parsed.path, suffix });
     defer session.allocator.free(full_path);
 
-    const res = try http.requestJson(session.allocator, parsed.host, parsed.port, method, full_path, body_json);
+    const request_ctx = WebDriverRequestCtx{
+        .allocator = session.allocator,
+        .host = parsed.host,
+        .port = parsed.port,
+        .method = method,
+        .path = full_path,
+        .body_json = body_json,
+    };
+    const res = try retryTransientConnect(
+        http.Response,
+        &request_ctx,
+        requestWebDriverAttempt,
+        startup_connect_retry_timeout_ms,
+        startup_connect_retry_sleep_ms,
+        systemRetryClock(),
+    );
     errdefer session.allocator.free(res.body);
 
     if (res.status_code < 200 or res.status_code >= 300) {
@@ -608,6 +752,127 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+const RetryTestClockState = struct {
+    now_ms: i64 = 0,
+    sleep_calls: usize = 0,
+};
+
+fn retryTestNowMs(ctx: *anyopaque) i64 {
+    const state: *RetryTestClockState = @ptrCast(@alignCast(ctx));
+    return state.now_ms;
+}
+
+fn retryTestSleepMs(ctx: *anyopaque, interval_ms: u64) void {
+    const state: *RetryTestClockState = @ptrCast(@alignCast(ctx));
+    state.sleep_calls += 1;
+    state.now_ms += @as(i64, @intCast(interval_ms));
+}
+
+test "startup retry retries transient connect failures" {
+    const AttemptState = struct {
+        attempts: usize = 0,
+        fail_count: usize,
+    };
+
+    const Runner = struct {
+        fn run(ctx: *const anyopaque) anyerror!u8 {
+            const state: *AttemptState = @ptrCast(@alignCast(@constCast(ctx)));
+            state.attempts += 1;
+            if (state.attempts <= state.fail_count) return error.ConnectionRefused;
+            return 1;
+        }
+    };
+
+    var clock_state: RetryTestClockState = .{};
+    var attempt_state: AttemptState = .{ .fail_count = 2 };
+    const value = try retryTransientConnect(
+        u8,
+        &attempt_state,
+        Runner.run,
+        8_000,
+        100,
+        .{
+            .ctx = &clock_state,
+            .now_ms_fn = retryTestNowMs,
+            .sleep_ms_fn = retryTestSleepMs,
+        },
+    );
+
+    try std.testing.expectEqual(@as(u8, 1), value);
+    try std.testing.expectEqual(@as(usize, 3), attempt_state.attempts);
+    try std.testing.expectEqual(@as(usize, 2), clock_state.sleep_calls);
+}
+
+test "startup retry fails fast for non transient connect failures" {
+    const AttemptState = struct {
+        attempts: usize = 0,
+    };
+
+    const Runner = struct {
+        fn run(ctx: *const anyopaque) anyerror!u8 {
+            const state: *AttemptState = @ptrCast(@alignCast(@constCast(ctx)));
+            state.attempts += 1;
+            return error.HandshakeFailed;
+        }
+    };
+
+    var clock_state: RetryTestClockState = .{};
+    var attempt_state: AttemptState = .{};
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        retryTransientConnect(
+            u8,
+            &attempt_state,
+            Runner.run,
+            8_000,
+            100,
+            .{
+                .ctx = &clock_state,
+                .now_ms_fn = retryTestNowMs,
+                .sleep_ms_fn = retryTestSleepMs,
+            },
+        ),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), attempt_state.attempts);
+    try std.testing.expectEqual(@as(usize, 0), clock_state.sleep_calls);
+}
+
+test "startup retry deadline expiry returns transient connect error" {
+    const AttemptState = struct {
+        attempts: usize = 0,
+    };
+
+    const Runner = struct {
+        fn run(ctx: *const anyopaque) anyerror!u8 {
+            const state: *AttemptState = @ptrCast(@alignCast(@constCast(ctx)));
+            state.attempts += 1;
+            return error.ConnectionRefused;
+        }
+    };
+
+    var clock_state: RetryTestClockState = .{};
+    var attempt_state: AttemptState = .{};
+    try std.testing.expectError(
+        error.ConnectionRefused,
+        retryTransientConnect(
+            u8,
+            &attempt_state,
+            Runner.run,
+            250,
+            100,
+            .{
+                .ctx = &clock_state,
+                .now_ms_fn = retryTestNowMs,
+                .sleep_ms_fn = retryTestSleepMs,
+            },
+        ),
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), attempt_state.attempts);
+    try std.testing.expectEqual(@as(usize, 3), clock_state.sleep_calls);
 }
 
 test "escape json string" {

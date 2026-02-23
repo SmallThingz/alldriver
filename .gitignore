@@ -1,4 +1,36 @@
 .zig-cache
 .zig-global-cache
 zig-out
-artifacts
+artifacts/
+
+# Example artifacts.
+example-screenshot.png
+example-trace.json
+
+# Native binaries and debug symbols.
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+*.pdb
+
+# VM disk/image artifacts.
+*.qcow2
+*.img
+*.iso
+*.vdi
+*.vmdk
+*.vhd
+*.vhdx
+
+# Local release/package artifacts.
+*.zip
+*.tar
+*.tgz
+*.tar.gz
+*.tar.xz
+*.7z

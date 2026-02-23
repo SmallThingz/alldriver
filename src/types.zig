@@ -190,4 +190,5 @@ pub const LaunchError = error{
     OutOfMemory,
     UnsupportedEngine,
     SpawnFailed,
+    PersistentProfileDirRequired,
 };

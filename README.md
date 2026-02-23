@@ -51,6 +51,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 ```
 
+## Profile Modes
+- `.persistent` requires `profile_dir` and reuses that exact directory across runs.
+- `.ephemeral` uses an isolated profile directory and deletes it on `session.deinit()`.
+- `.ephemeral` is not incognito/private mode; it is disposable profile storage.
+- For WebKit/unknown targets, profile isolation is applied with sandboxed env directories under the effective profile root.
+
 ## Examples
 - Many end-to-end usage examples live in `/home/a/projects/zig/browser_driver/examples/README.md`.
 - Build all examples with: `zig build examples`

@@ -8,6 +8,8 @@ This folder contains many focused usage examples for `browser_driver`.
 zig build examples
 ```
 
+Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/examples`.
+
 ## Example Index
 
 - `01_discover.zig`: discover installed browsers and print scored candidates.
@@ -29,3 +31,6 @@ zig build examples
 - Some examples require installed browsers and local debug endpoints.
 - Mobile bridge examples require host tooling (`adb`, `ios_webkit_debug_proxy`, `tidevice`) and forwarded endpoints.
 - Examples are designed as minimal building blocks and can be composed into larger automation harnesses.
+- Profile mode semantics:
+- `.persistent` requires `profile_dir` and keeps data at that path.
+- `.ephemeral` creates an isolated disposable profile directory that is deleted on session teardown.

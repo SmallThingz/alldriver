@@ -180,7 +180,10 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        examples_step.dependOn(&example_exe.step);
+        const install_example = b.addInstallArtifact(example_exe, .{
+            .dest_dir = .{ .override = .{ .custom = "examples" } },
+        });
+        examples_step.dependOn(&install_example.step);
     }
 
     // Creates an executable that will run `test` blocks from the provided module.

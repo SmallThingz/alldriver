@@ -36,6 +36,7 @@ pub const LaunchError = error{
     SpawnFailed,
     UnsupportedEngine,
     OutOfMemory,
+    PersistentProfileDirRequired,
 };
 
 pub const WebViewError = error{

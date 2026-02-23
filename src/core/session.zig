@@ -23,6 +23,7 @@ pub const Session = struct {
 
     child: ?std.process.Child = null,
     owned_argv: ?[]const []const u8 = null,
+    ephemeral_profile_dir: ?[]u8 = null,
 
     rules: std.ArrayList(types.NetworkRule) = .empty,
     on_request: ?*const fn (types.RequestEvent) void = null,
@@ -40,6 +41,11 @@ pub const Session = struct {
         if (self.owned_argv) |args| {
             for (args) |arg| self.allocator.free(arg);
             self.allocator.free(args);
+        }
+
+        if (self.ephemeral_profile_dir) |profile_dir| {
+            std.fs.cwd().deleteTree(profile_dir) catch {};
+            self.allocator.free(profile_dir);
         }
 
         for (self.rules.items) |rule| {

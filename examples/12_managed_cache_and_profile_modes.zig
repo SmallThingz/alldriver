@@ -34,7 +34,7 @@ pub fn main() !void {
     try persistent.navigate("https://example.com");
     try persistent.waitFor(.dom_ready, 10_000);
 
-    // Ephemeral launch.
+    // Ephemeral launch (isolated disposable profile that is deleted on deinit).
     var ephemeral = try driver.launch(allocator, .{
         .install = installs[0],
         .profile_mode = .ephemeral,
