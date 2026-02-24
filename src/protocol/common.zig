@@ -89,11 +89,17 @@ pub fn parseEndpoint(endpoint: []const u8, default_adapter: AdapterKind) !Endpoi
     }
 
     var adapter = default_adapter;
-    if (std.mem.eql(u8, scheme, "cdp") or std.mem.eql(u8, scheme, "ws")) {
+    if (std.mem.eql(u8, scheme, "cdp") or
+        std.mem.eql(u8, scheme, "ws") or
+        std.mem.eql(u8, scheme, "wss"))
+    {
         adapter = .cdp;
     } else if (std.mem.eql(u8, scheme, "bidi")) {
         adapter = .bidi;
-    } else if (std.mem.eql(u8, scheme, "webdriver") or std.mem.eql(u8, scheme, "http")) {
+    } else if (std.mem.eql(u8, scheme, "webdriver") or
+        std.mem.eql(u8, scheme, "http") or
+        std.mem.eql(u8, scheme, "https"))
+    {
         adapter = .webdriver;
     }
 
@@ -107,11 +113,10 @@ pub fn parseEndpoint(endpoint: []const u8, default_adapter: AdapterKind) !Endpoi
 
     const port: u16 = if (colon) |idx|
         try std.fmt.parseInt(u16, host_port[idx + 1 ..], 10)
-    else
-        switch (adapter) {
-            .cdp, .bidi => 9222,
-            .webdriver => 4444,
-        };
+    else switch (adapter) {
+        .cdp, .bidi => 9222,
+        .webdriver => 4444,
+    };
 
     return .{ .adapter = adapter, .host = host, .port = port, .path = path };
 }
@@ -122,4 +127,12 @@ test "parse endpoint defaults" {
     try std.testing.expectEqual(@as(u16, 9222), parsed.port);
     try std.testing.expect(std.mem.eql(u8, parsed.host, "127.0.0.1"));
     try std.testing.expect(std.mem.eql(u8, parsed.path, "/devtools/page/1"));
+}
+
+test "preferred adapter contract stays driverless for chromium and gecko" {
+    try std.testing.expectEqual(AdapterKind.cdp, preferredAdapterForEngine(.chromium));
+    try std.testing.expectEqual(AdapterKind.bidi, preferredAdapterForEngine(.gecko));
+    try std.testing.expectEqual(AdapterKind.webdriver, preferredAdapterForEngine(.webkit));
+    try std.testing.expectEqual(TransportKind.cdp_ws, transportForAdapter(.cdp));
+    try std.testing.expectEqual(TransportKind.bidi_ws, transportForAdapter(.bidi));
 }

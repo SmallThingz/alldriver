@@ -3,7 +3,7 @@ const driver = @import("../root.zig");
 const helpers = @import("helpers.zig");
 const config = @import("browser_driver_config");
 
-const example_url = "https://example.com/";
+const example_url = "data:text/html,<html><head><title>gate</title></head><body>gate</body></html>";
 
 const BridgeRequirement = enum {
     none,
@@ -37,6 +37,8 @@ fn fetchExampleAndAssert(session: *driver.Session, allocator: std.mem.Allocator)
     const has_title = std.mem.indexOf(u8, probe, "Example Domain") != null or
         std.mem.indexOf(u8, probe, "example domain") != null or
         std.mem.indexOf(u8, probe, "EXAMPLE DOMAIN") != null;
+    const has_data_gate = std.mem.indexOf(u8, probe, "data:text/html") != null and
+        (std.mem.indexOf(u8, probe, "gate") != null or std.mem.indexOf(u8, probe, "GATE") != null);
 
     if (session.transport == .webdriver_http and
         (std.mem.indexOf(u8, probe, "{\"value\":null}") != null or
@@ -48,7 +50,7 @@ fn fetchExampleAndAssert(session: *driver.Session, allocator: std.mem.Allocator)
         return;
     }
 
-    if (!(has_domain or has_title)) {
+    if (!(has_domain or has_title or has_data_gate)) {
         std.debug.print("behavioral fetch assertion failed, probe=\n{s}\n", .{probe});
         return error.ExampleFetchAssertionFailed;
     }

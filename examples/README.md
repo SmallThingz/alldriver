@@ -30,10 +30,10 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 ## Notes
 
 - Some examples require installed browsers and local debug endpoints.
-- Mobile bridge examples require host tooling (`adb`, `ios_webkit_debug_proxy`, `tidevice`) and forwarded endpoints.
+- Mobile bridge examples require host tooling (`adb` or `shizuku`/`rish` for Android, `ios_webkit_debug_proxy` or `tidevice` for iOS) and forwarded endpoints.
 - WebKitGTK automation uses `WebKitWebDriver` as the primary runtime entrypoint, and can target MiniBrowser via `webkitgtk:browserOptions` (`browser_target` + `browser_binary_path`).
 - Launch APIs support `ignore_tls_errors = true` for environments with self-signed or invalid certificates.
 - Examples are designed as minimal building blocks and can be composed into larger automation harnesses.
 - Profile mode semantics:
-- `.persistent` requires `profile_dir` and keeps data at that path.
-- `.ephemeral` creates an isolated disposable profile directory that is deleted on session teardown.
+  `.persistent` requires `profile_dir` and keeps data at that path.
+  `.ephemeral` creates an isolated disposable profile directory that is deleted on session teardown.

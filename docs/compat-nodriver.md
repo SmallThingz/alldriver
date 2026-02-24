@@ -6,6 +6,11 @@ The compatibility facade is available at:
 ## Purpose
 Provide a migration-friendly API shape over the idiomatic Zig core runtime.
 
+## Behavior Contract
+- Facade launch is Chromium-only (`chrome`, `edge`, `brave`, plus `lightpanda` only when built with `-Dinclude_lightpanda_browser=true`).
+- Chromium sessions are driverless (CDP transport), matching nodriver-style operation.
+- Facade does not fall back to WebDriver engines.
+
 ## Mapping
 | nodriver-style concept | Zig facade |
 |---|---|

@@ -708,9 +708,16 @@ const DetectionSignals = struct {
     js_webdriver_true: bool = false,
     js_webdriver_prop_present: bool = false,
     js_webdriver_descriptor_present: bool = false,
+    js_webdriver_dom_attribute_present: bool = false,
     js_headless_ua_true: bool = false,
     js_automation_globals_present: bool = false,
     js_dom_automation_present: bool = false,
+    js_playwright_globals_present: bool = false,
+    js_puppeteer_globals_present: bool = false,
+    js_selenium_globals_present: bool = false,
+    js_phantom_globals_present: bool = false,
+    js_outer_dimensions_zero: bool = false,
+    js_webgl_swiftshader_present: bool = false,
     js_languages_empty: bool = false,
     js_plugins_empty: bool = false,
 
@@ -756,18 +763,54 @@ const DetectionSignals = struct {
         if (self.js_webdriver_true) count += 1;
         if (self.js_automation_globals_present) count += 1;
         if (self.js_dom_automation_present) count += 1;
+        if (self.js_playwright_globals_present) count += 1;
+        if (self.js_puppeteer_globals_present) count += 1;
+        if (self.js_selenium_globals_present) count += 1;
+        if (self.js_phantom_globals_present) count += 1;
         return count;
     }
 
     fn webObservableCount(self: DetectionSignals) usize {
         var count: usize = 0;
         if (self.js_webdriver_true) count += 1;
+        if (self.js_webdriver_prop_present) count += 1;
+        if (self.js_webdriver_descriptor_present) count += 1;
+        if (self.js_webdriver_dom_attribute_present) count += 1;
         if (self.js_headless_ua_true) count += 1;
         if (self.js_automation_globals_present) count += 1;
         if (self.js_dom_automation_present) count += 1;
+        if (self.js_playwright_globals_present) count += 1;
+        if (self.js_puppeteer_globals_present) count += 1;
+        if (self.js_selenium_globals_present) count += 1;
+        if (self.js_phantom_globals_present) count += 1;
+        if (self.js_outer_dimensions_zero) count += 1;
+        if (self.js_webgl_swiftshader_present) count += 1;
         if (self.js_languages_empty) count += 1;
         if (self.js_plugins_empty) count += 1;
         return count;
+    }
+
+    fn weightedScore(self: DetectionSignals) usize {
+        var score: usize = 0;
+
+        if (self.js_webdriver_true) score += 8;
+        if (self.js_automation_globals_present) score += 8;
+        if (self.js_dom_automation_present) score += 8;
+        if (self.js_playwright_globals_present) score += 8;
+        if (self.js_puppeteer_globals_present) score += 8;
+        if (self.js_selenium_globals_present) score += 8;
+        if (self.js_phantom_globals_present) score += 8;
+
+        if (self.js_webdriver_prop_present) score += 3;
+        if (self.js_webdriver_descriptor_present) score += 2;
+        if (self.js_webdriver_dom_attribute_present) score += 3;
+        if (self.js_headless_ua_true) score += 3;
+        if (self.js_outer_dimensions_zero) score += 2;
+        if (self.js_webgl_swiftshader_present) score += 2;
+        if (self.js_languages_empty) score += 1;
+        if (self.js_plugins_empty) score += 1;
+
+        return score;
     }
 };
 
@@ -775,6 +818,7 @@ const DetectionClassification = struct {
     signals: DetectionSignals,
     signal_count: usize,
     high_confidence_count: usize,
+    score: usize,
     detected: bool,
 };
 
@@ -843,7 +887,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         if (install_opt == null) {
             totals.skipped += 1;
             try report.writer(allocator).print(
-                "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_install\n",
+                "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=missing_install\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(driver.engineFor(kind)), host_platform },
             );
             continue;
@@ -860,6 +904,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             .install = install,
             .profile_mode = .ephemeral,
             .headless = true,
+            .gecko_stealth_prefs = true,
             .args = &.{},
         }) catch |err| {
             totals.failed += 1;
@@ -868,7 +913,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 .legacy => totals.legacy_failed += 1,
             }
             try report.writer(allocator).print(
-                "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_error error={s}\n",
+                "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
             );
             continue;
@@ -880,7 +925,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         const classification = probeSessionForSignals(
             &session,
             allocator,
-            true,
+            api_tier == .modern,
             null,
             null,
             null,
@@ -891,7 +936,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 .legacy => totals.legacy_failed += 1,
             }
             try report.writer(allocator).print(
-                "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
+                "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
             );
             continue;
@@ -909,7 +954,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         }
 
         try report.writer(allocator).print(
-            "target=browser api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched=1 probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
+            "target=browser api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched=1 probed=1 detected={d} signal_count={d} high_confidence_count={d} score={d} reason={s}\n",
             .{
                 apiTierName(api_tier),
                 @tagName(kind),
@@ -919,6 +964,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 @intFromBool(classification.detected),
                 classification.signal_count,
                 classification.high_confidence_count,
+                classification.score,
                 if (classification.detected) "detection_signals_present" else "detection_signals_absent",
             },
         );
@@ -936,13 +982,22 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         if (runtime_opt == null) {
             totals.skipped += 1;
             try report.writer(allocator).print(
-                "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_runtime\n",
+                "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=missing_runtime\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(webviewEngineForKind(kind)), webViewPlatformName(kind, host_platform) },
             );
             continue;
         }
 
         const runtime = runtime_opt.?;
+        if (!isRuntimeProbeReachable(runtime)) {
+            totals.skipped += 1;
+            try report.writer(allocator).print(
+                "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=bridge_endpoint_unreachable\n",
+                .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform) },
+            );
+            continue;
+        }
+
         totals.discovered += 1;
         switch (api_tier) {
             .modern => totals.modern_discovered += 1,
@@ -956,7 +1011,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 .legacy => totals.legacy_failed += 1,
             }
             try report.writer(allocator).print(
-                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_or_attach_error error={s}\n",
+                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_or_attach_error error={s}\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
             );
             continue;
@@ -968,7 +1023,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         const classification = probeSessionForSignals(
             &probe_session.session,
             allocator,
-            true,
+            api_tier == .modern,
             kind,
             runtime.runtime_path,
             runtime.bridge_tool_path,
@@ -979,7 +1034,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 .legacy => totals.legacy_failed += 1,
             }
             try report.writer(allocator).print(
-                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
+                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
                 .{
                     apiTierName(api_tier),
                     @tagName(kind),
@@ -1004,7 +1059,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         }
 
         try report.writer(allocator).print(
-            "target=webview api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched={d} probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
+            "target=webview api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched={d} probed=1 detected={d} signal_count={d} high_confidence_count={d} score={d} reason={s}\n",
             .{
                 apiTierName(api_tier),
                 @tagName(kind),
@@ -1015,6 +1070,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 @intFromBool(classification.detected),
                 classification.signal_count,
                 classification.high_confidence_count,
+                classification.score,
                 if (classification.detected) "detection_signals_present" else "detection_signals_absent",
             },
         );
@@ -1096,11 +1152,15 @@ fn classifySignals(signals: DetectionSignals) DetectionClassification {
     const signal_count = signals.signalCount();
     const high_confidence_count = signals.highConfidenceCount();
     const web_observable_count = signals.webObservableCount();
+    const score = signals.weightedScore();
     return .{
         .signals = signals,
         .signal_count = signal_count,
         .high_confidence_count = high_confidence_count,
-        .detected = high_confidence_count > 0 or web_observable_count >= 3,
+        .score = score,
+        .detected = high_confidence_count > 0 or
+            web_observable_count >= 5 or
+            score >= 20,
     };
 }
 
@@ -1251,6 +1311,21 @@ fn launchOrAttachWebViewForProbe(allocator: Allocator, runtime: driver.WebViewRu
     }
 }
 
+fn isRuntimeProbeReachable(runtime: driver.WebViewRuntime) bool {
+    return switch (runtime.kind) {
+        .android_webview => tcpEndpointReachable("127.0.0.1", 9222),
+        .ios_wkwebview => tcpEndpointReachable("127.0.0.1", 9221),
+        else => true,
+    };
+}
+
+fn tcpEndpointReachable(host: []const u8, port: u16) bool {
+    const address = std.net.Address.parseIp(host, port) catch return false;
+    const stream = std.net.tcpConnectToAddress(address) catch return false;
+    stream.close();
+    return true;
+}
+
 fn inferAndroidBridgeKind(path: ?[]const u8) driver.AndroidBridgeKind {
     const p = path orelse return .adb;
     if (containsIgnoreCase(p, "shizuku")) return .shizuku;
@@ -1298,9 +1373,16 @@ fn probeSessionForSignals(
                 "try{s.push(navigator.webdriver===true?'BROWSER_DRIVER_SIG_WEBDRIVER_TRUE':'BROWSER_DRIVER_SIG_WEBDRIVER_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_ERROR');}" ++
                 "try{s.push(('webdriver' in navigator)?'BROWSER_DRIVER_SIG_WEBDRIVER_PROP_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_PROP_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_PROP_ERROR');}" ++
                 "try{var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver');s.push(d?'BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_ERROR');}" ++
-                "try{s.push(/Headless/i.test(navigator.userAgent)?'BROWSER_DRIVER_SIG_HEADLESS_UA_TRUE':'BROWSER_DRIVER_SIG_HEADLESS_UA_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_HEADLESS_UA_ERROR');}" ++
+                "try{var de=(document&&document.documentElement);s.push((de&&de.hasAttribute&&de.hasAttribute('webdriver'))?'BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_ERROR');}" ++
+                "try{s.push(/Headless|PhantomJS|SlimerJS/i.test(navigator.userAgent)?'BROWSER_DRIVER_SIG_HEADLESS_UA_TRUE':'BROWSER_DRIVER_SIG_HEADLESS_UA_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_HEADLESS_UA_ERROR');}" ++
                 "try{var g=false;for(var k in window){if(k.indexOf('cdc_')===0||k.indexOf('__webdriver')===0){g=true;break;}}s.push(g?'BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_ERROR');}" ++
                 "try{s.push((window.domAutomation||window.domAutomationController)?'BROWSER_DRIVER_SIG_DOM_AUTOMATION_TRUE':'BROWSER_DRIVER_SIG_DOM_AUTOMATION_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_DOM_AUTOMATION_ERROR');}" ++
+                "try{s.push((window.__playwright__binding__||window.__pwInitScripts)?'BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_ERROR');}" ++
+                "try{s.push((window.__puppeteer_evaluation_script__||window.__puppeteer_stealth__)?'BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_ERROR');}" ++
+                "try{s.push((window.__webdriver_script_fn||window.__driver_evaluate||window.__webdriver_evaluate||window.__selenium_unwrapped||window.__fxdriver_unwrapped||window._Selenium_IDE_Recorder)?'BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_ERROR');}" ++
+                "try{s.push((window.callPhantom||window._phantom||window.phantom||window.__nightmare)?'BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_ERROR');}" ++
+                "try{s.push((window.outerWidth===0||window.outerHeight===0)?'BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_TRUE':'BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_ERROR');}" ++
+                "try{var sw=false;var c=document.createElement('canvas');var gl=c.getContext('webgl')||c.getContext('experimental-webgl');if(gl){var ext=gl.getExtension('WEBGL_debug_renderer_info');if(ext){var r=gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)||'';sw=/swiftshader/i.test(String(r));}}s.push(sw?'BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_TRUE':'BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_ERROR');}" ++
                 "try{s.push((navigator.languages&&navigator.languages.length===0)?'BROWSER_DRIVER_SIG_LANG_EMPTY_TRUE':'BROWSER_DRIVER_SIG_LANG_EMPTY_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_LANG_EMPTY_ERROR');}" ++
                 "try{s.push((navigator.plugins&&navigator.plugins.length===0)?'BROWSER_DRIVER_SIG_PLUGINS_EMPTY_TRUE':'BROWSER_DRIVER_SIG_PLUGINS_EMPTY_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PLUGINS_EMPTY_ERROR');}" ++
                 "return s.join('|');})();",
@@ -1310,9 +1392,16 @@ fn probeSessionForSignals(
         signals.js_webdriver_true = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_TRUE");
         signals.js_webdriver_prop_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_PROP_PRESENT");
         signals.js_webdriver_descriptor_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT");
+        signals.js_webdriver_dom_attribute_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_PRESENT");
         signals.js_headless_ua_true = containsToken(js_payload, "BROWSER_DRIVER_SIG_HEADLESS_UA_TRUE");
         signals.js_automation_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_TRUE");
         signals.js_dom_automation_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_DOM_AUTOMATION_TRUE");
+        signals.js_playwright_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_TRUE");
+        signals.js_puppeteer_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_TRUE");
+        signals.js_selenium_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_TRUE");
+        signals.js_phantom_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_TRUE");
+        signals.js_outer_dimensions_zero = containsToken(js_payload, "BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_TRUE");
+        signals.js_webgl_swiftshader_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_TRUE");
         signals.js_languages_empty = containsToken(js_payload, "BROWSER_DRIVER_SIG_LANG_EMPTY_TRUE");
         signals.js_plugins_empty = containsToken(js_payload, "BROWSER_DRIVER_SIG_PLUGINS_EMPTY_TRUE");
     }
@@ -3097,6 +3186,29 @@ test "adversarial classification requires threshold when no high confidence sign
     try std.testing.expect(!classification.detected);
     try std.testing.expectEqual(@as(usize, 3), classification.signal_count);
     try std.testing.expectEqual(@as(usize, 0), classification.high_confidence_count);
+}
+
+test "adversarial classification keeps webdriver triad as non-fatal without high confidence signals" {
+    var signals: DetectionSignals = .{};
+    signals.js_webdriver_prop_present = true;
+    signals.js_webdriver_descriptor_present = true;
+    signals.js_headless_ua_true = true;
+
+    const classification = classifySignals(signals);
+    try std.testing.expect(!classification.detected);
+    try std.testing.expectEqual(@as(usize, 0), classification.high_confidence_count);
+    try std.testing.expect(classification.score >= 5);
+}
+
+test "adversarial classification treats launch transport combo as diagnostic only" {
+    var signals: DetectionSignals = .{};
+    signals.launch_arg_headless = true;
+    signals.launch_arg_remote_debugging = true;
+
+    const classification = classifySignals(signals);
+    try std.testing.expect(!classification.detected);
+    try std.testing.expectEqual(@as(usize, 0), classification.high_confidence_count);
+    try std.testing.expectEqual(@as(usize, 0), classification.score);
 }
 
 test "adversarial classification ignores transport and endpoint markers without web observable signals" {

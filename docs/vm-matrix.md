@@ -88,4 +88,4 @@ zig build tools -- vm-ga-collect-and-bundle \
 ## Notes
 - `zig build` supports QEMU-assisted foreign execution with `-fqemu` for cross-arch binaries on Linux hosts.
 - Full browser parity still depends on installed browsers/drivers in each target host/VM.
-- Mobile webview bridge smoke requires host toolchains (`adb`, `ios_webkit_debug_proxy` or `tidevice`) on the relevant matrix host.
+- Mobile webview bridge smoke requires host toolchains (`adb` or `shizuku` for Android, `ios_webkit_debug_proxy` or `tidevice` for iOS) on the relevant matrix host.

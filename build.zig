@@ -21,6 +21,11 @@ pub fn build(b: *std.Build) void {
         "enable_builtin_extension",
         "Enable the built-in compile-time extension adapter",
     ) orelse false;
+    const include_lightpanda_browser = b.option(
+        bool,
+        "include_lightpanda_browser",
+        "Bundle Lightpanda browser from lazy dependency metadata and enable Lightpanda discovery",
+    ) orelse false;
     const vm_lab_dir = b.option(
         []const u8,
         "vm_lab_dir",
@@ -31,8 +36,15 @@ pub fn build(b: *std.Build) void {
         "vm_host",
         "Registered remote host name for vm-remote-matrix step",
     ) orelse "";
+    var lightpanda_bundle_root: []const u8 = "";
+    if (include_lightpanda_browser) {
+        const lightpanda_dep = b.lazyDependency("lightpanda_browser", .{}) orelse return;
+        lightpanda_bundle_root = lightpanda_dep.path(".").getPath(b);
+    }
     const config = b.addOptions();
     config.addOption(bool, "enable_builtin_extension", enable_builtin_extension);
+    config.addOption(bool, "include_lightpanda_browser", include_lightpanda_browser);
+    config.addOption([]const u8, "lightpanda_bundle_root", lightpanda_bundle_root);
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -115,6 +127,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/tools_main.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "browser_driver", .module = mod },
+                .{ .name = "browser_driver_config", .module = config.createModule() },
+            },
         }),
     });
     b.installArtifact(tools_exe);
@@ -166,6 +182,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "example-11-mobile-webview-attach", .path = "examples/11_mobile_webview_attach.zig" },
         .{ .name = "example-12-managed-cache-and-profile-modes", .path = "examples/12_managed_cache_and_profile_modes.zig" },
         .{ .name = "example-13-capability-aware-flow", .path = "examples/13_capability_aware_flow.zig" },
+        .{ .name = "example-14-electron-webview", .path = "examples/14_electron_webview.zig" },
     };
     const examples_step = b.step("examples", "Build all library usage examples");
     inline for (example_specs) |spec| {

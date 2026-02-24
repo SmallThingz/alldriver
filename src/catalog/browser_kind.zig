@@ -17,6 +17,7 @@ pub const BrowserKind = enum {
     sidekick,
     shift,
     operagx,
+    lightpanda,
     palemoon,
 };
 
@@ -53,6 +54,7 @@ pub fn engineFor(kind: BrowserKind) EngineKind {
         .sidekick,
         .shift,
         .operagx,
+        .lightpanda,
         => .chromium,
         .firefox,
         .tor,
@@ -87,6 +89,10 @@ pub fn parseBrowserKind(name: []const u8) ?BrowserKind {
     if (std.mem.eql(u8, lowered, "sidekick")) return .sidekick;
     if (std.mem.eql(u8, lowered, "shift")) return .shift;
     if (std.mem.eql(u8, lowered, "operagx")) return .operagx;
+    if (std.mem.eql(u8, lowered, "lightpanda") or
+        std.mem.eql(u8, lowered, "lightpanda-browser") or
+        std.mem.eql(u8, lowered, "lightpanda browser") or
+        std.mem.eql(u8, lowered, "lightpanda-io/browser")) return .lightpanda;
     if (std.mem.eql(u8, lowered, "pale moon") or std.mem.eql(u8, lowered, "palemoon")) return .palemoon;
 
     return null;

@@ -7,7 +7,7 @@ pub fn main() !void {
     const gpa = gpa_state.allocator();
 
     const installs = try browser_driver.discover(gpa, .{
-        .kinds = &.{ .chrome, .edge, .safari, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf, .epic, .arc, .vivaldi, .sigmaos, .sidekick, .shift, .operagx, .palemoon },
+        .kinds = &.{ .chrome, .edge, .safari, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf, .epic, .arc, .vivaldi, .sigmaos, .sidekick, .shift, .operagx, .lightpanda, .palemoon },
         .allow_managed_download = false,
     }, .{});
     defer browser_driver.freeInstalls(gpa, installs);

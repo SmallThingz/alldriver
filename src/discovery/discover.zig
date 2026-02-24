@@ -9,6 +9,7 @@ const linux_sources = @import("linux_sources.zig");
 const cache_manager = @import("../provision/cache_manager.zig");
 const extensions = @import("../extensions/api.zig");
 const util = @import("util.zig");
+const config = @import("browser_driver_config");
 
 const Candidate = struct {
     install: types.BrowserInstall,
@@ -20,7 +21,13 @@ pub fn discover(
     prefs: types.BrowserPreference,
     opts: types.DiscoveryOptions,
 ) ![]types.BrowserInstall {
-    const kinds = if (prefs.kinds.len == 0) path_table.all_browser_kinds[0..] else prefs.kinds;
+    const requested_kinds = if (prefs.kinds.len == 0) path_table.all_browser_kinds[0..] else prefs.kinds;
+    const kinds = try filterEnabledKinds(allocator, requested_kinds);
+    defer allocator.free(kinds);
+
+    if (kinds.len == 0) {
+        return allocator.alloc(types.BrowserInstall, 0);
+    }
 
     var candidates: std.ArrayList(Candidate) = .empty;
     var keys: std.ArrayList([]u8) = .empty;
@@ -64,6 +71,8 @@ pub fn discover(
             },
         );
     }
+
+    try appendBundledLightpandaCandidate(allocator, &candidates, &dedup, &keys, kinds);
 
     if (prefs.allow_managed_download) {
         const managed_hits = try cache_manager.discoverManaged(allocator, kinds, prefs.managed_cache_dir);
@@ -166,6 +175,103 @@ pub fn discover(
     dedup.deinit();
 
     return installs;
+}
+
+fn lightpandaBundleEnabled() bool {
+    return @hasDecl(config, "include_lightpanda_browser") and config.include_lightpanda_browser;
+}
+
+fn lightpandaBundleRoot() ?[]const u8 {
+    if (!@hasDecl(config, "lightpanda_bundle_root")) return null;
+    const root = config.lightpanda_bundle_root;
+    if (root.len == 0) return null;
+    return root;
+}
+
+fn isBrowserKindEnabled(kind: types.BrowserKind) bool {
+    return switch (kind) {
+        .lightpanda => lightpandaBundleEnabled(),
+        else => true,
+    };
+}
+
+fn filterEnabledKinds(
+    allocator: std.mem.Allocator,
+    requested: []const types.BrowserKind,
+) ![]types.BrowserKind {
+    var count: usize = 0;
+    for (requested) |kind| {
+        if (isBrowserKindEnabled(kind)) count += 1;
+    }
+
+    const filtered = try allocator.alloc(types.BrowserKind, count);
+    var idx: usize = 0;
+    for (requested) |kind| {
+        if (!isBrowserKindEnabled(kind)) continue;
+        filtered[idx] = kind;
+        idx += 1;
+    }
+    return filtered;
+}
+
+fn hasKind(kinds: []const types.BrowserKind, kind: types.BrowserKind) bool {
+    for (kinds) |candidate| {
+        if (candidate == kind) return true;
+    }
+    return false;
+}
+
+fn appendBundledLightpandaCandidate(
+    allocator: std.mem.Allocator,
+    candidates: *std.ArrayList(Candidate),
+    dedup: *std.StringHashMap(usize),
+    keys: *std.ArrayList([]u8),
+    kinds: []const types.BrowserKind,
+) !void {
+    if (!lightpandaBundleEnabled()) return;
+    if (!hasKind(kinds, .lightpanda)) return;
+
+    const root = lightpandaBundleRoot() orelse return;
+    const rel_candidates = switch (catalog.nativePlatform()) {
+        .windows => &[_][]const u8{
+            "bin/windows/lightpanda.exe",
+            "bin/lightpanda.exe",
+        },
+        .macos => &[_][]const u8{
+            "bin/macos/lightpanda",
+            "bin/lightpanda",
+        },
+        .linux => &[_][]const u8{
+            "bin/linux/lightpanda",
+            "bin/lightpanda",
+        },
+    };
+
+    for (rel_candidates) |rel| {
+        const candidate_path = std.fs.path.join(allocator, &.{ root, rel }) catch continue;
+        if (!util.exists(candidate_path)) {
+            allocator.free(candidate_path);
+            continue;
+        }
+
+        try appendCandidate(
+            allocator,
+            candidates,
+            dedup,
+            keys,
+            .{
+                .install = .{
+                    .kind = .lightpanda,
+                    .engine = .chromium,
+                    .path = candidate_path,
+                    .version = null,
+                    .source = .managed_cache,
+                },
+                .score = 260,
+            },
+        );
+        return;
+    }
 }
 
 fn appendWindowsHits(
@@ -330,6 +436,7 @@ fn inferKindFromPath(path: []const u8, preferred_kinds: []const types.BrowserKin
     if (containsIgnoreCase(base, "edge") or containsIgnoreCase(base, "msedge")) return .edge;
     if (containsIgnoreCase(base, "vivaldi")) return .vivaldi;
     if (containsIgnoreCase(base, "brave")) return .brave;
+    if (containsIgnoreCase(base, "lightpanda") and hasKind(preferred_kinds, .lightpanda)) return .lightpanda;
     if (containsIgnoreCase(base, "palemoon")) return .palemoon;
 
     return if (preferred_kinds.len > 0) preferred_kinds[0] else .chrome;
@@ -443,6 +550,7 @@ test "infer kind from path recognizes major browser names case-insensitively" {
         .sidekick,
         .shift,
         .operagx,
+        .lightpanda,
         .palemoon,
     };
 
@@ -451,7 +559,22 @@ test "infer kind from path recognizes major browser names case-insensitively" {
     try std.testing.expectEqual(types.BrowserKind.edge, inferKindFromPath("C:\\Program Files\\MSEdge.EXE", &kinds));
     try std.testing.expectEqual(types.BrowserKind.vivaldi, inferKindFromPath("/opt/vivaldi-stable", &kinds));
     try std.testing.expectEqual(types.BrowserKind.brave, inferKindFromPath("/usr/bin/brave-browser", &kinds));
+    try std.testing.expectEqual(types.BrowserKind.lightpanda, inferKindFromPath("/usr/bin/lightpanda-browser", &kinds));
     try std.testing.expectEqual(types.BrowserKind.palemoon, inferKindFromPath("/usr/bin/PaleMoon", &kinds));
+}
+
+test "filterEnabledKinds gates lightpanda by build option" {
+    const allocator = std.testing.allocator;
+    const filtered = try filterEnabledKinds(allocator, &.{ .chrome, .lightpanda });
+    defer allocator.free(filtered);
+
+    if (lightpandaBundleEnabled()) {
+        try std.testing.expectEqual(@as(usize, 2), filtered.len);
+        try std.testing.expect(hasKind(filtered, .lightpanda));
+    } else {
+        try std.testing.expectEqual(@as(usize, 1), filtered.len);
+        try std.testing.expectEqual(types.BrowserKind.chrome, filtered[0]);
+    }
 }
 
 test "discover returns explicit path and infers kind" {

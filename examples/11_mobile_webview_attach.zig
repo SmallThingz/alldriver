@@ -8,6 +8,7 @@ pub fn main() !void {
 
     var android_session = driver.attachAndroidWebView(allocator, .{
         .device_id = "emulator-5554",
+        .bridge_kind = .adb,
         .pid = 1234,
     }) catch |err| {
         std.debug.print("android attach failed (expected without adb forwarding): {s}\n", .{@errorName(err)});
@@ -16,6 +17,20 @@ pub fn main() !void {
     defer android_session.deinit();
 
     std.debug.print("android webview attached: endpoint={s}\n", .{android_session.endpoint.?});
+
+    var shizuku_session = driver.attachAndroidWebView(allocator, .{
+        .device_id = "emulator-5554",
+        .bridge_kind = .shizuku,
+        .host = "127.0.0.1",
+        .port = 9322,
+        .socket_name = "chrome_devtools_remote",
+    }) catch |err| {
+        std.debug.print("shizuku attach failed (expected without shizuku relay): {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer shizuku_session.deinit();
+
+    std.debug.print("shizuku android webview attached: endpoint={s}\n", .{shizuku_session.endpoint.?});
 
     var ios_session = driver.attachIosWebView(allocator, .{
         .udid = "ios-simulator-udid",

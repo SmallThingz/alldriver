@@ -52,6 +52,33 @@ Default Android WebView driving remains unchanged via `.bridge_kind = .adb`.
 This project targets legitimate automation workflows (testing, QA, scripted browser operations).
 It does not guarantee bypass of bot-detection systems and does not ship explicit evasion primitives.
 
+## API Namespaces (`modern` + `legacy`)
+- `modern` is CDP/BiDi-first and only allows `.cdp_ws` / `.bidi_ws` session transports.
+- `legacy` contains WebDriver-only browser/webview paths.
+- Root-level entrypoints (`discover`, `launch`, `attach`, webview helpers) remain as compatibility shims for one migration cycle and route to `modern` or `legacy` based on discovered support.
+
+Modern targets:
+- Browser engines: Chromium and Gecko.
+- Webviews: `webview2`, `electron`, `android_webview`.
+
+Legacy targets:
+- WebDriver browser/webview paths including Safari/WebKit and WebDriver-only webviews (`wkwebview`, `webkitgtk`, `ios_wkwebview`).
+
+Example split usage:
+```zig
+const driver = @import("browser_driver");
+
+// Modern CDP/BiDi flow.
+var modern = try driver.modern.attach(allocator, "cdp://127.0.0.1:9222");
+defer modern.deinit();
+try modern.page().navigate("https://example.com");
+
+// Legacy WebDriver flow.
+var legacy = try driver.legacy.attachWebDriver(allocator, "webdriver://127.0.0.1:4444/session/1");
+defer legacy.deinit();
+try legacy.navigate("https://example.com");
+```
+
 ## External Binary Dependencies
 ### Core Runtime (Library Usage)
 - Browser binaries (at least one installed target): Chrome/Chromium, Edge, Safari, Firefox, Brave, Tor Browser, DuckDuckGo Browser, Mullvad Browser, LibreWolf, Epic, Arc, Vivaldi, SigmaOS, Sidekick, Shift, Opera GX, Pale Moon.

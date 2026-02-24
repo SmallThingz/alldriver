@@ -7,6 +7,9 @@ const runtime = @import("runtime.zig");
 const session_mod = @import("core/session.zig");
 const extensions = @import("extensions/api.zig");
 const errors = @import("errors.zig");
+const support_tier_catalog = @import("catalog/support_tier.zig");
+const modern_api = @import("modern/api.zig");
+const legacy_api = @import("legacy/api.zig");
 
 pub const BrowserKind = types.BrowserKind;
 pub const EngineKind = types.EngineKind;
@@ -30,8 +33,14 @@ pub const WebViewPreference = types.WebViewPreference;
 pub const WebViewRuntime = types.WebViewRuntime;
 pub const WebViewAttachOptions = types.WebViewAttachOptions;
 pub const WebViewLaunchOptions = types.WebViewLaunchOptions;
+pub const AndroidBridgeKind = types.AndroidBridgeKind;
 pub const AndroidWebViewAttachOptions = types.AndroidWebViewAttachOptions;
 pub const IosWebViewAttachOptions = types.IosWebViewAttachOptions;
+pub const WebKitGtkWebViewAttachOptions = types.WebKitGtkWebViewAttachOptions;
+pub const WebKitGtkBrowserTarget = types.WebKitGtkBrowserTarget;
+pub const WebKitGtkWebViewLaunchOptions = types.WebKitGtkWebViewLaunchOptions;
+pub const ElectronWebViewAttachOptions = types.ElectronWebViewAttachOptions;
+pub const ElectronWebViewLaunchOptions = types.ElectronWebViewLaunchOptions;
 
 pub const ProtocolError = errors.ProtocolError;
 pub const TransportError = errors.TransportError;
@@ -43,6 +52,9 @@ pub const WebViewError = errors.WebViewError;
 pub const UnsupportedCapabilityInfo = errors.UnsupportedCapabilityInfo;
 
 pub const Session = session_mod.Session;
+pub const modern = modern_api;
+pub const legacy = legacy_api;
+pub const support_tier = support_tier_catalog;
 
 pub const extension_hooks = extensions;
 pub const nodriver = @import("compat/nodriver_facade.zig");
@@ -56,12 +68,26 @@ pub fn discover(
     return runtime.discover(allocator, prefs, opts);
 }
 
+/// Deprecated shim: prefer `modern.launch` or `legacy.launch`.
 pub fn launch(allocator: std.mem.Allocator, opts: LaunchOptions) !Session {
-    return runtime.launch(allocator, opts);
+    if (support_tier_catalog.browserTier(opts.install.kind) == .modern) {
+        var session = try modern_api.launch(allocator, opts);
+        return session.intoBase();
+    }
+
+    var session = try legacy_api.launch(allocator, opts);
+    return session.intoBase();
 }
 
+/// Deprecated shim: prefer `modern.attach` or `legacy.attachWebDriver`.
 pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
-    return runtime.attach(allocator, endpoint);
+    if (support_tier_catalog.endpointTier(endpoint) == .modern) {
+        var session = try modern_api.attach(allocator, endpoint);
+        return session.intoBase();
+    }
+
+    var session = try legacy_api.attachWebDriver(allocator, endpoint);
+    return session.intoBase();
 }
 
 pub fn discoverWebViews(
@@ -78,26 +104,80 @@ pub fn freeWebViewRuntimes(
     runtime.freeWebViewRuntimes(allocator, runtimes);
 }
 
+/// Deprecated shim: prefer `modern.attachWebView` or `legacy.attachWebView`.
 pub fn attachWebView(allocator: std.mem.Allocator, opts: WebViewAttachOptions) !Session {
-    return runtime.attachWebView(allocator, opts);
+    if (support_tier_catalog.webViewTier(opts.kind) == .modern) {
+        var session = try modern_api.attachWebView(allocator, opts);
+        return session.intoBase();
+    }
+
+    var session = try legacy_api.attachWebView(allocator, opts);
+    return session.intoBase();
 }
 
+/// Deprecated shim: prefer `modern.launchWebViewHost` or `legacy.launchWebViewHost`.
 pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: WebViewLaunchOptions) !Session {
-    return runtime.launchWebViewHost(allocator, opts);
+    if (support_tier_catalog.webViewTier(opts.kind) == .modern) {
+        var session = try modern_api.launchWebViewHost(allocator, opts);
+        return session.intoBase();
+    }
+
+    var session = try legacy_api.launchWebViewHost(allocator, opts);
+    return session.intoBase();
 }
 
+/// Deprecated shim: prefer `modern.attachAndroidWebView`.
 pub fn attachAndroidWebView(
     allocator: std.mem.Allocator,
     opts: AndroidWebViewAttachOptions,
 ) !Session {
-    return runtime.attachAndroidWebView(allocator, opts);
+    var session = try modern_api.attachAndroidWebView(allocator, opts);
+    return session.intoBase();
 }
 
+/// Deprecated shim: prefer `legacy.attachIosWebView`.
 pub fn attachIosWebView(
     allocator: std.mem.Allocator,
     opts: IosWebViewAttachOptions,
 ) !Session {
-    return runtime.attachIosWebView(allocator, opts);
+    var session = try legacy_api.attachIosWebView(allocator, opts);
+    return session.intoBase();
+}
+
+/// Deprecated shim: prefer `legacy.attachWebKitGtkWebView`.
+pub fn attachWebKitGtkWebView(
+    allocator: std.mem.Allocator,
+    opts: WebKitGtkWebViewAttachOptions,
+) !Session {
+    var session = try legacy_api.attachWebKitGtkWebView(allocator, opts);
+    return session.intoBase();
+}
+
+/// Deprecated shim: prefer `legacy.launchWebKitGtkWebView`.
+pub fn launchWebKitGtkWebView(
+    allocator: std.mem.Allocator,
+    opts: WebKitGtkWebViewLaunchOptions,
+) !Session {
+    var session = try legacy_api.launchWebKitGtkWebView(allocator, opts);
+    return session.intoBase();
+}
+
+/// Deprecated shim: prefer `modern.attachElectronWebView`.
+pub fn attachElectronWebView(
+    allocator: std.mem.Allocator,
+    opts: ElectronWebViewAttachOptions,
+) !Session {
+    var session = try modern_api.attachElectronWebView(allocator, opts);
+    return session.intoBase();
+}
+
+/// Deprecated shim: prefer `modern.launchElectronWebView`.
+pub fn launchElectronWebView(
+    allocator: std.mem.Allocator,
+    opts: ElectronWebViewLaunchOptions,
+) !Session {
+    var session = try modern_api.launchElectronWebView(allocator, opts);
+    return session.intoBase();
 }
 
 pub fn freeInstalls(allocator: std.mem.Allocator, installs: []BrowserInstall) void {
@@ -149,4 +229,8 @@ test "platform matrix contracts" {
 
 test "behavioral matrix contracts" {
     _ = @import("tests/behavioral_matrix.zig");
+}
+
+test "api split contracts" {
+    _ = @import("tests/api_split.zig");
 }

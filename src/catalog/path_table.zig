@@ -33,6 +33,7 @@ pub const all_browser_kinds = [_]BrowserKind{
     .sidekick,
     .shift,
     .operagx,
+    .lightpanda,
     .palemoon,
 };
 
@@ -243,6 +244,20 @@ fn windowsHints(kind: BrowserKind) BrowserPathHints {
             .linux_package_hints = &.{},
             .confidence_weight = 60,
         },
+        .lightpanda => .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .platform = .windows,
+            .executable_names = &.{ "lightpanda", "lightpanda.exe" },
+            .known_paths = &.{
+                "C:\\Program Files\\Lightpanda\\lightpanda.exe",
+                "C:\\Program Files (x86)\\Lightpanda\\lightpanda.exe",
+            },
+            .mac_bundle_ids = &.{},
+            .windows_registry_hints = &.{ "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\lightpanda.exe" },
+            .linux_package_hints = &.{},
+            .confidence_weight = 50,
+        },
         .palemoon => .{
             .kind = .palemoon,
             .engine = .gecko,
@@ -444,6 +459,20 @@ fn macHints(kind: BrowserKind) BrowserPathHints {
             .windows_registry_hints = &.{},
             .linux_package_hints = &.{},
             .confidence_weight = 60,
+        },
+        .lightpanda => .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .platform = .macos,
+            .executable_names = &.{ "Lightpanda" },
+            .known_paths = &.{
+                "/Applications/Lightpanda.app/Contents/MacOS/Lightpanda",
+                "/Applications/lightpanda.app/Contents/MacOS/lightpanda",
+            },
+            .mac_bundle_ids = &.{ "io.lightpanda.browser" },
+            .windows_registry_hints = &.{},
+            .linux_package_hints = &.{},
+            .confidence_weight = 50,
         },
         .palemoon => .{
             .kind = .palemoon,
@@ -668,6 +697,20 @@ fn linuxHints(kind: BrowserKind) BrowserPathHints {
             .windows_registry_hints = &.{},
             .linux_package_hints = &.{ "opera-stable", "opera" },
             .confidence_weight = 55,
+        },
+        .lightpanda => .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .platform = .linux,
+            .executable_names = &.{ "lightpanda", "lightpanda-browser" },
+            .known_paths = &.{
+                "/usr/bin/lightpanda",
+                "/usr/local/bin/lightpanda",
+            },
+            .mac_bundle_ids = &.{},
+            .windows_registry_hints = &.{},
+            .linux_package_hints = &.{ "lightpanda-browser", "lightpanda" },
+            .confidence_weight = 50,
         },
         .palemoon => .{
             .kind = .palemoon,

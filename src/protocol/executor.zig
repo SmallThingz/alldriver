@@ -672,6 +672,20 @@ test "isBlankishUrl handles blank and non-blank variants" {
     try std.testing.expect(!isBlankishUrl("https://example.com"));
 }
 
+test "normalizeWebDriverScriptBody wraps expressions and trims trailing semicolons" {
+    const allocator = std.testing.allocator;
+    const normalized = try normalizeWebDriverScriptBody(allocator, "(function(){return 42;})();");
+    defer allocator.free(normalized);
+    try std.testing.expect(std.mem.eql(u8, normalized, "return ((function(){return 42;})());"));
+}
+
+test "normalizeWebDriverScriptBody preserves explicit return bodies" {
+    const allocator = std.testing.allocator;
+    const normalized = try normalizeWebDriverScriptBody(allocator, "return document.readyState;");
+    defer allocator.free(normalized);
+    try std.testing.expect(std.mem.eql(u8, normalized, "return document.readyState;"));
+}
+
 fn extractWebDriverExecuteStringAlloc(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
@@ -793,21 +807,13 @@ fn evalViaCdp(session: *Session, expression: []const u8) ![]u8 {
 }
 
 fn evalViaWebDriver(session: *Session, script: []const u8) ![]u8 {
-    const wrapped = try std.fmt.allocPrint(session.allocator, "return ({s});", .{script});
-    defer session.allocator.free(wrapped);
+    const script_body = try normalizeWebDriverScriptBody(session.allocator, script);
+    defer session.allocator.free(script_body);
 
-    const wrapped_body = try webDriverExecuteBodyAlloc(session, wrapped);
-    defer session.allocator.free(wrapped_body);
+    const body = try webDriverExecuteBodyAlloc(session, script_body);
+    defer session.allocator.free(body);
 
-    return callWebDriverExecute(session, wrapped_body) catch |err| switch (err) {
-        // Fall back to raw body form if expression-wrapping is not accepted.
-        error.ProtocolCommandFailed => blk: {
-            const raw_body = try webDriverExecuteBodyAlloc(session, script);
-            defer session.allocator.free(raw_body);
-            break :blk try callWebDriverExecute(session, raw_body);
-        },
-        else => err,
-    };
+    return callWebDriverExecute(session, body);
 }
 
 fn webDriverExecuteBodyAlloc(session: *Session, script: []const u8) ![]u8 {
@@ -822,6 +828,30 @@ fn callWebDriverExecute(session: *Session, body: []const u8) ![]u8 {
         error.ProtocolCommandFailed => callWebDriver(session, .POST, "/execute", body),
         else => err,
     };
+}
+
+fn normalizeWebDriverScriptBody(allocator: std.mem.Allocator, script: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, script, " \t\r\n");
+    if (trimmed.len == 0) return allocator.dupe(u8, "return undefined;");
+
+    if (std.mem.startsWith(u8, trimmed, "return ") or
+        std.mem.startsWith(u8, trimmed, "return(") or
+        std.mem.startsWith(u8, trimmed, "return\t"))
+    {
+        return allocator.dupe(u8, trimmed);
+    }
+
+    var end = trimmed.len;
+    while (end > 0) {
+        const c = trimmed[end - 1];
+        if (c == ';' or c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    const expr = if (end == 0) "undefined" else trimmed[0..end];
+    return std.fmt.allocPrint(allocator, "return ({s});", .{expr});
 }
 
 fn evalViaBidi(session: *Session, expression: []const u8) ![]u8 {
