@@ -25,11 +25,14 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 - `11_mobile_webview_attach.zig`: Android/iOS webview attach helper usage.
 - `12_managed_cache_and_profile_modes.zig`: managed cache preference and profile modes.
 - `13_capability_aware_flow.zig`: capability-checked flow with graceful fallbacks.
+- `14_electron_webview.zig`: discover and launch Electron as a dedicated webview driver.
 
 ## Notes
 
 - Some examples require installed browsers and local debug endpoints.
 - Mobile bridge examples require host tooling (`adb`, `ios_webkit_debug_proxy`, `tidevice`) and forwarded endpoints.
+- WebKitGTK automation uses `WebKitWebDriver` as the primary runtime entrypoint, and can target MiniBrowser via `webkitgtk:browserOptions` (`browser_target` + `browser_binary_path`).
+- Launch APIs support `ignore_tls_errors = true` for environments with self-signed or invalid certificates.
 - Examples are designed as minimal building blocks and can be composed into larger automation harnesses.
 - Profile mode semantics:
 - `.persistent` requires `profile_dir` and keeps data at that path.

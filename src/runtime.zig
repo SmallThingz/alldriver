@@ -7,10 +7,31 @@ const common = @import("protocol/common.zig");
 const cdp = @import("protocol/cdp/adapter.zig");
 const webdriver = @import("protocol/webdriver/adapter.zig");
 const bidi = @import("protocol/bidi/adapter.zig");
+const http = @import("transport/http_client.zig");
 const extensions = @import("extensions/api.zig");
 const webview_discovery = @import("discovery/webview/discover.zig");
 
 pub const Session = session_mod.Session;
+const webdriver_startup_timeout_ms: i64 = 8_000;
+const webdriver_startup_sleep_ms: u64 = 100;
+const default_webdriver_session_body = "{\"capabilities\":{\"alwaysMatch\":{},\"firstMatch\":[{}]}}";
+const default_webdriver_session_body_accept_insecure = "{\"capabilities\":{\"alwaysMatch\":{\"acceptInsecureCerts\":true},\"firstMatch\":[{}]}}";
+
+const WebKitGtkResolvedBrowserBinarySource = enum {
+    none,
+    auto,
+    explicit,
+};
+
+const WebKitGtkResolvedBrowserBinary = struct {
+    path: ?[]u8 = null,
+    source: WebKitGtkResolvedBrowserBinarySource = .none,
+};
+
+const WebKitGtkSessionCreatePlan = struct {
+    primary_body: []u8,
+    fallback_body: ?[]u8 = null,
+};
 
 pub fn discover(
     allocator: std.mem.Allocator,
@@ -49,6 +70,12 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     errdefer if (opts.profile_mode == .ephemeral) {
         std.fs.cwd().deleteTree(effective_profile_dir) catch {};
     };
+    if (opts.ignore_tls_errors and opts.install.engine == .gecko) {
+        try writeGeckoInsecureTlsPrefs(allocator, effective_profile_dir);
+    }
+    if (opts.install.engine == .gecko) {
+        try writeGeckoStealthPrefs(allocator, effective_profile_dir);
+    }
 
     var raw_args: std.ArrayList([]const u8) = .empty;
     defer raw_args.deinit(allocator);
@@ -217,6 +244,10 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         argv_list.deinit(allocator);
     }
     try argv_list.append(allocator, try allocator.dupe(u8, opts.host_executable));
+    if (engine == .chromium) {
+        try argv_list.append(allocator, try allocator.dupe(u8, "--disable-blink-features=AutomationControlled"));
+        try argv_list.append(allocator, try allocator.dupe(u8, "--disable-infobars"));
+    }
     for (opts.args) |arg| try argv_list.append(allocator, try allocator.dupe(u8, arg));
     const argv = try argv_list.toOwnedSlice(allocator);
     errdefer {
@@ -266,13 +297,13 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
 pub fn attachAndroidWebView(allocator: std.mem.Allocator, opts: types.AndroidWebViewAttachOptions) !Session {
     const endpoint = if (opts.endpoint) |ep|
         ep
-    else if (opts.socket_name) |socket|
-        try std.fmt.allocPrint(allocator, "cdp://127.0.0.1:9222/devtools/page/{s}", .{socket})
-    else if (opts.pid) |pid|
-        try std.fmt.allocPrint(allocator, "cdp://127.0.0.1:9222/devtools/page/{d}", .{pid})
     else
-        return error.InvalidEndpoint;
+        try buildAndroidWebViewEndpoint(allocator, opts);
     defer if (opts.endpoint == null) allocator.free(endpoint);
+
+    switch (opts.bridge_kind) {
+        .adb, .shizuku, .direct => {},
+    }
     _ = opts.device_id;
 
     return attachWebView(allocator, .{ .kind = .android_webview, .endpoint = endpoint });
@@ -293,6 +324,611 @@ pub fn attachIosWebView(allocator: std.mem.Allocator, opts: types.IosWebViewAtta
     return attachWebView(allocator, .{ .kind = .ios_wkwebview, .endpoint = endpoint });
 }
 
+pub fn attachWebKitGtkWebView(allocator: std.mem.Allocator, opts: types.WebKitGtkWebViewAttachOptions) !Session {
+    const endpoint = if (opts.endpoint) |ep|
+        ep
+    else blk: {
+        const session_id = opts.session_id orelse return error.InvalidEndpoint;
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "webdriver://{s}:{d}/session/{s}",
+            .{ opts.host, opts.port, session_id },
+        );
+    };
+    defer if (opts.endpoint == null) allocator.free(endpoint);
+
+    return attachWebView(allocator, .{ .kind = .webkitgtk, .endpoint = endpoint });
+}
+
+pub fn launchWebKitGtkWebView(allocator: std.mem.Allocator, opts: types.WebKitGtkWebViewLaunchOptions) !Session {
+    if (opts.host.len == 0) return error.InvalidEndpoint;
+
+    const driver_path = if (opts.driver_executable_path) |path|
+        try allocator.dupe(u8, path)
+    else
+        try discoverWebKitGtkDriverPath(allocator);
+    defer allocator.free(driver_path);
+
+    const resolved_port = opts.port orelse try reserveLocalPort(allocator);
+    const effective_profile_dir = try resolveEffectiveProfileDir(allocator, opts.profile_mode, opts.profile_dir);
+    var effective_profile_dir_owned = true;
+    defer if (effective_profile_dir_owned) allocator.free(effective_profile_dir);
+    errdefer if (opts.profile_mode == .ephemeral) {
+        std.fs.cwd().deleteTree(effective_profile_dir) catch {};
+    };
+
+    const resolved_browser = try resolveWebKitGtkBrowserBinary(allocator, opts.browser_target, opts.browser_binary_path);
+    defer if (resolved_browser.path) |path| allocator.free(path);
+
+    const session_plan = try buildWebKitGtkSessionCreatePlan(allocator, opts, resolved_browser);
+    defer {
+        allocator.free(session_plan.primary_body);
+        if (session_plan.fallback_body) |body| allocator.free(body);
+    }
+
+    const argv = try buildWebKitGtkDriverArgv(allocator, opts, driver_path, resolved_port);
+    errdefer {
+        for (argv) |arg| allocator.free(arg);
+        allocator.free(argv);
+    }
+
+    var launch_env = try std.process.getEnvMap(allocator);
+    defer launch_env.deinit();
+    try applyProfileSandboxEnv(allocator, &launch_env, builtin.os.tag, effective_profile_dir);
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.env_map = &launch_env;
+
+    child.spawn() catch return error.SpawnFailed;
+    errdefer {
+        _ = child.kill() catch {};
+    }
+
+    try waitForWebDriverReady(allocator, opts.host, resolved_port);
+    const session_id = createWebDriverSessionIdWithTimeout(
+        allocator,
+        opts.host,
+        resolved_port,
+        session_plan.primary_body,
+        opts.session_create_timeout_ms,
+    ) catch |err| blk: {
+        if (session_plan.fallback_body) |fallback_body| {
+            break :blk try createWebDriverSessionIdWithTimeout(
+                allocator,
+                opts.host,
+                resolved_port,
+                fallback_body,
+                opts.session_create_timeout_ms,
+            );
+        }
+        return err;
+    };
+    defer allocator.free(session_id);
+
+    const endpoint = try std.fmt.allocPrint(allocator, "webdriver://127.0.0.1:{d}/session/{s}", .{ resolved_port, session_id });
+    const ephemeral_profile_dir = if (opts.profile_mode == .ephemeral) blk: {
+        effective_profile_dir_owned = false;
+        break :blk effective_profile_dir;
+    } else null;
+
+    return Session{
+        .allocator = allocator,
+        .id = session_mod.nextSessionId(),
+        .mode = .webview,
+        .transport = .webdriver_http,
+        .install = .{
+            .kind = .safari,
+            .engine = .webkit,
+            .path = try allocator.dupe(u8, driver_path),
+            .version = null,
+            .source = .explicit,
+        },
+        .capability_set = capabilitiesFor(.webkit, .webdriver),
+        .adapter_kind = .webdriver,
+        .endpoint = endpoint,
+        .current_url = null,
+        .browsing_context_id = null,
+        .request_id = 0,
+        .child = child,
+        .owned_argv = argv,
+        .ephemeral_profile_dir = ephemeral_profile_dir,
+    };
+}
+
+pub fn attachElectronWebView(allocator: std.mem.Allocator, opts: types.ElectronWebViewAttachOptions) !Session {
+    const endpoint = if (opts.endpoint) |ep|
+        ep
+    else
+        try std.fmt.allocPrint(allocator, "cdp://{s}:{d}/", .{ opts.host, opts.port });
+    defer if (opts.endpoint == null) allocator.free(endpoint);
+
+    return attachWebView(allocator, .{ .kind = .electron, .endpoint = endpoint });
+}
+
+pub fn launchElectronWebView(allocator: std.mem.Allocator, opts: types.ElectronWebViewLaunchOptions) !Session {
+    const debug_port = opts.debug_port orelse try reserveLocalPort(allocator);
+    const effective_profile_dir = try resolveEffectiveProfileDir(allocator, opts.profile_mode, opts.profile_dir);
+    var effective_profile_dir_owned = true;
+    defer if (effective_profile_dir_owned) allocator.free(effective_profile_dir);
+    errdefer if (opts.profile_mode == .ephemeral) {
+        std.fs.cwd().deleteTree(effective_profile_dir) catch {};
+    };
+
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (argv_list.items) |arg| allocator.free(arg);
+        argv_list.deinit(allocator);
+    }
+
+    try argv_list.append(allocator, try allocator.dupe(u8, opts.executable_path));
+    if (opts.app_path) |app_path| {
+        try argv_list.append(allocator, try allocator.dupe(u8, app_path));
+    }
+    if (opts.headless) {
+        try argv_list.append(allocator, try allocator.dupe(u8, "--headless=new"));
+    }
+    try argv_list.append(allocator, try allocator.dupe(u8, "--disable-blink-features=AutomationControlled"));
+    try argv_list.append(allocator, try allocator.dupe(u8, "--disable-infobars"));
+    if (opts.ignore_tls_errors) {
+        try argv_list.append(allocator, try allocator.dupe(u8, "--ignore-certificate-errors"));
+        try argv_list.append(allocator, try allocator.dupe(u8, "--allow-insecure-localhost"));
+    }
+
+    const debug_flag = try std.fmt.allocPrint(allocator, "--remote-debugging-port={d}", .{debug_port});
+    try argv_list.append(allocator, debug_flag);
+
+    const profile_flag = try std.fmt.allocPrint(allocator, "--user-data-dir={s}", .{effective_profile_dir});
+    try argv_list.append(allocator, profile_flag);
+
+    for (opts.args) |arg| {
+        try argv_list.append(allocator, try allocator.dupe(u8, arg));
+    }
+
+    const argv = try argv_list.toOwnedSlice(allocator);
+    errdefer {
+        for (argv) |arg| allocator.free(arg);
+        allocator.free(argv);
+    }
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch return error.SpawnFailed;
+    errdefer {
+        _ = child.kill() catch {};
+    }
+
+    const endpoint = try std.fmt.allocPrint(allocator, "cdp://127.0.0.1:{d}/", .{debug_port});
+    const ephemeral_profile_dir = if (opts.profile_mode == .ephemeral) blk: {
+        effective_profile_dir_owned = false;
+        break :blk effective_profile_dir;
+    } else null;
+
+    return Session{
+        .allocator = allocator,
+        .id = session_mod.nextSessionId(),
+        .mode = .webview,
+        .transport = .cdp_ws,
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, opts.executable_path),
+            .version = null,
+            .source = .explicit,
+        },
+        .capability_set = capabilitiesFor(.chromium, .cdp),
+        .adapter_kind = .cdp,
+        .endpoint = endpoint,
+        .current_url = null,
+        .browsing_context_id = null,
+        .request_id = 0,
+        .child = child,
+        .owned_argv = argv,
+        .ephemeral_profile_dir = ephemeral_profile_dir,
+    };
+}
+
+fn buildWebKitGtkDriverArgv(
+    allocator: std.mem.Allocator,
+    opts: types.WebKitGtkWebViewLaunchOptions,
+    driver_path: []const u8,
+    resolved_port: u16,
+) ![]const []const u8 {
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (argv_list.items) |arg| allocator.free(arg);
+        argv_list.deinit(allocator);
+    }
+
+    try argv_list.append(allocator, try allocator.dupe(u8, driver_path));
+    try argv_list.append(allocator, try std.fmt.allocPrint(allocator, "--port={d}", .{resolved_port}));
+    try argv_list.append(allocator, try std.fmt.allocPrint(allocator, "--host={s}", .{opts.host}));
+    if (opts.replace_on_new_session) {
+        try argv_list.append(allocator, try allocator.dupe(u8, "--replace-on-new-session"));
+    }
+    for (opts.driver_args) |arg| {
+        try argv_list.append(allocator, try allocator.dupe(u8, arg));
+    }
+
+    return argv_list.toOwnedSlice(allocator);
+}
+
+fn waitForWebDriverReady(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
+    const deadline = std.time.milliTimestamp() + webdriver_startup_timeout_ms;
+
+    while (true) {
+        const response = http.getJson(allocator, host, port, "/status") catch |err| {
+            if (std.time.milliTimestamp() >= deadline) return err;
+            std.Thread.sleep(webdriver_startup_sleep_ms * std.time.ns_per_ms);
+            continue;
+        };
+        defer allocator.free(response.body);
+
+        if (response.status_code >= 200 and response.status_code < 300 and try webDriverStatusReady(allocator, response.body)) {
+            return;
+        }
+
+        if (std.time.milliTimestamp() >= deadline) return error.Timeout;
+        std.Thread.sleep(webdriver_startup_sleep_ms * std.time.ns_per_ms);
+    }
+}
+
+fn buildWebKitGtkSessionCreatePlan(
+    allocator: std.mem.Allocator,
+    opts: types.WebKitGtkWebViewLaunchOptions,
+    resolved_browser: WebKitGtkResolvedBrowserBinary,
+) !WebKitGtkSessionCreatePlan {
+    if (opts.session_capabilities_json) |body| {
+        return .{
+            .primary_body = try allocator.dupe(u8, body),
+            .fallback_body = null,
+        };
+    }
+
+    const auto_uses_default_capabilities = opts.browser_target == .auto and opts.browser_args.len == 0;
+    const browser_binary_for_capabilities: ?[]const u8 = if (opts.browser_target == .auto)
+        null
+    else
+        resolved_browser.path;
+
+    const needs_minibrowser_automation = false;
+    const needs_minibrowser_ignore_tls = blk: {
+        if (browser_binary_for_capabilities == null) break :blk false;
+        if (!opts.ignore_tls_errors) break :blk false;
+        const path = browser_binary_for_capabilities orelse break :blk false;
+        const base = std.fs.path.basename(path);
+        break :blk containsIgnoreCase(base, "minibrowser") and !hasArgValue(opts.browser_args, "--ignore-tls-errors");
+    };
+
+    const primary_body = if (auto_uses_default_capabilities)
+        try defaultWebDriverSessionBodyAlloc(allocator, opts.ignore_tls_errors)
+    else
+        try buildWebKitGtkSessionCapabilitiesJson(
+            allocator,
+            browser_binary_for_capabilities,
+            opts.browser_args,
+            needs_minibrowser_automation,
+            needs_minibrowser_ignore_tls,
+            opts.ignore_tls_errors,
+        );
+    var fallback_body: ?[]u8 = null;
+    errdefer if (fallback_body) |body| allocator.free(body);
+
+    if (!auto_uses_default_capabilities and resolved_browser.path != null and resolved_browser.source == .auto and opts.browser_target == .auto) {
+        fallback_body = try defaultWebDriverSessionBodyAlloc(allocator, opts.ignore_tls_errors);
+    }
+
+    return .{
+        .primary_body = primary_body,
+        .fallback_body = fallback_body,
+    };
+}
+
+fn buildWebKitGtkSessionCapabilitiesJson(
+    allocator: std.mem.Allocator,
+    browser_binary_path: ?[]const u8,
+    browser_args: []const []const u8,
+    inject_automation_arg: bool,
+    inject_ignore_tls_arg: bool,
+    accept_insecure_certs: bool,
+) ![]u8 {
+    if (browser_binary_path == null and browser_args.len == 0 and !inject_automation_arg and !inject_ignore_tls_arg and !accept_insecure_certs) {
+        return defaultWebDriverSessionBodyAlloc(allocator, false);
+    }
+
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(allocator);
+
+    try body.appendSlice(allocator, "{\"capabilities\":{\"alwaysMatch\":{");
+    var wrote_always_match_field = false;
+
+    if (accept_insecure_certs) {
+        try body.appendSlice(allocator, "\"acceptInsecureCerts\":true");
+        wrote_always_match_field = true;
+    }
+
+    const has_browser_options = browser_binary_path != null or browser_args.len > 0 or inject_automation_arg or inject_ignore_tls_arg;
+    if (has_browser_options) {
+        if (wrote_always_match_field) try body.append(allocator, ',');
+        try body.appendSlice(allocator, "\"webkitgtk:browserOptions\":{");
+        var wrote_browser_options_field = false;
+
+        if (browser_binary_path) |binary| {
+            const escaped = try escapeJsonStringAlloc(allocator, binary);
+            defer allocator.free(escaped);
+
+            try body.writer(allocator).print("\"binary\":\"{s}\"", .{escaped});
+            wrote_browser_options_field = true;
+        }
+
+        if (browser_args.len > 0 or inject_automation_arg or inject_ignore_tls_arg) {
+            if (wrote_browser_options_field) try body.append(allocator, ',');
+            try body.appendSlice(allocator, "\"args\":[");
+            var idx: usize = 0;
+            if (inject_automation_arg) {
+                try body.appendSlice(allocator, "\"--automation\"");
+                idx += 1;
+            }
+            if (inject_ignore_tls_arg) {
+                if (idx > 0) try body.append(allocator, ',');
+                try body.appendSlice(allocator, "\"--ignore-tls-errors\"");
+                idx += 1;
+            }
+            for (browser_args) |arg| {
+                if (idx > 0) try body.append(allocator, ',');
+                const escaped = try escapeJsonStringAlloc(allocator, arg);
+                defer allocator.free(escaped);
+                try body.writer(allocator).print("\"{s}\"", .{escaped});
+                idx += 1;
+            }
+            try body.append(allocator, ']');
+        }
+
+        try body.append(allocator, '}');
+    }
+
+    try body.appendSlice(allocator, "},\"firstMatch\":[{}]}}");
+    return body.toOwnedSlice(allocator);
+}
+
+fn defaultWebDriverSessionBodyAlloc(allocator: std.mem.Allocator, accept_insecure_certs: bool) ![]u8 {
+    const body = if (accept_insecure_certs)
+        default_webdriver_session_body_accept_insecure
+    else
+        default_webdriver_session_body;
+    return allocator.dupe(u8, body);
+}
+
+fn resolveWebKitGtkBrowserBinary(
+    allocator: std.mem.Allocator,
+    target: types.WebKitGtkBrowserTarget,
+    browser_binary_path: ?[]const u8,
+) !WebKitGtkResolvedBrowserBinary {
+    if (browser_binary_path) |path| {
+        if (!isExecutablePath(path)) return error.WebKitGtkBrowserBinaryNotFound;
+        return .{
+            .path = try allocator.dupe(u8, path),
+            .source = .explicit,
+        };
+    }
+
+    return switch (target) {
+        .custom_binary => error.WebKitGtkBrowserBinaryNotFound,
+        .minibrowser => .{
+            .path = try discoverMiniBrowserPath(allocator) orelse return error.WebKitGtkMiniBrowserNotFound,
+            .source = .explicit,
+        },
+        .auto => blk: {
+            const path = try discoverMiniBrowserPath(allocator);
+            if (path) |resolved| {
+                break :blk .{
+                    .path = resolved,
+                    .source = .auto,
+                };
+            }
+            break :blk .{};
+        },
+    };
+}
+
+fn discoverMiniBrowserPath(allocator: std.mem.Allocator) !?[]u8 {
+    const known_paths = [_][]const u8{
+        "/usr/lib/webkitgtk-6.0/MiniBrowser",
+        "/usr/bin/MiniBrowser",
+        "/usr/local/bin/MiniBrowser",
+        "/usr/libexec/webkit2gtk-4.1/MiniBrowser",
+        "/usr/libexec/webkit2gtk-4.0/MiniBrowser",
+    };
+
+    for (known_paths) |path| {
+        if (!isExecutablePath(path)) continue;
+        return @as(?[]u8, try allocator.dupe(u8, path));
+    }
+
+    const runtimes = discoverWebViews(allocator, .{
+        .kinds = &.{.webkitgtk},
+        .include_path_env = true,
+        .include_known_paths = true,
+        .include_mobile_bridges = false,
+    }) catch return null;
+    defer freeWebViewRuntimes(allocator, runtimes);
+
+    for (runtimes) |runtime| {
+        const path = runtime.runtime_path orelse continue;
+        const base = std.fs.path.basename(path);
+        if (!containsIgnoreCase(base, "minibrowser")) continue;
+        if (!isExecutablePath(path)) continue;
+        return @as(?[]u8, try allocator.dupe(u8, path));
+    }
+
+    return null;
+}
+
+fn createWebDriverSessionIdWithTimeout(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    body_json: []const u8,
+    timeout_ms: u32,
+) ![]u8 {
+    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+
+    while (true) {
+        const response = http.postJson(allocator, host, port, "/session", body_json) catch |err| {
+            if (isTransientConnectError(err) and std.time.milliTimestamp() < deadline) {
+                std.Thread.sleep(webdriver_startup_sleep_ms * std.time.ns_per_ms);
+                continue;
+            }
+            return err;
+        };
+        defer allocator.free(response.body);
+
+        if (response.status_code < 200 or response.status_code >= 300) {
+            return error.ProtocolCommandFailed;
+        }
+
+        const session_id = try extractWebDriverSessionIdAlloc(allocator, response.body);
+        if (session_id) |id| return id;
+        return error.InvalidResponse;
+    }
+}
+
+fn isTransientConnectError(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.ConnectionTimedOut,
+        error.NetworkUnreachable,
+        error.HostUnreachable,
+        => true,
+        else => false,
+    };
+}
+
+fn escapeJsonStringAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    for (input) |c| {
+        switch (c) {
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '"' => try out.appendSlice(allocator, "\\\""),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => try out.append(allocator, c),
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn extractWebDriverSessionIdAlloc(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return null;
+
+    if (root.object.get("value")) |value| {
+        if (value == .object) {
+            if (value.object.get("sessionId")) |session_id| {
+                if (session_id == .string) return @as(?[]u8, try allocator.dupe(u8, session_id.string));
+            }
+        }
+    }
+
+    if (root.object.get("sessionId")) |session_id| {
+        if (session_id == .string) return @as(?[]u8, try allocator.dupe(u8, session_id.string));
+    }
+
+    return null;
+}
+
+fn webDriverStatusReady(allocator: std.mem.Allocator, payload: []const u8) !bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch return true;
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return true;
+    const value = root.object.get("value") orelse return true;
+    if (value != .object) return true;
+    const ready = value.object.get("ready") orelse return true;
+    if (ready == .bool) return ready.bool;
+    return true;
+}
+
+fn buildAndroidWebViewEndpoint(
+    allocator: std.mem.Allocator,
+    opts: types.AndroidWebViewAttachOptions,
+) ![]u8 {
+    if (opts.host.len == 0) return error.InvalidEndpoint;
+
+    const path = if (opts.socket_name) |socket|
+        try std.fmt.allocPrint(allocator, "/devtools/page/{s}", .{socket})
+    else if (opts.pid) |pid|
+        try std.fmt.allocPrint(allocator, "/devtools/page/{d}", .{pid})
+    else
+        try allocator.dupe(u8, "/");
+    defer allocator.free(path);
+
+    return std.fmt.allocPrint(allocator, "cdp://{s}:{d}{s}", .{ opts.host, opts.port, path });
+}
+
+fn discoverWebKitGtkDriverPath(allocator: std.mem.Allocator) ![]u8 {
+    const runtimes = try discoverWebViews(allocator, .{
+        .kinds = &.{.webkitgtk},
+        .include_path_env = true,
+        .include_known_paths = true,
+        .include_mobile_bridges = false,
+    });
+    defer freeWebViewRuntimes(allocator, runtimes);
+
+    for (runtimes) |runtime| {
+        const path = runtime.runtime_path orelse continue;
+        const base = std.fs.path.basename(path);
+        if (!containsIgnoreCase(base, "webkitwebdriver")) continue;
+        if (!isExecutablePath(path)) continue;
+        return allocator.dupe(u8, path);
+    }
+
+    return error.WebKitGtkWebDriverNotFound;
+}
+
+fn isExecutablePath(path: []const u8) bool {
+    if (builtin.os.tag == .windows) {
+        std.fs.cwd().access(path, .{}) catch return false;
+        return true;
+    }
+
+    std.posix.access(path, std.posix.X_OK) catch return false;
+    return true;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn hasArgValue(args: []const []const u8, value: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, value)) return true;
+    }
+    return false;
+}
+
 fn appendDefaultArgs(
     allocator: std.mem.Allocator,
     args: *std.ArrayList([]const u8),
@@ -301,12 +937,30 @@ fn appendDefaultArgs(
     adapter: common.AdapterKind,
     debug_port: ?u16,
 ) !void {
+    if (opts.ignore_tls_errors) {
+        switch (opts.install.engine) {
+            .chromium => {
+                try args.append(allocator, "--ignore-certificate-errors");
+                try args.append(allocator, "--allow-insecure-localhost");
+            },
+            .gecko, .webkit, .unknown => {},
+        }
+    }
+
     if (opts.headless) {
         switch (opts.install.engine) {
             .chromium => try args.append(allocator, "--headless=new"),
             .gecko => try args.append(allocator, "-headless"),
             .webkit, .unknown => {},
         }
+    }
+
+    switch (opts.install.engine) {
+        .chromium => {
+            try args.append(allocator, "--disable-blink-features=AutomationControlled");
+            try args.append(allocator, "--disable-infobars");
+        },
+        else => {},
     }
 
     if (adapter == .cdp and opts.install.engine == .chromium) {
@@ -395,6 +1049,41 @@ fn ensureDirPathExists(path: []const u8) !void {
     try std.fs.cwd().makePath(path);
 }
 
+fn writeGeckoInsecureTlsPrefs(allocator: std.mem.Allocator, profile_dir: []const u8) !void {
+    const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
+    defer allocator.free(user_js_path);
+
+    var file = try std.fs.cwd().createFile(user_js_path, .{ .truncate = false, .read = false });
+    defer file.close();
+    try file.seekFromEnd(0);
+
+    const prefs =
+        \\user_pref("webdriver_accept_untrusted_certs", true);
+        \\user_pref("webdriver_assume_untrusted_issuer", false);
+        \\user_pref("security.cert_pinning.enforcement_level", 0);
+        \\user_pref("network.stricttransportsecurity.preloadlist", false);
+        \\user_pref("security.enterprise_roots.enabled", true);
+        \\
+    ;
+    try file.writeAll(prefs);
+}
+
+fn writeGeckoStealthPrefs(allocator: std.mem.Allocator, profile_dir: []const u8) !void {
+    const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
+    defer allocator.free(user_js_path);
+
+    var file = try std.fs.cwd().createFile(user_js_path, .{ .truncate = false, .read = false });
+    defer file.close();
+    try file.seekFromEnd(0);
+
+    const prefs =
+        \\user_pref("dom.webdriver.enabled", false);
+        \\user_pref("privacy.resistFingerprinting", true);
+        \\
+    ;
+    try file.writeAll(prefs);
+}
+
 fn needsProfileEnvSandbox(engine: types.EngineKind) bool {
     return switch (engine) {
         .webkit, .unknown => true,
@@ -468,7 +1157,7 @@ fn buildEndpoint(allocator: std.mem.Allocator, adapter: common.AdapterKind, sess
 
 fn adapterForWebViewKind(kind: types.WebViewKind) common.AdapterKind {
     return switch (kind) {
-        .webview2, .android_webview => .cdp,
+        .webview2, .electron, .android_webview => .cdp,
         .wkwebview, .webkitgtk, .ios_wkwebview => .webdriver,
     };
 }
@@ -476,8 +1165,8 @@ fn adapterForWebViewKind(kind: types.WebViewKind) common.AdapterKind {
 fn browserKindForWebView(kind: types.WebViewKind) types.BrowserKind {
     return switch (kind) {
         .webview2 => .edge,
+        .electron, .android_webview => .chrome,
         .wkwebview, .ios_wkwebview, .webkitgtk => .safari,
-        .android_webview => .chrome,
     };
 }
 
@@ -529,6 +1218,58 @@ test "appendDefaultArgs adds chromium headless and cdp flags" {
     try std.testing.expect(hasArg(args.items, "--remote-debugging-port=9333"));
 }
 
+test "appendDefaultArgs adds chromium tls ignore flags when requested" {
+    const allocator = std.testing.allocator;
+
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+
+    var temp_owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temp_owned.items) |item| allocator.free(item);
+        temp_owned.deinit(allocator);
+    }
+
+    try appendDefaultArgs(allocator, &args, &temp_owned, .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = "/bin/true",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .profile_dir = null,
+        .headless = false,
+        .ignore_tls_errors = true,
+        .args = &.{},
+    }, .cdp, 9222);
+
+    try std.testing.expect(hasArg(args.items, "--ignore-certificate-errors"));
+    try std.testing.expect(hasArg(args.items, "--allow-insecure-localhost"));
+}
+
+test "writeGeckoInsecureTlsPrefs writes expected prefs" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const profile_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "gecko-insecure-profile" });
+    defer allocator.free(profile_dir);
+    try ensureDirPathExists(profile_dir);
+
+    try writeGeckoInsecureTlsPrefs(allocator, profile_dir);
+
+    const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
+    defer allocator.free(user_js_path);
+    const data = try std.fs.cwd().readFileAlloc(allocator, user_js_path, 64 * 1024);
+    defer allocator.free(data);
+
+    try std.testing.expect(std.mem.indexOf(u8, data, "webdriver_accept_untrusted_certs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, data, "security.cert_pinning.enforcement_level") != null);
+    try std.testing.expect(std.mem.indexOf(u8, data, "security.enterprise_roots.enabled") != null);
+}
+
 test "persistent chromium includes user data dir argument" {
     const allocator = std.testing.allocator;
     const profile_dir = try resolveEffectiveProfileDir(allocator, .persistent, "/tmp/browser-driver-persistent-chromium");
@@ -578,6 +1319,24 @@ test "persistent profile mode requires profile_dir" {
         .profile_dir = null,
         .headless = true,
         .args = &.{},
+    }));
+}
+
+test "electron launch with persistent profile mode requires profile_dir" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.PersistentProfileDirRequired, launchElectronWebView(allocator, .{
+        .executable_path = "/definitely/not/electron",
+        .profile_mode = .persistent,
+        .profile_dir = null,
+    }));
+}
+
+test "webkitgtk launch with persistent profile mode requires profile_dir" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.PersistentProfileDirRequired, launchWebKitGtkWebView(allocator, .{
+        .driver_executable_path = "/definitely/not/webkitwebdriver",
+        .profile_mode = .persistent,
+        .profile_dir = null,
     }));
 }
 
@@ -704,6 +1463,54 @@ test "launch spawns process and returns webdriver endpoint for unknown engine" {
     try std.testing.expect(session.child != null);
 }
 
+test "launch uses CDP transport for chromium engine without standalone webdriver" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var session = try launch(allocator, .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = "/bin/sh",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .profile_dir = null,
+        .headless = true,
+        .args = &.{ "-c", "exit 0" },
+    });
+    defer session.deinit();
+
+    try std.testing.expectEqual(common.TransportKind.cdp_ws, session.transport);
+    try std.testing.expectEqual(common.AdapterKind.cdp, session.adapter_kind);
+    try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "cdp://"));
+}
+
+test "launch uses BiDi transport for gecko engine without standalone webdriver" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var session = try launch(allocator, .{
+        .install = .{
+            .kind = .firefox,
+            .engine = .gecko,
+            .path = "/bin/sh",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .profile_dir = null,
+        .headless = true,
+        .args = &.{ "-c", "exit 0" },
+    });
+    defer session.deinit();
+
+    try std.testing.expectEqual(common.TransportKind.bidi_ws, session.transport);
+    try std.testing.expectEqual(common.AdapterKind.bidi, session.adapter_kind);
+    try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "bidi://"));
+}
+
 test "attachWebView maps WebView2 to chromium CDP session" {
     const allocator = std.testing.allocator;
     var session = try attachWebView(allocator, .{
@@ -715,6 +1522,291 @@ test "attachWebView maps WebView2 to chromium CDP session" {
     try std.testing.expectEqual(types.BrowserKind.edge, session.install.kind);
     try std.testing.expectEqual(types.EngineKind.chromium, session.install.engine);
     try std.testing.expect(session.adapter_kind == .cdp);
+}
+
+test "attachWebView maps Electron to chromium CDP session" {
+    const allocator = std.testing.allocator;
+    var session = try attachWebView(allocator, .{
+        .kind = .electron,
+        .endpoint = "cdp://127.0.0.1:9222/",
+    });
+    defer session.deinit();
+
+    try std.testing.expectEqual(types.BrowserKind.chrome, session.install.kind);
+    try std.testing.expectEqual(types.EngineKind.chromium, session.install.engine);
+    try std.testing.expect(session.transport == .cdp_ws);
+    try std.testing.expect(session.adapter_kind == .cdp);
+}
+
+test "attachWebView maps WebKitGTK to webdriver session" {
+    const allocator = std.testing.allocator;
+    var session = try attachWebView(allocator, .{
+        .kind = .webkitgtk,
+        .endpoint = "webdriver://127.0.0.1:4444/session/1",
+    });
+    defer session.deinit();
+
+    try std.testing.expectEqual(types.BrowserKind.safari, session.install.kind);
+    try std.testing.expectEqual(types.EngineKind.webkit, session.install.engine);
+    try std.testing.expect(session.transport == .webdriver_http);
+    try std.testing.expect(session.adapter_kind == .webdriver);
+}
+
+test "attachWebKitGtkWebView synthesizes webdriver endpoint from host/port/session" {
+    const allocator = std.testing.allocator;
+    var session = try attachWebKitGtkWebView(allocator, .{
+        .host = "127.0.0.1",
+        .port = 5555,
+        .session_id = "abc-session",
+    });
+    defer session.deinit();
+
+    try std.testing.expect(std.mem.eql(u8, session.endpoint.?, "webdriver://127.0.0.1:5555/session/abc-session"));
+    try std.testing.expect(session.transport == .webdriver_http);
+}
+
+test "extractWebDriverSessionIdAlloc parses both W3C and legacy payloads" {
+    const allocator = std.testing.allocator;
+
+    const w3c_payload =
+        \\{"value":{"sessionId":"w3c-id","capabilities":{"browserName":"webkitgtk"}}}
+    ;
+    const legacy_payload =
+        \\{"sessionId":"legacy-id","status":0,"value":{}}
+    ;
+
+    const w3c = try extractWebDriverSessionIdAlloc(allocator, w3c_payload);
+    defer if (w3c) |id| allocator.free(id);
+    try std.testing.expect(w3c != null);
+    try std.testing.expect(std.mem.eql(u8, w3c.?, "w3c-id"));
+
+    const legacy = try extractWebDriverSessionIdAlloc(allocator, legacy_payload);
+    defer if (legacy) |id| allocator.free(id);
+    try std.testing.expect(legacy != null);
+    try std.testing.expect(std.mem.eql(u8, legacy.?, "legacy-id"));
+}
+
+test "buildWebKitGtkSessionCapabilitiesJson includes webkitgtk browser options" {
+    const allocator = std.testing.allocator;
+    const body = try buildWebKitGtkSessionCapabilitiesJson(allocator, "/usr/lib/webkitgtk-6.0/MiniBrowser", &.{ "--foo", "--bar" }, false, false, false);
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"webkitgtk:browserOptions\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"binary\":\"/usr/lib/webkitgtk-6.0/MiniBrowser\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"args\":[\"--foo\",\"--bar\"]") != null);
+}
+
+test "buildWebKitGtkSessionCapabilitiesJson injects automation arg when requested" {
+    const allocator = std.testing.allocator;
+    const body = try buildWebKitGtkSessionCapabilitiesJson(allocator, "/usr/lib/webkitgtk-6.0/MiniBrowser", &.{"--foo"}, true, false, false);
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"args\":[\"--automation\",\"--foo\"]") != null);
+}
+
+test "buildWebKitGtkSessionCapabilitiesJson injects ignore tls and acceptInsecureCerts when requested" {
+    const allocator = std.testing.allocator;
+    const body = try buildWebKitGtkSessionCapabilitiesJson(allocator, "/usr/lib/webkitgtk-6.0/MiniBrowser", &.{"--foo"}, false, true, true);
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"acceptInsecureCerts\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"args\":[\"--ignore-tls-errors\",\"--foo\"]") != null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+}
+
+test "buildWebKitGtkSessionCreatePlan does not duplicate automation arg when already provided" {
+    const allocator = std.testing.allocator;
+    const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
+    defer allocator.free(resolved_path);
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .browser_target = .minibrowser,
+        .browser_args = &.{ "--automation", "--foo" },
+    }, .{
+        .path = resolved_path,
+        .source = .explicit,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--automation\",\"--foo\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--automation\",\"--automation\"") == null);
+}
+
+test "buildWebKitGtkSessionCreatePlan bypasses typed capabilities when explicit json provided" {
+    const allocator = std.testing.allocator;
+    const custom_json = "{\"capabilities\":{\"alwaysMatch\":{\"acceptInsecureCerts\":true},\"firstMatch\":[{}]}}";
+    const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
+    defer allocator.free(resolved_path);
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .session_capabilities_json = custom_json,
+        .browser_target = .auto,
+        .browser_args = &.{"--ignored"},
+    }, .{
+        .path = resolved_path,
+        .source = .auto,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.eql(u8, plan.primary_body, custom_json));
+    try std.testing.expect(plan.fallback_body == null);
+}
+
+test "buildWebKitGtkSessionCreatePlan uses default auto primary body without browser options" {
+    const allocator = std.testing.allocator;
+    const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
+    defer allocator.free(resolved_path);
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .browser_target = .auto,
+        .browser_args = &.{},
+    }, .{
+        .path = resolved_path,
+        .source = .auto,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.eql(u8, plan.primary_body, default_webdriver_session_body));
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") == null);
+    try std.testing.expect(plan.fallback_body == null);
+}
+
+test "buildWebKitGtkSessionCreatePlan uses default auto primary with acceptInsecureCerts when ignore tls enabled" {
+    const allocator = std.testing.allocator;
+    const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
+    defer allocator.free(resolved_path);
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .browser_target = .auto,
+        .ignore_tls_errors = true,
+    }, .{
+        .path = resolved_path,
+        .source = .auto,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.eql(u8, plan.primary_body, default_webdriver_session_body_accept_insecure));
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") == null);
+    try std.testing.expect(plan.fallback_body == null);
+}
+
+test "buildWebKitGtkSessionCreatePlan in auto mode keeps args without forcing browser binary" {
+    const allocator = std.testing.allocator;
+    const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
+    defer allocator.free(resolved_path);
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .browser_target = .auto,
+        .browser_args = &.{"--foo"},
+    }, .{
+        .path = resolved_path,
+        .source = .auto,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--foo\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"binary\"") == null);
+    try std.testing.expect(plan.fallback_body != null);
+    try std.testing.expect(std.mem.eql(u8, plan.fallback_body.?, default_webdriver_session_body));
+}
+
+test "buildWebKitGtkSessionCreatePlan for explicit custom binary does not include fallback" {
+    const allocator = std.testing.allocator;
+    const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
+    defer allocator.free(resolved_path);
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .browser_target = .custom_binary,
+        .browser_binary_path = "/usr/lib/webkitgtk-6.0/MiniBrowser",
+        .browser_args = &.{},
+    }, .{
+        .path = resolved_path,
+        .source = .explicit,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") != null);
+    try std.testing.expect(plan.fallback_body == null);
+}
+
+test "buildWebKitGtkDriverArgv includes port host and replace-on-new-session flag" {
+    const allocator = std.testing.allocator;
+    const argv = try buildWebKitGtkDriverArgv(allocator, .{
+        .driver_executable_path = "/usr/bin/WebKitWebDriver",
+        .host = "127.0.0.1",
+        .port = 46741,
+        .replace_on_new_session = true,
+        .driver_args = &.{ "--foo", "--bar=baz" },
+    }, "/usr/bin/WebKitWebDriver", 46741);
+    defer {
+        for (argv) |arg| allocator.free(arg);
+        allocator.free(argv);
+    }
+
+    try std.testing.expect(std.mem.eql(u8, argv[0], "/usr/bin/WebKitWebDriver"));
+    try std.testing.expect(hasArg(argv, "--port=46741"));
+    try std.testing.expect(hasArg(argv, "--host=127.0.0.1"));
+    try std.testing.expect(hasArg(argv, "--replace-on-new-session"));
+    try std.testing.expect(hasArg(argv, "--foo"));
+    try std.testing.expect(hasArg(argv, "--bar=baz"));
+}
+
+test "attachElectronWebView synthesizes cdp endpoint from host and port" {
+    const allocator = std.testing.allocator;
+    var session = try attachElectronWebView(allocator, .{
+        .host = "127.0.0.1",
+        .port = 9333,
+    });
+    defer session.deinit();
+
+    try std.testing.expect(std.mem.eql(u8, session.endpoint.?, "cdp://127.0.0.1:9333/"));
+    try std.testing.expect(session.transport == .cdp_ws);
+}
+
+test "launchElectronWebView includes debugging and profile args in owned argv" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const profile_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "electron-profile" });
+    defer allocator.free(profile_dir);
+
+    var session = try launchElectronWebView(allocator, .{
+        .executable_path = "/bin/sh",
+        .app_path = "-c",
+        .args = &.{"exit 0"},
+        .debug_port = 9444,
+        .profile_mode = .ephemeral,
+        .profile_dir = profile_dir,
+        .ignore_tls_errors = true,
+    });
+    defer session.deinit();
+
+    const argv = session.owned_argv.?;
+    try std.testing.expect(hasArg(argv, "--remote-debugging-port=9444"));
+    try std.testing.expect(hasPrefixArg(argv, "--user-data-dir="));
+    try std.testing.expect(hasArg(argv, "--ignore-certificate-errors"));
+    try std.testing.expect(hasArg(argv, "--allow-insecure-localhost"));
+    try std.testing.expect(std.mem.eql(u8, session.endpoint.?, "cdp://127.0.0.1:9444/"));
+    try std.testing.expect(session.transport == .cdp_ws);
 }
 
 test "launchWebViewHost spawns host process" {
@@ -744,6 +1836,34 @@ test "attachAndroidWebView builds CDP webview session" {
     try std.testing.expect(session.mode == .webview);
     try std.testing.expect(session.transport == .cdp_ws);
     try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "cdp://"));
+}
+
+test "attachAndroidWebView supports shizuku bridge endpoint synthesis" {
+    const allocator = std.testing.allocator;
+    var session = try attachAndroidWebView(allocator, .{
+        .device_id = "emulator-5554",
+        .bridge_kind = .shizuku,
+        .host = "127.0.0.1",
+        .port = 9322,
+        .socket_name = "chrome_devtools_remote",
+    });
+    defer session.deinit();
+
+    try std.testing.expect(std.mem.eql(u8, session.endpoint.?, "cdp://127.0.0.1:9322/devtools/page/chrome_devtools_remote"));
+    try std.testing.expect(session.transport == .cdp_ws);
+}
+
+test "attachAndroidWebView allows root CDP endpoint without pid or socket" {
+    const allocator = std.testing.allocator;
+    var session = try attachAndroidWebView(allocator, .{
+        .device_id = "emulator-5554",
+        .bridge_kind = .direct,
+        .host = "127.0.0.1",
+        .port = 9222,
+    });
+    defer session.deinit();
+
+    try std.testing.expect(std.mem.eql(u8, session.endpoint.?, "cdp://127.0.0.1:9222/"));
 }
 
 test "attachIosWebView builds webdriver webview session" {

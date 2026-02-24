@@ -29,6 +29,7 @@ pub fn navigate(session: *Session, url: []const u8) !void {
             defer session.allocator.free(body);
             const raw = try callWebDriver(session, .POST, "/url", body);
             defer session.allocator.free(raw);
+            try verifyWebDriverNavigationCommitted(session, url);
         },
         .bidi_ws => {
             const context_id = session.browsing_context_id orelse return error.SessionNotReady;
@@ -583,6 +584,47 @@ fn callWebDriver(
     return res.body;
 }
 
+fn verifyWebDriverNavigationCommitted(session: *Session, target_url: []const u8) !void {
+    if (isBlankishUrl(target_url)) return;
+
+    const response = try evalViaWebDriver(session, "return window.location.href;");
+    defer session.allocator.free(response);
+
+    const current_url = try extractWebDriverExecuteStringAlloc(session.allocator, response);
+    defer if (current_url) |value| session.allocator.free(value);
+
+    if (current_url) |value| {
+        if (isBlankishUrl(value)) return error.NavigationNotCommitted;
+    } else {
+        return error.NavigationNotCommitted;
+    }
+}
+
+fn extractWebDriverExecuteStringAlloc(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return null;
+    const value = root.object.get("value") orelse return null;
+
+    return switch (value) {
+        .string => @as(?[]u8, try allocator.dupe(u8, value.string)),
+        .object => blk: {
+            const nested = value.object.get("value") orelse break :blk null;
+            if (nested != .string) break :blk null;
+            break :blk @as(?[]u8, try allocator.dupe(u8, nested.string));
+        },
+        else => null,
+    };
+}
+
+fn isBlankishUrl(url: []const u8) bool {
+    const trimmed = std.mem.trim(u8, url, " \t\r\n");
+    if (trimmed.len == 0) return true;
+    return std.ascii.eqlIgnoreCase(trimmed, "about:blank");
+}
+
 fn resolveCdpPagePath(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
     const deadline = std.time.milliTimestamp() + cdp_target_poll_timeout_ms;
 
@@ -926,4 +968,26 @@ test "extract page web socket url falls back to first target" {
 
     try std.testing.expect(value != null);
     try std.testing.expect(std.mem.eql(u8, value.?, "ws://127.0.0.1:9222/devtools/browser/abc"));
+}
+
+test "extractWebDriverExecuteStringAlloc parses plain and nested value payloads" {
+    const allocator = std.testing.allocator;
+
+    const plain = try extractWebDriverExecuteStringAlloc(allocator, "{\"value\":\"https://example.com/\"}");
+    defer if (plain) |value| allocator.free(value);
+    try std.testing.expect(plain != null);
+    try std.testing.expect(std.mem.eql(u8, plain.?, "https://example.com/"));
+
+    const nested = try extractWebDriverExecuteStringAlloc(allocator, "{\"value\":{\"type\":\"string\",\"value\":\"about:blank\"}}");
+    defer if (nested) |value| allocator.free(value);
+    try std.testing.expect(nested != null);
+    try std.testing.expect(std.mem.eql(u8, nested.?, "about:blank"));
+}
+
+test "isBlankishUrl detects empty and about blank urls" {
+    try std.testing.expect(isBlankishUrl(""));
+    try std.testing.expect(isBlankishUrl(" \t\r\n"));
+    try std.testing.expect(isBlankishUrl("about:blank"));
+    try std.testing.expect(isBlankishUrl("ABOUT:BLANK"));
+    try std.testing.expect(!isBlankishUrl("https://example.com/"));
 }
