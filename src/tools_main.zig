@@ -1,4 +1,5 @@
 const std = @import("std");
+const driver = @import("browser_driver");
 
 const Allocator = std.mem.Allocator;
 
@@ -34,6 +35,7 @@ fn printUsage() void {
         \\  production-gate
         \\  release-bundle
         \\  test-behavioral-matrix
+        \\  adversarial-detection-gate
         \\  vm-check-prereqs
         \\  vm-init-lab
         \\  vm-register-host
@@ -85,6 +87,8 @@ pub fn main() !void {
         try cmdReleaseBundle(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "test-behavioral-matrix")) {
         try cmdTestBehavioral(allocator, root, sub);
+    } else if (std.mem.eql(u8, cmd, "adversarial-detection-gate")) {
+        try cmdAdversarialDetectionGate(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "vm-check-prereqs")) {
         try cmdVmCheckPrereqs(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "vm-init-lab")) {
@@ -518,10 +522,17 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         const is_strict_report = std.mem.eql(u8, strict_marker, "1");
 
         const behavioral_pass = containsLine(report_data, "- behavioral_matrix: PASS");
-        const adb_ok = containsPrefixNonNotFound(report_data, "adb=");
+        const adversarial_pass = containsLine(report_data, "- adversarial_detection_gate: PASS");
+        const android_bridge_ok = containsPrefixNonNotFound(report_data, "adb=") or
+            containsPrefixNonNotFound(report_data, "shizuku=") or
+            containsPrefixNonNotFound(report_data, "rish=");
         const ios_ok = containsPrefixNonNotFound(report_data, "ios_webkit_debug_proxy=") or containsPrefixNonNotFound(report_data, "tidevice=");
 
-        const strict_report_ok = std.mem.eql(u8, status, "PASS") and std.mem.eql(u8, sig_status, "VALID") and behavioral_pass and is_strict_report;
+        const strict_report_ok = std.mem.eql(u8, status, "PASS") and
+            std.mem.eql(u8, sig_status, "VALID") and
+            behavioral_pass and
+            adversarial_pass and
+            is_strict_report;
 
         if (strict_ga) {
             if (is_strict_report) {
@@ -530,7 +541,7 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
                 if (std.mem.eql(u8, platform, "linux")) {
                     if (strict_report_ok) {
                         linux_ok = true;
-                        if (adb_ok) linux_android_ok = true;
+                        if (android_bridge_ok) linux_android_ok = true;
                     }
                 } else if (std.mem.eql(u8, platform, "windows")) {
                     if (strict_report_ok) windows_ok = true;
@@ -544,7 +555,7 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         }
 
         try content.writer(allocator).print(
-            "run: {s}\nreport: {s}\nplatform: {s}\nstatus: {s}\nsignature: {s}\nstrict_report_ok: {d}\nbehavioral_pass: {d}\nandroid_bridge_tool_present: {d}\nios_bridge_tool_present: {d}\n\n",
+            "run: {s}\nreport: {s}\nplatform: {s}\nstatus: {s}\nsignature: {s}\nstrict_report_ok: {d}\nbehavioral_pass: {d}\nadversarial_pass: {d}\nandroid_bridge_tool_present: {d}\nios_bridge_tool_present: {d}\n\n",
             .{
                 platform_run,
                 report,
@@ -553,7 +564,8 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
                 sig_status,
                 @intFromBool(strict_report_ok),
                 @intFromBool(behavioral_pass),
-                @intFromBool(adb_ok),
+                @intFromBool(adversarial_pass),
+                @intFromBool(android_bridge_ok),
                 @intFromBool(ios_ok),
             },
         );
@@ -601,12 +613,655 @@ fn cmdTestBehavioral(allocator: Allocator, root: []const u8, _: []const []const 
     var env = try setDefaultZigGlobalCache(allocator, root);
     defer env.deinit();
 
-    if (env.get("BROWSER_DRIVER_BEHAVIORAL") == null) try env.put("BROWSER_DRIVER_BEHAVIORAL", "1");
+    if (env.get("BROWSER_DRIVER_BEHAVIORAL") == null) try env.put("BROWSER_DRIVER_BEHAVIORAL", "0");
     if (env.get("BROWSER_DRIVER_BEHAVIORAL_STRICT") == null) try env.put("BROWSER_DRIVER_BEHAVIORAL_STRICT", "0");
-    if (env.get("WEBVIEW_BRIDGE_BEHAVIORAL") == null) try env.put("WEBVIEW_BRIDGE_BEHAVIORAL", "1");
+    if (env.get("WEBVIEW_BRIDGE_BEHAVIORAL") == null) try env.put("WEBVIEW_BRIDGE_BEHAVIORAL", "0");
     if (env.get("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT") == null) try env.put("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT", "0");
+    if (env.get("ELECTRON_BEHAVIORAL") == null) try env.put("ELECTRON_BEHAVIORAL", "0");
+    if (env.get("ELECTRON_BEHAVIORAL_STRICT") == null) try env.put("ELECTRON_BEHAVIORAL_STRICT", "0");
+    if (env.get("WEBKITGTK_BEHAVIORAL") == null) try env.put("WEBKITGTK_BEHAVIORAL", "0");
+    if (env.get("WEBKITGTK_BEHAVIORAL_STRICT") == null) try env.put("WEBKITGTK_BEHAVIORAL_STRICT", "0");
 
     try runInherit(allocator, &.{ "zig", "build", "test" }, root, &env);
+}
+
+const GateExpectation = enum {
+    undetected,
+    detected,
+};
+
+const GateTotals = struct {
+    targeted: usize = 0,
+    discovered: usize = 0,
+    launched: usize = 0,
+    probed: usize = 0,
+    detected: usize = 0,
+    failed: usize = 0,
+    skipped: usize = 0,
+};
+
+const DetectionSignals = struct {
+    js_webdriver_true: bool = false,
+    js_webdriver_prop_present: bool = false,
+    js_webdriver_descriptor_present: bool = false,
+    js_headless_ua_true: bool = false,
+    js_automation_globals_present: bool = false,
+    js_dom_automation_present: bool = false,
+    js_languages_empty: bool = false,
+    js_plugins_empty: bool = false,
+
+    endpoint_cdp: bool = false,
+    endpoint_webdriver: bool = false,
+    endpoint_bidi: bool = false,
+    endpoint_webview: bool = false,
+
+    transport_cdp: bool = false,
+    transport_webdriver: bool = false,
+    transport_bidi: bool = false,
+
+    launch_arg_remote_debugging: bool = false,
+    launch_arg_headless: bool = false,
+    launch_arg_automation: bool = false,
+    launch_arg_disable_blink_automation: bool = false,
+    launch_arg_profile: bool = false,
+    profile_ephemeral_dir: bool = false,
+
+    runtime_msedgewebview2: bool = false,
+    runtime_safaridriver: bool = false,
+    runtime_webkitwebdriver: bool = false,
+    runtime_minibrowser: bool = false,
+    runtime_electron: bool = false,
+
+    bridge_adb: bool = false,
+    bridge_shizuku: bool = false,
+    bridge_rish: bool = false,
+    bridge_ios_webkit_debug_proxy: bool = false,
+    bridge_tidevice: bool = false,
+    webview_mobile_runtime: bool = false,
+
+    fn signalCount(self: DetectionSignals) usize {
+        var count: usize = 0;
+        inline for (std.meta.fields(DetectionSignals)) |field| {
+            if (@field(self, field.name)) count += 1;
+        }
+        return count;
+    }
+
+    fn highConfidenceCount(self: DetectionSignals) usize {
+        var count: usize = 0;
+        if (self.js_webdriver_true) count += 1;
+        if (self.js_automation_globals_present) count += 1;
+        if (self.js_dom_automation_present) count += 1;
+        return count;
+    }
+
+    fn webObservableCount(self: DetectionSignals) usize {
+        var count: usize = 0;
+        if (self.js_webdriver_true) count += 1;
+        if (self.js_headless_ua_true) count += 1;
+        if (self.js_automation_globals_present) count += 1;
+        if (self.js_dom_automation_present) count += 1;
+        if (self.js_languages_empty) count += 1;
+        if (self.js_plugins_empty) count += 1;
+        return count;
+    }
+};
+
+const DetectionClassification = struct {
+    signals: DetectionSignals,
+    signal_count: usize,
+    high_confidence_count: usize,
+    detected: bool,
+};
+
+const WebViewSessionProbe = struct {
+    session: driver.Session,
+    launched: bool,
+};
+
+fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
+    _ = root;
+
+    var flags = try parseFlags(allocator, args);
+    defer freeStringMap(allocator, &flags);
+
+    const allow_missing_browser = std.mem.eql(u8, mapGetOr(&flags, "allow-missing-browser", "0"), "1");
+    const expectation: GateExpectation = if (std.mem.eql(u8, mapGetOr(&flags, "expect-detected", "0"), "1"))
+        .detected
+    else
+        .undetected;
+    const out_path = flags.get("out");
+
+    const host_platform = getHostPlatform();
+    const target_browser_kinds = try targetBrowserKindsForHost(allocator);
+    defer allocator.free(target_browser_kinds);
+    const target_webview_kinds = try targetWebViewKindsForHost(allocator, host_platform);
+    defer allocator.free(target_webview_kinds);
+
+    const installs = try driver.discover(allocator, .{
+        .kinds = target_browser_kinds,
+        .allow_managed_download = false,
+    }, .{
+        .include_path_env = true,
+        .include_os_probes = true,
+        .include_known_paths = true,
+    });
+    defer driver.freeInstalls(allocator, installs);
+
+    const webview_runtimes = try driver.discoverWebViews(allocator, .{
+        .kinds = target_webview_kinds,
+        .include_path_env = true,
+        .include_known_paths = true,
+        .include_mobile_bridges = true,
+    });
+    defer driver.freeWebViewRuntimes(allocator, webview_runtimes);
+
+    var totals: GateTotals = .{};
+    var report: std.ArrayList(u8) = .empty;
+    defer report.deinit(allocator);
+    try report.writer(allocator).print(
+        "Adversarial Detection Gate\nplatform={s}\nexpectation={s}\n\n",
+        .{
+            host_platform,
+            if (expectation == .detected) "detected" else "undetected",
+        },
+    );
+
+    try report.writer(allocator).writeAll("[browser_targets]\n");
+    for (target_browser_kinds) |kind| {
+        totals.targeted += 1;
+        const install_opt = firstInstallForKind(installs, kind);
+        if (install_opt == null) {
+            totals.skipped += 1;
+            try report.writer(allocator).print(
+                "target=browser kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_install\n",
+                .{ @tagName(kind), @tagName(driver.engineFor(kind)), host_platform },
+            );
+            continue;
+        }
+
+        const install = install_opt.?;
+        totals.discovered += 1;
+
+        var session = driver.launch(allocator, .{
+            .install = install,
+            .profile_mode = .ephemeral,
+            .headless = true,
+            .args = &.{},
+        }) catch |err| {
+            totals.failed += 1;
+            try report.writer(allocator).print(
+                "target=browser kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_error error={s}\n",
+                .{ @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+            );
+            continue;
+        };
+        defer session.deinit();
+
+        totals.launched += 1;
+
+        const classification = probeSessionForSignals(
+            &session,
+            allocator,
+            true,
+            null,
+            null,
+            null,
+        ) catch |err| {
+            totals.failed += 1;
+            try report.writer(allocator).print(
+                "target=browser kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
+                .{ @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+            );
+            continue;
+        };
+
+        totals.probed += 1;
+        if (classification.detected) totals.detected += 1;
+        const passed = expectationSatisfied(expectation, classification.detected);
+        if (!passed) totals.failed += 1;
+
+        try report.writer(allocator).print(
+            "target=browser kind={s} engine={s} platform={s} status={s} discovered=1 launched=1 probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
+            .{
+                @tagName(kind),
+                @tagName(install.engine),
+                host_platform,
+                if (passed) "PASS" else "FAIL",
+                @intFromBool(classification.detected),
+                classification.signal_count,
+                classification.high_confidence_count,
+                if (classification.detected) "detection_signals_present" else "detection_signals_absent",
+            },
+        );
+    }
+
+    try report.writer(allocator).writeAll("\n[webview_targets]\n");
+    for (target_webview_kinds) |kind| {
+        totals.targeted += 1;
+        const runtime_opt = bestWebViewRuntimeForKind(webview_runtimes, kind);
+        if (runtime_opt == null) {
+            totals.skipped += 1;
+            try report.writer(allocator).print(
+                "target=webview kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_runtime\n",
+                .{ @tagName(kind), @tagName(webviewEngineForKind(kind)), webViewPlatformName(kind, host_platform) },
+            );
+            continue;
+        }
+
+        const runtime = runtime_opt.?;
+        totals.discovered += 1;
+
+        var probe_session = launchOrAttachWebViewForProbe(allocator, runtime) catch |err| {
+            totals.failed += 1;
+            try report.writer(allocator).print(
+                "target=webview kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_or_attach_error error={s}\n",
+                .{ @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
+            );
+            continue;
+        };
+        defer probe_session.session.deinit();
+
+        if (probe_session.launched) totals.launched += 1;
+
+        const classification = probeSessionForSignals(
+            &probe_session.session,
+            allocator,
+            true,
+            kind,
+            runtime.runtime_path,
+            runtime.bridge_tool_path,
+        ) catch |err| {
+            totals.failed += 1;
+            try report.writer(allocator).print(
+                "target=webview kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
+                .{
+                    @tagName(kind),
+                    @tagName(runtime.engine),
+                    webViewPlatformName(kind, host_platform),
+                    @intFromBool(probe_session.launched),
+                    @errorName(err),
+                },
+            );
+            continue;
+        };
+
+        totals.probed += 1;
+        if (classification.detected) totals.detected += 1;
+        const passed = expectationSatisfied(expectation, classification.detected);
+        if (!passed) totals.failed += 1;
+
+        try report.writer(allocator).print(
+            "target=webview kind={s} engine={s} platform={s} status={s} discovered=1 launched={d} probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
+            .{
+                @tagName(kind),
+                @tagName(runtime.engine),
+                webViewPlatformName(kind, host_platform),
+                if (passed) "PASS" else "FAIL",
+                @intFromBool(probe_session.launched),
+                @intFromBool(classification.detected),
+                classification.signal_count,
+                classification.high_confidence_count,
+                if (classification.detected) "detection_signals_present" else "detection_signals_absent",
+            },
+        );
+    }
+
+    if (totals.discovered == 0) {
+        if (allow_missing_browser) {
+            try report.writer(allocator).print(
+                "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d}\n",
+                .{
+                    totals.targeted,
+                    totals.discovered,
+                    totals.launched,
+                    totals.probed,
+                    totals.detected,
+                    totals.failed,
+                    totals.skipped,
+                },
+            );
+            try report.writer(allocator).writeAll("OVERALL: SKIP\n");
+            if (out_path) |out| {
+                try writeFile(out, report.items);
+                std.debug.print("adversarial-detection-gate report: {s}\n", .{out});
+            }
+            std.debug.print("adversarial-detection-gate: no targets discovered; skipping by request\n", .{});
+            return;
+        }
+        try report.writer(allocator).writeAll("OVERALL: FAIL\n");
+        if (out_path) |out| try writeFile(out, report.items);
+        return ToolError.NotFound;
+    }
+
+    try report.writer(allocator).print(
+        "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d}\n",
+        .{
+            totals.targeted,
+            totals.discovered,
+            totals.launched,
+            totals.probed,
+            totals.detected,
+            totals.failed,
+            totals.skipped,
+        },
+    );
+
+    const overall_pass = totals.failed == 0;
+    try report.writer(allocator).print("OVERALL: {s}\n", .{if (overall_pass) "PASS" else "FAIL"});
+    if (out_path) |out| {
+        try writeFile(out, report.items);
+        std.debug.print("adversarial-detection-gate report: {s}\n", .{out});
+    }
+
+    if (!overall_pass) {
+        return ToolError.VerificationFailed;
+    }
+}
+
+fn expectationSatisfied(expectation: GateExpectation, detected: bool) bool {
+    return switch (expectation) {
+        .undetected => !detected,
+        .detected => detected,
+    };
+}
+
+fn classifySignals(signals: DetectionSignals) DetectionClassification {
+    const signal_count = signals.signalCount();
+    const high_confidence_count = signals.highConfidenceCount();
+    const web_observable_count = signals.webObservableCount();
+    return .{
+        .signals = signals,
+        .signal_count = signal_count,
+        .high_confidence_count = high_confidence_count,
+        .detected = high_confidence_count > 0 or web_observable_count >= 3,
+    };
+}
+
+fn targetBrowserKindsForHost(allocator: Allocator) ![]driver.BrowserKind {
+    const list = switch (@import("builtin").os.tag) {
+        .windows => &[_]driver.BrowserKind{
+            .chrome, .edge, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf,
+            .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx, .lightpanda, .palemoon,
+        },
+        .macos => &[_]driver.BrowserKind{
+            .chrome, .edge, .safari, .firefox, .brave, .tor, .duckduckgo, .mullvad,
+            .librewolf, .epic, .arc, .vivaldi, .sigmaos, .sidekick, .shift, .operagx,
+            .lightpanda, .palemoon,
+        },
+        else => &[_]driver.BrowserKind{
+            .chrome, .edge, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf,
+            .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx, .lightpanda, .palemoon,
+        },
+    };
+
+    const out = try allocator.alloc(driver.BrowserKind, list.len);
+    @memcpy(out, list);
+    return out;
+}
+
+fn targetWebViewKindsForHost(allocator: Allocator, host_platform: []const u8) ![]driver.WebViewKind {
+    const list = if (std.mem.eql(u8, host_platform, "windows"))
+        &[_]driver.WebViewKind{ .webview2, .electron, .android_webview }
+    else if (std.mem.eql(u8, host_platform, "macos"))
+        &[_]driver.WebViewKind{ .wkwebview, .electron, .android_webview, .ios_wkwebview }
+    else
+        &[_]driver.WebViewKind{ .webkitgtk, .electron, .android_webview };
+
+    const out = try allocator.alloc(driver.WebViewKind, list.len);
+    @memcpy(out, list);
+    return out;
+}
+
+fn firstInstallForKind(installs: []const driver.BrowserInstall, kind: driver.BrowserKind) ?driver.BrowserInstall {
+    for (installs) |install| {
+        if (install.kind == kind) return install;
+    }
+    return null;
+}
+
+fn webviewRuntimeScore(runtime: driver.WebViewRuntime) i32 {
+    var score: i32 = 0;
+    if (runtime.runtime_path != null) score += 10;
+    if (runtime.bridge_tool_path != null) score += 10;
+
+    if (runtime.runtime_path) |path| {
+        if (containsIgnoreCase(path, "msedgewebview2")) score += 40;
+        if (containsIgnoreCase(path, "safaridriver")) score += 40;
+        if (containsIgnoreCase(path, "webkitwebdriver")) score += 40;
+        if (containsIgnoreCase(path, "minibrowser")) score += 20;
+        if (containsIgnoreCase(path, "electron")) score += 40;
+        if (containsIgnoreCase(path, ".framework")) score -= 50;
+    }
+
+    if (runtime.bridge_tool_path) |path| {
+        if (containsIgnoreCase(path, "shizuku")) score += 30;
+        if (containsIgnoreCase(path, "rish")) score += 30;
+        if (containsIgnoreCase(path, "adb")) score += 30;
+        if (containsIgnoreCase(path, "ios_webkit_debug_proxy")) score += 30;
+        if (containsIgnoreCase(path, "tidevice")) score += 30;
+    }
+
+    return score;
+}
+
+fn bestWebViewRuntimeForKind(runtimes: []const driver.WebViewRuntime, kind: driver.WebViewKind) ?driver.WebViewRuntime {
+    var best: ?driver.WebViewRuntime = null;
+    var best_score: i32 = std.math.minInt(i32);
+
+    for (runtimes) |runtime| {
+        if (runtime.kind != kind) continue;
+        const score = webviewRuntimeScore(runtime);
+        if (best == null or score > best_score) {
+            best = runtime;
+            best_score = score;
+        }
+    }
+
+    return best;
+}
+
+fn launchOrAttachWebViewForProbe(allocator: Allocator, runtime: driver.WebViewRuntime) !WebViewSessionProbe {
+    switch (runtime.kind) {
+        .electron => {
+            const executable = runtime.runtime_path orelse return error.InvalidExplicitPath;
+            const session = try driver.launchElectronWebView(allocator, .{
+                .executable_path = executable,
+                .profile_mode = .ephemeral,
+                .headless = true,
+            });
+            return .{ .session = session, .launched = true };
+        },
+        .webkitgtk => {
+            var opts: driver.WebKitGtkWebViewLaunchOptions = .{
+                .profile_mode = .ephemeral,
+                .browser_args = &.{"about:blank"},
+            };
+            if (runtime.runtime_path) |path| {
+                if (containsIgnoreCase(path, "webkitwebdriver")) {
+                    opts.driver_executable_path = path;
+                } else if (containsIgnoreCase(path, "minibrowser")) {
+                    opts.browser_target = .custom_binary;
+                    opts.browser_binary_path = path;
+                }
+            }
+            const session = try driver.launchWebKitGtkWebView(allocator, opts);
+            return .{ .session = session, .launched = true };
+        },
+        .webview2 => {
+            const executable = runtime.runtime_path orelse return error.InvalidExplicitPath;
+            const session = try driver.launchWebViewHost(allocator, .{
+                .kind = .webview2,
+                .host_executable = executable,
+                .args = &.{ "--headless=new", "--disable-gpu", "--remote-debugging-port=9222", "about:blank" },
+                .endpoint = "cdp://127.0.0.1:9222/",
+            });
+            return .{ .session = session, .launched = true };
+        },
+        .wkwebview => {
+            const executable = runtime.runtime_path orelse return error.InvalidExplicitPath;
+            const session = try driver.launchWebViewHost(allocator, .{
+                .kind = .wkwebview,
+                .host_executable = executable,
+                .endpoint = "webdriver://127.0.0.1:4444/session/adversarial-gate",
+            });
+            return .{ .session = session, .launched = true };
+        },
+        .android_webview => {
+            const session = try driver.attachAndroidWebView(allocator, .{
+                .device_id = "adversarial-gate",
+                .bridge_kind = inferAndroidBridgeKind(runtime.bridge_tool_path),
+                .socket_name = "chrome_devtools_remote",
+            });
+            return .{ .session = session, .launched = false };
+        },
+        .ios_wkwebview => {
+            const session = try driver.attachIosWebView(allocator, .{
+                .udid = "adversarial-gate",
+                .page_id = "1",
+            });
+            return .{ .session = session, .launched = false };
+        },
+    }
+}
+
+fn inferAndroidBridgeKind(path: ?[]const u8) driver.AndroidBridgeKind {
+    const p = path orelse return .adb;
+    if (containsIgnoreCase(p, "shizuku")) return .shizuku;
+    if (containsIgnoreCase(p, "rish")) return .shizuku;
+    return .adb;
+}
+
+fn webviewEngineForKind(kind: driver.WebViewKind) driver.EngineKind {
+    return switch (kind) {
+        .webview2, .electron, .android_webview => .chromium,
+        .wkwebview, .webkitgtk, .ios_wkwebview => .webkit,
+    };
+}
+
+fn webViewPlatformName(kind: driver.WebViewKind, host_platform: []const u8) []const u8 {
+    return switch (kind) {
+        .webview2 => "windows",
+        .wkwebview => "macos",
+        .webkitgtk => "linux",
+        .electron => host_platform,
+        .android_webview => "android",
+        .ios_wkwebview => "ios",
+    };
+}
+
+fn probeSessionForSignals(
+    session: *driver.Session,
+    allocator: Allocator,
+    require_js_eval: bool,
+    webview_kind: ?driver.WebViewKind,
+    runtime_path: ?[]const u8,
+    bridge_path: ?[]const u8,
+) !DetectionClassification {
+    var signals: DetectionSignals = .{};
+    collectSessionSignals(&signals, session);
+    collectRuntimeSignals(&signals, webview_kind, runtime_path, bridge_path);
+
+    if (require_js_eval) {
+        if (!session.supports(.js_eval)) return error.UnsupportedCapability;
+        session.navigate("data:text/html,<html><body>gate</body></html>") catch {};
+        session.waitFor(.dom_ready, 5_000) catch {};
+
+        const js_payload = try session.evaluate(
+            "(function(){var s=[];" ++
+                "try{s.push(navigator.webdriver===true?'BROWSER_DRIVER_SIG_WEBDRIVER_TRUE':'BROWSER_DRIVER_SIG_WEBDRIVER_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_ERROR');}" ++
+                "try{s.push(('webdriver' in navigator)?'BROWSER_DRIVER_SIG_WEBDRIVER_PROP_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_PROP_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_PROP_ERROR');}" ++
+                "try{var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver');s.push(d?'BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_ERROR');}" ++
+                "try{s.push(/Headless/i.test(navigator.userAgent)?'BROWSER_DRIVER_SIG_HEADLESS_UA_TRUE':'BROWSER_DRIVER_SIG_HEADLESS_UA_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_HEADLESS_UA_ERROR');}" ++
+                "try{var g=false;for(var k in window){if(k.indexOf('cdc_')===0||k.indexOf('__webdriver')===0){g=true;break;}}s.push(g?'BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_ERROR');}" ++
+                "try{s.push((window.domAutomation||window.domAutomationController)?'BROWSER_DRIVER_SIG_DOM_AUTOMATION_TRUE':'BROWSER_DRIVER_SIG_DOM_AUTOMATION_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_DOM_AUTOMATION_ERROR');}" ++
+                "try{s.push((navigator.languages&&navigator.languages.length===0)?'BROWSER_DRIVER_SIG_LANG_EMPTY_TRUE':'BROWSER_DRIVER_SIG_LANG_EMPTY_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_LANG_EMPTY_ERROR');}" ++
+                "try{s.push((navigator.plugins&&navigator.plugins.length===0)?'BROWSER_DRIVER_SIG_PLUGINS_EMPTY_TRUE':'BROWSER_DRIVER_SIG_PLUGINS_EMPTY_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PLUGINS_EMPTY_ERROR');}" ++
+                "return s.join('|');})();",
+        );
+        defer allocator.free(js_payload);
+
+        signals.js_webdriver_true = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_TRUE");
+        signals.js_webdriver_prop_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_PROP_PRESENT");
+        signals.js_webdriver_descriptor_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT");
+        signals.js_headless_ua_true = containsToken(js_payload, "BROWSER_DRIVER_SIG_HEADLESS_UA_TRUE");
+        signals.js_automation_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_TRUE");
+        signals.js_dom_automation_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_DOM_AUTOMATION_TRUE");
+        signals.js_languages_empty = containsToken(js_payload, "BROWSER_DRIVER_SIG_LANG_EMPTY_TRUE");
+        signals.js_plugins_empty = containsToken(js_payload, "BROWSER_DRIVER_SIG_PLUGINS_EMPTY_TRUE");
+    }
+
+    return classifySignals(signals);
+}
+
+fn collectSessionSignals(signals: *DetectionSignals, session: *const driver.Session) void {
+    if (session.endpoint) |endpoint| {
+        signals.endpoint_cdp = std.mem.startsWith(u8, endpoint, "cdp://") or std.mem.startsWith(u8, endpoint, "ws://");
+        signals.endpoint_webdriver = std.mem.startsWith(u8, endpoint, "webdriver://") or std.mem.startsWith(u8, endpoint, "http://");
+        signals.endpoint_bidi = std.mem.startsWith(u8, endpoint, "bidi://");
+        signals.endpoint_webview = std.mem.startsWith(u8, endpoint, "webview://");
+    }
+
+    signals.transport_cdp = session.transport == .cdp_ws;
+    signals.transport_webdriver = session.transport == .webdriver_http;
+    signals.transport_bidi = session.transport == .bidi_ws;
+
+    if (session.owned_argv) |argv| {
+        for (argv) |arg| {
+            if (std.mem.startsWith(u8, arg, "--remote-debugging-port=")) signals.launch_arg_remote_debugging = true;
+            if (std.mem.startsWith(u8, arg, "--user-data-dir=") or std.mem.eql(u8, arg, "-profile")) signals.launch_arg_profile = true;
+            if (containsIgnoreCase(arg, "headless")) signals.launch_arg_headless = true;
+            if (containsIgnoreCase(arg, "--automation")) signals.launch_arg_automation = true;
+            if (containsIgnoreCase(arg, "automationcontrolled")) signals.launch_arg_disable_blink_automation = true;
+        }
+    }
+
+    signals.profile_ephemeral_dir = session.ephemeral_profile_dir != null;
+}
+
+fn collectRuntimeSignals(
+    signals: *DetectionSignals,
+    webview_kind: ?driver.WebViewKind,
+    runtime_path: ?[]const u8,
+    bridge_path: ?[]const u8,
+) void {
+    if (runtime_path) |path| {
+        if (containsIgnoreCase(path, "msedgewebview2")) signals.runtime_msedgewebview2 = true;
+        if (containsIgnoreCase(path, "safaridriver")) signals.runtime_safaridriver = true;
+        if (containsIgnoreCase(path, "webkitwebdriver")) signals.runtime_webkitwebdriver = true;
+        if (containsIgnoreCase(path, "minibrowser")) signals.runtime_minibrowser = true;
+        if (containsIgnoreCase(path, "electron")) signals.runtime_electron = true;
+    }
+
+    if (bridge_path) |path| {
+        if (containsIgnoreCase(path, "adb")) signals.bridge_adb = true;
+        if (containsIgnoreCase(path, "shizuku")) signals.bridge_shizuku = true;
+        if (containsIgnoreCase(path, "rish")) signals.bridge_rish = true;
+        if (containsIgnoreCase(path, "ios_webkit_debug_proxy")) signals.bridge_ios_webkit_debug_proxy = true;
+        if (containsIgnoreCase(path, "tidevice")) signals.bridge_tidevice = true;
+    }
+
+    if (webview_kind) |kind| {
+        switch (kind) {
+            .android_webview, .ios_wkwebview => signals.webview_mobile_runtime = true,
+            else => {},
+        }
+    }
+}
+
+fn containsToken(payload: []const u8, token: []const u8) bool {
+    return std.mem.indexOf(u8, payload, token) != null;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
 }
 
 fn cmdReleaseGate(allocator: Allocator, root: []const u8, _: []const []const u8) !void {
@@ -973,10 +1628,16 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
             try env.put("BROWSER_DRIVER_BEHAVIORAL_STRICT", "1");
             try env.put("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT", "0");
             try env.put("WEBVIEW_BRIDGE_REQUIRED", "none");
+            try env.put("ELECTRON_BEHAVIORAL", "1");
+            try env.put("ELECTRON_BEHAVIORAL_STRICT", "1");
+            try env.put("WEBKITGTK_BEHAVIORAL", "0");
+            try env.put("WEBKITGTK_BEHAVIORAL_STRICT", "0");
 
             if (std.mem.eql(u8, platform, "linux")) {
                 try env.put("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT", "1");
                 try env.put("WEBVIEW_BRIDGE_REQUIRED", "android");
+                try env.put("WEBKITGTK_BEHAVIORAL", "1");
+                try env.put("WEBKITGTK_BEHAVIORAL_STRICT", "1");
             } else if (std.mem.eql(u8, platform, "macos")) {
                 try env.put("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT", "1");
                 try env.put("WEBVIEW_BRIDGE_REQUIRED", "ios");
@@ -985,6 +1646,17 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
 
         if (!(try runStepWithLog(allocator, root, &env, out_dir, "behavioral_matrix", &.{ "zig", "build", "tools", "--", "test-behavioral-matrix" }))) ok_all = false;
     }
+
+    const adversarial_report_path = try pathJoin(allocator, &.{ out_dir, "adversarial-detection.txt" });
+    defer allocator.free(adversarial_report_path);
+    if (!(try runStepWithLog(
+        allocator,
+        root,
+        &env,
+        out_dir,
+        "adversarial_detection_gate",
+        &.{ "zig", "build", "tools", "--", "adversarial-detection-gate", "--out", adversarial_report_path },
+    ))) ok_all = false;
 
     const env_txt_path = try pathJoin(allocator, &.{ out_dir, "environment.txt" });
     const head_commit = runCaptureTrimmed(allocator, &.{ "git", "rev-parse", "HEAD" }, root, null) catch try allocator.dupe(u8, "unknown");
@@ -1010,6 +1682,9 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         "opera --version",
         "librewolf --version",
         "tor-browser --version",
+        "electron --version",
+        "WebKitWebDriver --version",
+        "MiniBrowser --version",
     };
 
     for (browser_cmds) |cmd| {
@@ -1017,11 +1692,13 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         if (res) |line| {
             defer allocator.free(line);
             try env_txt.writer(allocator).print("{s} => {s}\n", .{ cmd, line });
+        } else {
+            try env_txt.writer(allocator).print("{s} => NOT_FOUND\n", .{cmd});
         }
     }
 
     try env_txt.appendSlice(allocator, "\n[mobile_bridge_tools]\n");
-    for ([_][]const u8{ "adb", "ios_webkit_debug_proxy", "tidevice" }) |tool| {
+    for ([_][]const u8{ "adb", "shizuku", "rish", "ios_webkit_debug_proxy", "tidevice" }) |tool| {
         if (try commandExists(allocator, tool)) {
             const tool_path = try runCaptureTrimmed(allocator, &.{ if (isWindowsHost()) "where" else "which", tool }, null, null);
             defer allocator.free(tool_path);
@@ -2254,4 +2931,127 @@ test "forbidden marker scan detects source markers and ignores artifacts" {
 
     try std.testing.expectEqual(@as(usize, 1), hits.items.len);
     try std.testing.expect(std.mem.indexOf(u8, hits.items[0], "src/file.zig:1") != null);
+}
+
+test "adversarial classification marks webdriver signal as detected" {
+    var signals: DetectionSignals = .{};
+    signals.js_webdriver_true = true;
+
+    const classification = classifySignals(signals);
+    try std.testing.expect(classification.detected);
+    try std.testing.expectEqual(@as(usize, 1), classification.signal_count);
+    try std.testing.expectEqual(@as(usize, 1), classification.high_confidence_count);
+}
+
+test "adversarial classification requires threshold when no high confidence signals" {
+    var signals: DetectionSignals = .{};
+    signals.runtime_minibrowser = true;
+    signals.runtime_electron = true;
+    signals.launch_arg_profile = true;
+
+    const classification = classifySignals(signals);
+    try std.testing.expect(!classification.detected);
+    try std.testing.expectEqual(@as(usize, 3), classification.signal_count);
+    try std.testing.expectEqual(@as(usize, 0), classification.high_confidence_count);
+}
+
+test "adversarial classification ignores transport and endpoint markers without web observable signals" {
+    var signals: DetectionSignals = .{};
+    signals.endpoint_cdp = true;
+    signals.transport_cdp = true;
+    signals.launch_arg_remote_debugging = true;
+    signals.profile_ephemeral_dir = true;
+
+    const classification = classifySignals(signals);
+    try std.testing.expect(!classification.detected);
+    try std.testing.expectEqual(@as(usize, 4), classification.signal_count);
+    try std.testing.expectEqual(@as(usize, 0), classification.high_confidence_count);
+}
+
+test "collectSessionSignals captures endpoint and launch argument markers" {
+    const allocator = std.testing.allocator;
+    var session = try driver.attach(allocator, "cdp://127.0.0.1:9222/devtools/page/1");
+    defer session.deinit();
+
+    const argv = try allocator.alloc([]const u8, 4);
+    argv[0] = try allocator.dupe(u8, "/usr/bin/chrome");
+    argv[1] = try allocator.dupe(u8, "--remote-debugging-port=9222");
+    argv[2] = try allocator.dupe(u8, "--headless=new");
+    argv[3] = try allocator.dupe(u8, "--disable-blink-features=AutomationControlled");
+    session.owned_argv = argv;
+    session.ephemeral_profile_dir = try allocator.dupe(u8, "/tmp/browser-driver-ephemeral-test");
+
+    var signals: DetectionSignals = .{};
+    collectSessionSignals(&signals, &session);
+
+    try std.testing.expect(signals.endpoint_cdp);
+    try std.testing.expect(signals.transport_cdp);
+    try std.testing.expect(signals.launch_arg_remote_debugging);
+    try std.testing.expect(signals.launch_arg_headless);
+    try std.testing.expect(signals.launch_arg_disable_blink_automation);
+    try std.testing.expect(signals.profile_ephemeral_dir);
+}
+
+test "collectRuntimeSignals captures webview runtime and bridge markers" {
+    var signals: DetectionSignals = .{};
+    collectRuntimeSignals(
+        &signals,
+        .android_webview,
+        "/opt/msedgewebview2/msedgewebview2.exe",
+        "/usr/local/bin/shizuku",
+    );
+
+    try std.testing.expect(signals.runtime_msedgewebview2);
+    try std.testing.expect(signals.bridge_shizuku);
+    try std.testing.expect(signals.webview_mobile_runtime);
+}
+
+test "targetBrowserKindsForHost returns host-specific deterministic list" {
+    const allocator = std.testing.allocator;
+    const kinds = try targetBrowserKindsForHost(allocator);
+    defer allocator.free(kinds);
+
+    try std.testing.expect(kinds.len > 0);
+    if (@import("builtin").os.tag == .macos) {
+        try std.testing.expect(std.mem.indexOfScalar(driver.BrowserKind, kinds, .safari) != null);
+    } else {
+        try std.testing.expect(std.mem.indexOfScalar(driver.BrowserKind, kinds, .safari) == null);
+    }
+}
+
+test "matrix collect summary records adversarial step status" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("matrix/linux-run");
+    try tmp.dir.writeFile(.{
+        .sub_path = "matrix/linux-run/matrix-report.txt",
+        .data =
+        \\Matrix Report
+        \\platform: linux
+        \\strict_ga: 0
+        \\Checks:
+        \\- behavioral_matrix: PASS
+        \\- adversarial_detection_gate: PASS
+        \\OVERALL: PASS
+        \\adb=/usr/bin/adb
+        \\ios_webkit_debug_proxy=NOT_FOUND
+        \\tidevice=NOT_FOUND
+        \\
+        ,
+    });
+
+    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const matrix_root = try tmpAbsPath(allocator, tmp, "matrix");
+    defer allocator.free(matrix_root);
+    const out = try tmpAbsPath(allocator, tmp, "matrix/summary.txt");
+    defer allocator.free(out);
+
+    try cmdMatrixCollect(allocator, root, &.{ "--matrix-root", matrix_root, "--out", out });
+
+    const summary = try readFileAlloc(allocator, out, 1024 * 1024);
+    defer allocator.free(summary);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "adversarial_pass: 1") != null);
 }

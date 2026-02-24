@@ -73,7 +73,7 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     if (opts.ignore_tls_errors and opts.install.engine == .gecko) {
         try writeGeckoInsecureTlsPrefs(allocator, effective_profile_dir);
     }
-    if (opts.install.engine == .gecko) {
+    if (opts.install.engine == .gecko and opts.gecko_stealth_prefs) {
         try writeGeckoStealthPrefs(allocator, effective_profile_dir);
     }
 
@@ -244,7 +244,7 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         argv_list.deinit(allocator);
     }
     try argv_list.append(allocator, try allocator.dupe(u8, opts.host_executable));
-    if (engine == .chromium) {
+    if (engine == .chromium and opts.legacy_automation_markers) {
         try argv_list.append(allocator, try allocator.dupe(u8, "--disable-blink-features=AutomationControlled"));
         try argv_list.append(allocator, try allocator.dupe(u8, "--disable-infobars"));
     }
@@ -470,8 +470,10 @@ pub fn launchElectronWebView(allocator: std.mem.Allocator, opts: types.ElectronW
     if (opts.headless) {
         try argv_list.append(allocator, try allocator.dupe(u8, "--headless=new"));
     }
-    try argv_list.append(allocator, try allocator.dupe(u8, "--disable-blink-features=AutomationControlled"));
-    try argv_list.append(allocator, try allocator.dupe(u8, "--disable-infobars"));
+    if (opts.legacy_automation_markers) {
+        try argv_list.append(allocator, try allocator.dupe(u8, "--disable-blink-features=AutomationControlled"));
+        try argv_list.append(allocator, try allocator.dupe(u8, "--disable-infobars"));
+    }
     if (opts.ignore_tls_errors) {
         try argv_list.append(allocator, try allocator.dupe(u8, "--ignore-certificate-errors"));
         try argv_list.append(allocator, try allocator.dupe(u8, "--allow-insecure-localhost"));
@@ -956,7 +958,7 @@ fn appendDefaultArgs(
     }
 
     switch (opts.install.engine) {
-        .chromium => {
+        .chromium => if (opts.legacy_automation_markers) {
             try args.append(allocator, "--disable-blink-features=AutomationControlled");
             try args.append(allocator, "--disable-infobars");
         },
@@ -1218,6 +1220,67 @@ test "appendDefaultArgs adds chromium headless and cdp flags" {
     try std.testing.expect(hasArg(args.items, "--remote-debugging-port=9333"));
 }
 
+test "appendDefaultArgs does not add chromium automation markers by default" {
+    const allocator = std.testing.allocator;
+
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+
+    var temp_owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temp_owned.items) |item| allocator.free(item);
+        temp_owned.deinit(allocator);
+    }
+
+    try appendDefaultArgs(allocator, &args, &temp_owned, .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = "/bin/true",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .profile_dir = null,
+        .headless = false,
+        .args = &.{},
+    }, .cdp, 9333);
+
+    try std.testing.expect(!hasArg(args.items, "--disable-blink-features=AutomationControlled"));
+    try std.testing.expect(!hasArg(args.items, "--disable-infobars"));
+}
+
+test "appendDefaultArgs adds chromium automation markers when legacy mode enabled" {
+    const allocator = std.testing.allocator;
+
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+
+    var temp_owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temp_owned.items) |item| allocator.free(item);
+        temp_owned.deinit(allocator);
+    }
+
+    try appendDefaultArgs(allocator, &args, &temp_owned, .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = "/bin/true",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .profile_dir = null,
+        .headless = false,
+        .legacy_automation_markers = true,
+        .args = &.{},
+    }, .cdp, 9333);
+
+    try std.testing.expect(hasArg(args.items, "--disable-blink-features=AutomationControlled"));
+    try std.testing.expect(hasArg(args.items, "--disable-infobars"));
+}
+
 test "appendDefaultArgs adds chromium tls ignore flags when requested" {
     const allocator = std.testing.allocator;
 
@@ -1268,6 +1331,71 @@ test "writeGeckoInsecureTlsPrefs writes expected prefs" {
     try std.testing.expect(std.mem.indexOf(u8, data, "webdriver_accept_untrusted_certs") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, "security.cert_pinning.enforcement_level") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, "security.enterprise_roots.enabled") != null);
+}
+
+test "launch gecko does not write stealth prefs by default" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const profile_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "gecko-stealth-disabled" });
+    defer allocator.free(profile_dir);
+
+    var session = try launch(allocator, .{
+        .install = .{
+            .kind = .firefox,
+            .engine = .gecko,
+            .path = "/bin/sh",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .profile_dir = profile_dir,
+        .headless = false,
+        .args = &.{ "-c", "exit 0" },
+    });
+    defer session.deinit();
+
+    const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
+    defer allocator.free(user_js_path);
+    try std.testing.expect(!pathExists(user_js_path));
+}
+
+test "launch gecko writes stealth prefs when enabled" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const profile_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "gecko-stealth-enabled" });
+    defer allocator.free(profile_dir);
+
+    var session = try launch(allocator, .{
+        .install = .{
+            .kind = .firefox,
+            .engine = .gecko,
+            .path = "/bin/sh",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .profile_dir = profile_dir,
+        .headless = false,
+        .gecko_stealth_prefs = true,
+        .args = &.{ "-c", "exit 0" },
+    });
+    defer session.deinit();
+
+    const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
+    defer allocator.free(user_js_path);
+    const data = try std.fs.cwd().readFileAlloc(allocator, user_js_path, 64 * 1024);
+    defer allocator.free(data);
+
+    try std.testing.expect(std.mem.indexOf(u8, data, "dom.webdriver.enabled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, data, "privacy.resistFingerprinting") != null);
 }
 
 test "persistent chromium includes user data dir argument" {
@@ -1805,8 +1933,36 @@ test "launchElectronWebView includes debugging and profile args in owned argv" {
     try std.testing.expect(hasPrefixArg(argv, "--user-data-dir="));
     try std.testing.expect(hasArg(argv, "--ignore-certificate-errors"));
     try std.testing.expect(hasArg(argv, "--allow-insecure-localhost"));
+    try std.testing.expect(!hasArg(argv, "--disable-blink-features=AutomationControlled"));
+    try std.testing.expect(!hasArg(argv, "--disable-infobars"));
     try std.testing.expect(std.mem.eql(u8, session.endpoint.?, "cdp://127.0.0.1:9444/"));
     try std.testing.expect(session.transport == .cdp_ws);
+}
+
+test "launchElectronWebView includes automation markers when legacy mode enabled" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const profile_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "electron-profile-legacy" });
+    defer allocator.free(profile_dir);
+
+    var session = try launchElectronWebView(allocator, .{
+        .executable_path = "/bin/sh",
+        .app_path = "-c",
+        .args = &.{"exit 0"},
+        .debug_port = 9444,
+        .profile_mode = .ephemeral,
+        .profile_dir = profile_dir,
+        .legacy_automation_markers = true,
+    });
+    defer session.deinit();
+
+    const argv = session.owned_argv.?;
+    try std.testing.expect(hasArg(argv, "--disable-blink-features=AutomationControlled"));
+    try std.testing.expect(hasArg(argv, "--disable-infobars"));
 }
 
 test "launchWebViewHost spawns host process" {
@@ -1823,6 +1979,39 @@ test "launchWebViewHost spawns host process" {
     try std.testing.expectEqual(types.EngineKind.webkit, session.install.engine);
     try std.testing.expect(std.mem.startsWith(u8, session.endpoint.?, "webview://session/"));
     try std.testing.expect(session.child != null);
+}
+
+test "launchWebViewHost omits chromium automation markers by default" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var session = try launchWebViewHost(allocator, .{
+        .kind = .webview2,
+        .host_executable = "/bin/sh",
+        .args = &.{ "-c", "exit 0" },
+    });
+    defer session.deinit();
+
+    const argv = session.owned_argv.?;
+    try std.testing.expect(!hasArg(argv, "--disable-blink-features=AutomationControlled"));
+    try std.testing.expect(!hasArg(argv, "--disable-infobars"));
+}
+
+test "launchWebViewHost includes chromium automation markers when legacy mode enabled" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var session = try launchWebViewHost(allocator, .{
+        .kind = .webview2,
+        .host_executable = "/bin/sh",
+        .legacy_automation_markers = true,
+        .args = &.{ "-c", "exit 0" },
+    });
+    defer session.deinit();
+
+    const argv = session.owned_argv.?;
+    try std.testing.expect(hasArg(argv, "--disable-blink-features=AutomationControlled"));
+    try std.testing.expect(hasArg(argv, "--disable-infobars"));
 }
 
 test "attachAndroidWebView builds CDP webview session" {

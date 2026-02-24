@@ -7,6 +7,12 @@
 ## Mobile Bridge Scope
 - Android/iOS support is bridge-smoke scoped for v1 release gates.
 - Full mobile app lifecycle orchestration is outside current GA scope.
+- Adversarial gate coverage for mobile webviews depends on bridge tooling/runtime presence on the host and reports missing targets as explicit skips.
+
+## Strict TLS Default
+- TLS validation is strict by default across launch paths.
+- On constrained environments, some WebDriver HTTPS navigations can remain on `about:blank`; this now fails deterministically with `NavigationNotCommitted`.
+- Opt in to insecure cert handling with `ignore_tls_errors = true` when this behavior is expected for test infrastructure.
 
 ## Managed Cache Packaging
 - Managed cache install supports direct binary payloads (`file://` and `http://`).
@@ -15,3 +21,4 @@
 ## Strict GA Policy
 - Tier-1 and Tier-2 failures are both release-blocking in strict GA mode.
 - Manual matrix evidence and signed reports are mandatory release artifacts.
+- Strict matrix summaries require both `behavioral_matrix` and `adversarial_detection_gate` to pass in signed reports.

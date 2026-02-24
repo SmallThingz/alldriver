@@ -5,11 +5,14 @@
 ## What It Provides
 - Cross-browser desktop discovery for Windows/macOS/Linux.
 - Cross-platform webview runtime discovery (WebView2, WKWebView, WebKitGTK, Android/iOS bridge tooling).
+- Dedicated Electron webview driver support (CDP attach + managed launch).
+- Dedicated WebKitGTK webview driver support (WebKitWebDriver attach + managed launch).
 - Engine-tier automation architecture (Chromium, Gecko, WebKit).
 - Hybrid protocol surface (CDP, WebDriver, BiDi) with capability negotiation.
 - Real transport modules for HTTP/WebSocket protocol execution.
 - Optional managed browser cache discovery (`allow_managed_download` + configurable cache dir).
 - Idiomatic Zig API plus a nodriver-style compatibility facade.
+- nodriver facade contract: Chromium-only driverless launch (CDP), no WebDriver fallback.
 - Dual API model: synchronous core + thread-backed awaitable `AsyncResult(T)` operations.
 - Compile-time extension hooks (no runtime plugin loader).
 
@@ -17,13 +20,53 @@
 - Discover runtimes and bridge tools with `discoverWebViews(...)`.
 - Attach to an existing webview debug endpoint with `attachWebView(...)`.
 - Launch a host app and manage it as a session with `launchWebViewHost(...)`.
+- Electron-specific APIs:
+  - `attachElectronWebView(...)`
+  - `launchElectronWebView(...)`
+- WebKitGTK-specific APIs:
+  - `attachWebKitGtkWebView(...)`
+  - `launchWebKitGtkWebView(...)`
 - Mobile helper attach APIs:
   - `attachAndroidWebView(...)`
   - `attachIosWebView(...)`
+- Android bridge modes:
+  - `AndroidWebViewAttachOptions.bridge_kind = .adb` (default)
+  - `AndroidWebViewAttachOptions.bridge_kind = .shizuku`
+  - `AndroidWebViewAttachOptions.bridge_kind = .direct` (existing forwarded endpoint)
+  - `attachAndroidWebView(...)` can synthesize a root CDP endpoint (`cdp://host:port/`) when `pid`/`socket_name` are omitted.
+
+### Android Shizuku Example
+```zig
+var session = try driver.attachAndroidWebView(allocator, .{
+    .device_id = "emulator-5554",
+    .bridge_kind = .shizuku,
+    .host = "127.0.0.1",
+    .port = 9322,
+    .socket_name = "chrome_devtools_remote",
+});
+defer session.deinit();
+```
+Default Android WebView driving remains unchanged via `.bridge_kind = .adb`.
 
 ## Safety Boundary
 This project targets legitimate automation workflows (testing, QA, scripted browser operations).
 It does not guarantee bypass of bot-detection systems and does not ship explicit evasion primitives.
+
+## External Binary Dependencies
+### Core Runtime (Library Usage)
+- Browser binaries (at least one installed target): Chrome/Chromium, Edge, Safari, Firefox, Brave, Tor Browser, DuckDuckGo Browser, Mullvad Browser, LibreWolf, Epic, Arc, Vivaldi, SigmaOS, Sidekick, Shift, Opera GX, Pale Moon.
+- Lightpanda is optional and build-gated via `-Dinclude_lightpanda_browser=true`; when enabled, discovery uses bundled runtime payload from the lazy `lightpanda_browser` dependency.
+- Webview runtime/driver binaries (as applicable): `msedgewebview2`, `safaridriver`, `WebKitWebDriver`, `MiniBrowser`, `electron`.
+- Mobile bridge binaries: `adb`, `shizuku` (or `rish`), `ios_webkit_debug_proxy`, `tidevice`.
+
+### Tooling / Matrix / Release (When using `zig build tools -- ...`)
+- Base tooling: `zig`, `git`, `bash`, `tar`, `date`, `which` (or `where` on Windows), `chmod`.
+- Strict signing: `gpg`.
+- Remote matrix orchestration: `ssh`, `scp`, `rsync`.
+- VM/QEMU workflows: `qemu-system-x86_64`, `qemu-img`, `curl`, `python3`, `ssh-keygen`.
+- Optional VM image checksum verification: `sha256sum`.
+
+If you only call core APIs (`discover`, `launch`, `attach`), you typically only need runtime binaries for your target browser/driver. Tooling binaries are only required for matrix/release/VM commands.
 
 ## Quick Start
 ```zig
@@ -56,6 +99,28 @@ pub fn run(allocator: std.mem.Allocator) !void {
 - `.ephemeral` uses an isolated profile directory and deletes it on `session.deinit()`.
 - `.ephemeral` is not incognito/private mode; it is disposable profile storage.
 - For WebKit/unknown targets, profile isolation is applied with sandboxed env directories under the effective profile root.
+- WebKitGTK automation is driver-first via `WebKitWebDriver` session bootstrap.
+- `launchWebKitGtkWebView(...)` supports MiniBrowser targeting via `webkitgtk:browserOptions`:
+  - `browser_target = .auto` (default): use default WebDriver capabilities without forcing a browser binary path.
+  - `browser_target = .minibrowser`: require MiniBrowser targeting.
+  - `browser_target = .custom_binary` + `browser_binary_path`: target an explicit browser binary path.
+  - Explicit MiniBrowser/custom targeting uses `webkitgtk:browserOptions` with supplied `browser_args`.
+
+## Privacy Defaults
+- Runtime launch defaults are privacy-first and avoid emitting legacy Chromium automation marker flags.
+- Legacy marker behavior is opt-in via:
+  - `LaunchOptions.legacy_automation_markers`
+  - `WebViewLaunchOptions.legacy_automation_markers`
+  - `ElectronWebViewLaunchOptions.legacy_automation_markers`
+- Gecko stealth prefs are opt-in via `LaunchOptions.gecko_stealth_prefs`.
+
+## TLS Handling
+- Strict TLS is the default (`ignore_tls_errors = false`).
+- Use `ignore_tls_errors = true` in launch options to allow insecure/invalid certs.
+- `LaunchOptions.ignore_tls_errors` applies across desktop browser launches.
+- `WebKitGtkWebViewLaunchOptions.ignore_tls_errors` sets WebDriver `acceptInsecureCerts`, and adds MiniBrowser `--ignore-tls-errors` when MiniBrowser args are explicitly used.
+- `ElectronWebViewLaunchOptions.ignore_tls_errors` adds Chromium insecure-cert launch flags.
+- In strict mode, WebDriver navigation that does not commit (for example, blocked TLS leading to `about:blank`) returns `NavigationNotCommitted`.
 
 ## Examples
 - Many end-to-end usage examples live in `/home/a/projects/zig/browser_driver/examples/README.md`.
@@ -64,6 +129,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 ## Build Option
 Use `-Denable_builtin_extension=true` to enable the built-in compile-time extension adapter.
+Use `-Dinclude_lightpanda_browser=true` to enable bundled Lightpanda support from the lazy dependency.
 
 ## Script Migration
 - Legacy Bash automation scripts have been replaced with Zig tooling.
@@ -84,8 +150,15 @@ Use `-Denable_builtin_extension=true` to enable the built-in compile-time extens
 ## Test Layers
 - Default unit/contract suite (includes cross-platform catalog/discovery invariants): `zig build test`
 - Behavioral browser/webview smoke (opt-in):
-  - `BROWSER_DRIVER_BEHAVIORAL=1 WEBVIEW_BRIDGE_BEHAVIORAL=1 zig build tools -- test-behavioral-matrix`
+  - `BROWSER_DRIVER_BEHAVIORAL=1 WEBVIEW_BRIDGE_BEHAVIORAL=1 WEBKITGTK_BEHAVIORAL=1 zig build tools -- test-behavioral-matrix`
   - Strict mode (fails when expected installs/bridges are missing): set `BROWSER_DRIVER_BEHAVIORAL_STRICT=1` and/or `WEBVIEW_BRIDGE_BEHAVIORAL_STRICT=1`
+- Adversarial automation-detection gate:
+  - `zig build tools -- adversarial-detection-gate --out artifacts/reports/adversarial-detection.txt`
+  - Default objective is adversarial: `OVERALL: PASS` means no detection signals were found across discovered browser + webview targets.
+  - Detected automation signals or discovered target launch/probe failures cause gate failure.
+  - Endpoint/transport/profile-isolation markers are reported for diagnostics but are not treated as standalone detection.
+  - Optional mode for internal validation: add `--expect-detected 1`.
+  - Optional zero-discovery skip behavior: add `--allow-missing-browser 1`.
 
 ## QEMU VM Helpers
 - Check prerequisites: `zig build tools -- vm-check-prereqs`

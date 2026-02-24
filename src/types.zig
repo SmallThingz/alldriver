@@ -15,6 +15,7 @@ pub const WebViewKind = enum {
     webview2,
     wkwebview,
     webkitgtk,
+    electron,
     android_webview,
     ios_wkwebview,
 };
@@ -61,6 +62,9 @@ pub const LaunchOptions = struct {
     profile_mode: ProfileMode,
     profile_dir: ?[]const u8 = null,
     headless: bool = false,
+    ignore_tls_errors: bool = false,
+    legacy_automation_markers: bool = false,
+    gecko_stealth_prefs: bool = false,
     args: []const []const u8 = &.{},
 };
 
@@ -163,12 +167,22 @@ pub const WebViewAttachOptions = struct {
 pub const WebViewLaunchOptions = struct {
     kind: WebViewKind,
     host_executable: []const u8,
+    legacy_automation_markers: bool = false,
     args: []const []const u8 = &.{},
     endpoint: ?[]const u8 = null,
 };
 
+pub const AndroidBridgeKind = enum {
+    adb,
+    shizuku,
+    direct,
+};
+
 pub const AndroidWebViewAttachOptions = struct {
     device_id: []const u8,
+    bridge_kind: AndroidBridgeKind = .adb,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 9222,
     socket_name: ?[]const u8 = null,
     pid: ?u32 = null,
     endpoint: ?[]const u8 = null,
@@ -179,6 +193,53 @@ pub const IosWebViewAttachOptions = struct {
     app_bundle_id: ?[]const u8 = null,
     page_id: ?[]const u8 = null,
     endpoint: ?[]const u8 = null,
+};
+
+pub const WebKitGtkWebViewAttachOptions = struct {
+    endpoint: ?[]const u8 = null,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 4444,
+    session_id: ?[]const u8 = null,
+};
+
+pub const WebKitGtkBrowserTarget = enum {
+    auto,
+    minibrowser,
+    custom_binary,
+};
+
+pub const WebKitGtkWebViewLaunchOptions = struct {
+    driver_executable_path: ?[]const u8 = null,
+    host: []const u8 = "127.0.0.1",
+    port: ?u16 = null,
+    replace_on_new_session: bool = true,
+    profile_mode: ProfileMode = .ephemeral,
+    profile_dir: ?[]const u8 = null,
+    ignore_tls_errors: bool = false,
+    driver_args: []const []const u8 = &.{},
+    browser_target: WebKitGtkBrowserTarget = .auto,
+    browser_binary_path: ?[]const u8 = null,
+    browser_args: []const []const u8 = &.{},
+    session_create_timeout_ms: u32 = 30_000,
+    session_capabilities_json: ?[]const u8 = null,
+};
+
+pub const ElectronWebViewAttachOptions = struct {
+    endpoint: ?[]const u8 = null,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 9222,
+};
+
+pub const ElectronWebViewLaunchOptions = struct {
+    executable_path: []const u8,
+    app_path: ?[]const u8 = null,
+    args: []const []const u8 = &.{},
+    debug_port: ?u16 = null,
+    profile_mode: ProfileMode = .ephemeral,
+    profile_dir: ?[]const u8 = null,
+    headless: bool = false,
+    ignore_tls_errors: bool = false,
+    legacy_automation_markers: bool = false,
 };
 
 pub const DiscoveryError = error{
