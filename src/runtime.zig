@@ -166,7 +166,10 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
     var engine: types.EngineKind = .unknown;
     var kind: types.BrowserKind = .chrome;
 
-    if (std.mem.startsWith(u8, endpoint, "cdp://") or std.mem.startsWith(u8, endpoint, "ws://")) {
+    if (std.mem.startsWith(u8, endpoint, "cdp://") or
+        std.mem.startsWith(u8, endpoint, "ws://") or
+        std.mem.startsWith(u8, endpoint, "wss://"))
+    {
         adapter_kind = .cdp;
         engine = .chromium;
         kind = .chrome;
@@ -174,7 +177,10 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
         adapter_kind = .bidi;
         engine = .gecko;
         kind = .firefox;
-    } else if (std.mem.startsWith(u8, endpoint, "webdriver://") or std.mem.startsWith(u8, endpoint, "http://")) {
+    } else if (std.mem.startsWith(u8, endpoint, "webdriver://") or
+        std.mem.startsWith(u8, endpoint, "http://") or
+        std.mem.startsWith(u8, endpoint, "https://"))
+    {
         adapter_kind = .webdriver;
         engine = .webkit;
         kind = .safari;
@@ -592,13 +598,27 @@ fn buildWebKitGtkSessionCreatePlan(
         };
     }
 
-    const auto_uses_default_capabilities = opts.browser_target == .auto and opts.browser_args.len == 0;
-    const browser_binary_for_capabilities: ?[]const u8 = if (opts.browser_target == .auto)
+    const auto_detected_minibrowser = blk: {
+        if (opts.browser_target != .auto) break :blk false;
+        if (resolved_browser.path == null) break :blk false;
+        const path = resolved_browser.path orelse break :blk false;
+        const base = std.fs.path.basename(path);
+        break :blk containsIgnoreCase(base, "minibrowser");
+    };
+    const auto_uses_default_capabilities = opts.browser_target == .auto and
+        opts.browser_args.len == 0 and
+        !auto_detected_minibrowser;
+    const browser_binary_for_capabilities: ?[]const u8 = if (opts.browser_target == .auto and !auto_detected_minibrowser)
         null
     else
         resolved_browser.path;
 
-    const needs_minibrowser_automation = false;
+    const needs_minibrowser_automation = blk: {
+        if (browser_binary_for_capabilities == null) break :blk false;
+        const path = browser_binary_for_capabilities orelse break :blk false;
+        const base = std.fs.path.basename(path);
+        break :blk containsIgnoreCase(base, "minibrowser") and !hasArgValue(opts.browser_args, "--automation");
+    };
     const needs_minibrowser_ignore_tls = blk: {
         if (browser_binary_for_capabilities == null) break :blk false;
         if (!opts.ignore_tls_errors) break :blk false;
@@ -1765,6 +1785,25 @@ test "buildWebKitGtkSessionCreatePlan does not duplicate automation arg when alr
     try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--automation\",\"--automation\"") == null);
 }
 
+test "buildWebKitGtkSessionCreatePlan injects automation arg for minibrowser target by default" {
+    const allocator = std.testing.allocator;
+    const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
+    defer allocator.free(resolved_path);
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .browser_target = .minibrowser,
+        .browser_args = &.{},
+    }, .{
+        .path = resolved_path,
+        .source = .explicit,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--automation\"]") != null);
+}
+
 test "buildWebKitGtkSessionCreatePlan bypasses typed capabilities when explicit json provided" {
     const allocator = std.testing.allocator;
     const custom_json = "{\"capabilities\":{\"alwaysMatch\":{\"acceptInsecureCerts\":true},\"firstMatch\":[{}]}}";
@@ -1787,7 +1826,7 @@ test "buildWebKitGtkSessionCreatePlan bypasses typed capabilities when explicit 
     try std.testing.expect(plan.fallback_body == null);
 }
 
-test "buildWebKitGtkSessionCreatePlan uses default auto primary body without browser options" {
+test "buildWebKitGtkSessionCreatePlan in auto mode prefers minibrowser automation body when detected" {
     const allocator = std.testing.allocator;
     const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
     defer allocator.free(resolved_path);
@@ -1803,12 +1842,14 @@ test "buildWebKitGtkSessionCreatePlan uses default auto primary body without bro
         if (plan.fallback_body) |body| allocator.free(body);
     }
 
-    try std.testing.expect(std.mem.eql(u8, plan.primary_body, default_webdriver_session_body));
-    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") == null);
-    try std.testing.expect(plan.fallback_body == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"binary\":\"/usr/lib/webkitgtk-6.0/MiniBrowser\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--automation\"]") != null);
+    try std.testing.expect(plan.fallback_body != null);
+    try std.testing.expect(std.mem.eql(u8, plan.fallback_body.?, default_webdriver_session_body));
 }
 
-test "buildWebKitGtkSessionCreatePlan uses default auto primary with acceptInsecureCerts when ignore tls enabled" {
+test "buildWebKitGtkSessionCreatePlan in auto mode injects automation and ignore tls for minibrowser" {
     const allocator = std.testing.allocator;
     const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
     defer allocator.free(resolved_path);
@@ -1824,12 +1865,32 @@ test "buildWebKitGtkSessionCreatePlan uses default auto primary with acceptInsec
         if (plan.fallback_body) |body| allocator.free(body);
     }
 
-    try std.testing.expect(std.mem.eql(u8, plan.primary_body, default_webdriver_session_body_accept_insecure));
-    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"acceptInsecureCerts\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--automation\",\"--ignore-tls-errors\"]") != null);
+    try std.testing.expect(plan.fallback_body != null);
+    try std.testing.expect(std.mem.eql(u8, plan.fallback_body.?, default_webdriver_session_body_accept_insecure));
+}
+
+test "buildWebKitGtkSessionCreatePlan keeps default auto body when minibrowser is not detected" {
+    const allocator = std.testing.allocator;
+    const plan = try buildWebKitGtkSessionCreatePlan(allocator, .{
+        .browser_target = .auto,
+        .browser_args = &.{},
+    }, .{
+        .path = null,
+        .source = .none,
+    });
+    defer {
+        allocator.free(plan.primary_body);
+        if (plan.fallback_body) |body| allocator.free(body);
+    }
+
+    try std.testing.expect(std.mem.eql(u8, plan.primary_body, default_webdriver_session_body));
     try std.testing.expect(plan.fallback_body == null);
 }
 
-test "buildWebKitGtkSessionCreatePlan in auto mode keeps args without forcing browser binary" {
+test "buildWebKitGtkSessionCreatePlan in auto mode preserves args and enables minibrowser automation" {
     const allocator = std.testing.allocator;
     const resolved_path = try allocator.dupe(u8, "/usr/lib/webkitgtk-6.0/MiniBrowser");
     defer allocator.free(resolved_path);
@@ -1846,8 +1907,8 @@ test "buildWebKitGtkSessionCreatePlan in auto mode keeps args without forcing br
     }
 
     try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"webkitgtk:browserOptions\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--foo\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"binary\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"args\":[\"--automation\",\"--foo\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.primary_body, "\"binary\":\"/usr/lib/webkitgtk-6.0/MiniBrowser\"") != null);
     try std.testing.expect(plan.fallback_body != null);
     try std.testing.expect(std.mem.eql(u8, plan.fallback_body.?, default_webdriver_session_body));
 }

@@ -427,6 +427,43 @@ fn containsPrefixNonNotFound(data: []const u8, prefix: []const u8) bool {
     return false;
 }
 
+fn parseUsizeLineValue(data: []const u8, prefix: []const u8) usize {
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, prefix)) continue;
+        const raw = std.mem.trim(u8, trimmed[prefix.len..], " \t\r");
+        return std.fmt.parseUnsigned(usize, raw, 10) catch 0;
+    }
+    return 0;
+}
+
+fn parseAdversarialTierCounts(allocator: Allocator, report_path: []const u8) !AdversarialTierCounts {
+    const data = try readFileAlloc(allocator, report_path, 8 * 1024 * 1024);
+    defer allocator.free(data);
+
+    var counts: AdversarialTierCounts = .{};
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (!std.mem.startsWith(u8, line, "target=")) continue;
+
+        const is_modern = std.mem.indexOf(u8, line, "api=modern") != null;
+        const is_legacy = std.mem.indexOf(u8, line, "api=legacy") != null;
+        const is_fail = std.mem.indexOf(u8, line, "status=FAIL") != null;
+
+        if (is_modern) {
+            counts.modern_targets += 1;
+            if (is_fail) counts.modern_failures += 1;
+        } else if (is_legacy) {
+            counts.legacy_targets += 1;
+            if (is_fail) counts.legacy_failures += 1;
+        }
+    }
+
+    return counts;
+}
+
 fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
@@ -523,6 +560,13 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
 
         const behavioral_pass = containsLine(report_data, "- behavioral_matrix: PASS");
         const adversarial_pass = containsLine(report_data, "- adversarial_detection_gate: PASS");
+        const adversarial_modern_targets = parseUsizeLineValue(report_data, "adversarial_modern_targets:");
+        const adversarial_modern_failures = parseUsizeLineValue(report_data, "adversarial_modern_failures:");
+        const adversarial_legacy_targets = parseUsizeLineValue(report_data, "adversarial_legacy_targets:");
+        const adversarial_legacy_failures = parseUsizeLineValue(report_data, "adversarial_legacy_failures:");
+        const adversarial_tier_ok = adversarial_modern_targets > 0 and
+            adversarial_modern_failures == 0 and
+            (adversarial_legacy_targets == 0 or adversarial_legacy_failures == 0);
         const android_bridge_ok = containsPrefixNonNotFound(report_data, "adb=") or
             containsPrefixNonNotFound(report_data, "shizuku=") or
             containsPrefixNonNotFound(report_data, "rish=");
@@ -532,6 +576,7 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
             std.mem.eql(u8, sig_status, "VALID") and
             behavioral_pass and
             adversarial_pass and
+            adversarial_tier_ok and
             is_strict_report;
 
         if (strict_ga) {
@@ -555,7 +600,7 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         }
 
         try content.writer(allocator).print(
-            "run: {s}\nreport: {s}\nplatform: {s}\nstatus: {s}\nsignature: {s}\nstrict_report_ok: {d}\nbehavioral_pass: {d}\nadversarial_pass: {d}\nandroid_bridge_tool_present: {d}\nios_bridge_tool_present: {d}\n\n",
+            "run: {s}\nreport: {s}\nplatform: {s}\nstatus: {s}\nsignature: {s}\nstrict_report_ok: {d}\nbehavioral_pass: {d}\nadversarial_pass: {d}\nadversarial_tier_ok: {d}\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\nadversarial_legacy_targets: {d}\nadversarial_legacy_failures: {d}\nandroid_bridge_tool_present: {d}\nios_bridge_tool_present: {d}\n\n",
             .{
                 platform_run,
                 report,
@@ -565,6 +610,11 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
                 @intFromBool(strict_report_ok),
                 @intFromBool(behavioral_pass),
                 @intFromBool(adversarial_pass),
+                @intFromBool(adversarial_tier_ok),
+                adversarial_modern_targets,
+                adversarial_modern_failures,
+                adversarial_legacy_targets,
+                adversarial_legacy_failures,
                 @intFromBool(android_bridge_ok),
                 @intFromBool(ios_ok),
             },
@@ -621,6 +671,7 @@ fn cmdTestBehavioral(allocator: Allocator, root: []const u8, _: []const []const 
     if (env.get("ELECTRON_BEHAVIORAL_STRICT") == null) try env.put("ELECTRON_BEHAVIORAL_STRICT", "0");
     if (env.get("WEBKITGTK_BEHAVIORAL") == null) try env.put("WEBKITGTK_BEHAVIORAL", "0");
     if (env.get("WEBKITGTK_BEHAVIORAL_STRICT") == null) try env.put("WEBKITGTK_BEHAVIORAL_STRICT", "0");
+    if (env.get("BROWSER_DRIVER_TEST_IGNORE_TLS") == null) try env.put("BROWSER_DRIVER_TEST_IGNORE_TLS", "1");
 
     try runInherit(allocator, &.{ "zig", "build", "test" }, root, &env);
 }
@@ -638,6 +689,19 @@ const GateTotals = struct {
     detected: usize = 0,
     failed: usize = 0,
     skipped: usize = 0,
+    modern_targeted: usize = 0,
+    modern_discovered: usize = 0,
+    modern_failed: usize = 0,
+    legacy_targeted: usize = 0,
+    legacy_discovered: usize = 0,
+    legacy_failed: usize = 0,
+};
+
+const AdversarialTierCounts = struct {
+    modern_targets: usize = 0,
+    modern_failures: usize = 0,
+    legacy_targets: usize = 0,
+    legacy_failures: usize = 0,
 };
 
 const DetectionSignals = struct {
@@ -769,19 +833,28 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
 
     try report.writer(allocator).writeAll("[browser_targets]\n");
     for (target_browser_kinds) |kind| {
+        const api_tier = driver.support_tier.browserTier(kind);
         totals.targeted += 1;
+        switch (api_tier) {
+            .modern => totals.modern_targeted += 1,
+            .legacy => totals.legacy_targeted += 1,
+        }
         const install_opt = firstInstallForKind(installs, kind);
         if (install_opt == null) {
             totals.skipped += 1;
             try report.writer(allocator).print(
-                "target=browser kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_install\n",
-                .{ @tagName(kind), @tagName(driver.engineFor(kind)), host_platform },
+                "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_install\n",
+                .{ apiTierName(api_tier), @tagName(kind), @tagName(driver.engineFor(kind)), host_platform },
             );
             continue;
         }
 
         const install = install_opt.?;
         totals.discovered += 1;
+        switch (api_tier) {
+            .modern => totals.modern_discovered += 1,
+            .legacy => totals.legacy_discovered += 1,
+        }
 
         var session = driver.launch(allocator, .{
             .install = install,
@@ -790,9 +863,13 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             .args = &.{},
         }) catch |err| {
             totals.failed += 1;
+            switch (api_tier) {
+                .modern => totals.modern_failed += 1,
+                .legacy => totals.legacy_failed += 1,
+            }
             try report.writer(allocator).print(
-                "target=browser kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_error error={s}\n",
-                .{ @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_error error={s}\n",
+                .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
             );
             continue;
         };
@@ -809,9 +886,13 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             null,
         ) catch |err| {
             totals.failed += 1;
+            switch (api_tier) {
+                .modern => totals.modern_failed += 1,
+                .legacy => totals.legacy_failed += 1,
+            }
             try report.writer(allocator).print(
-                "target=browser kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
-                .{ @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
+                .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
             );
             continue;
         };
@@ -819,11 +900,18 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         totals.probed += 1;
         if (classification.detected) totals.detected += 1;
         const passed = expectationSatisfied(expectation, classification.detected);
-        if (!passed) totals.failed += 1;
+        if (!passed) {
+            totals.failed += 1;
+            switch (api_tier) {
+                .modern => totals.modern_failed += 1,
+                .legacy => totals.legacy_failed += 1,
+            }
+        }
 
         try report.writer(allocator).print(
-            "target=browser kind={s} engine={s} platform={s} status={s} discovered=1 launched=1 probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
+            "target=browser api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched=1 probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
             .{
+                apiTierName(api_tier),
                 @tagName(kind),
                 @tagName(install.engine),
                 host_platform,
@@ -838,25 +926,38 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
 
     try report.writer(allocator).writeAll("\n[webview_targets]\n");
     for (target_webview_kinds) |kind| {
+        const api_tier = driver.support_tier.webViewTier(kind);
         totals.targeted += 1;
+        switch (api_tier) {
+            .modern => totals.modern_targeted += 1,
+            .legacy => totals.legacy_targeted += 1,
+        }
         const runtime_opt = bestWebViewRuntimeForKind(webview_runtimes, kind);
         if (runtime_opt == null) {
             totals.skipped += 1;
             try report.writer(allocator).print(
-                "target=webview kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_runtime\n",
-                .{ @tagName(kind), @tagName(webviewEngineForKind(kind)), webViewPlatformName(kind, host_platform) },
+                "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=missing_runtime\n",
+                .{ apiTierName(api_tier), @tagName(kind), @tagName(webviewEngineForKind(kind)), webViewPlatformName(kind, host_platform) },
             );
             continue;
         }
 
         const runtime = runtime_opt.?;
         totals.discovered += 1;
+        switch (api_tier) {
+            .modern => totals.modern_discovered += 1,
+            .legacy => totals.legacy_discovered += 1,
+        }
 
         var probe_session = launchOrAttachWebViewForProbe(allocator, runtime) catch |err| {
             totals.failed += 1;
+            switch (api_tier) {
+                .modern => totals.modern_failed += 1,
+                .legacy => totals.legacy_failed += 1,
+            }
             try report.writer(allocator).print(
-                "target=webview kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_or_attach_error error={s}\n",
-                .{ @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
+                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=launch_or_attach_error error={s}\n",
+                .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
             );
             continue;
         };
@@ -873,9 +974,14 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             runtime.bridge_tool_path,
         ) catch |err| {
             totals.failed += 1;
+            switch (api_tier) {
+                .modern => totals.modern_failed += 1,
+                .legacy => totals.legacy_failed += 1,
+            }
             try report.writer(allocator).print(
-                "target=webview kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
+                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 reason=probe_error error={s}\n",
                 .{
+                    apiTierName(api_tier),
                     @tagName(kind),
                     @tagName(runtime.engine),
                     webViewPlatformName(kind, host_platform),
@@ -889,11 +995,18 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         totals.probed += 1;
         if (classification.detected) totals.detected += 1;
         const passed = expectationSatisfied(expectation, classification.detected);
-        if (!passed) totals.failed += 1;
+        if (!passed) {
+            totals.failed += 1;
+            switch (api_tier) {
+                .modern => totals.modern_failed += 1,
+                .legacy => totals.legacy_failed += 1,
+            }
+        }
 
         try report.writer(allocator).print(
-            "target=webview kind={s} engine={s} platform={s} status={s} discovered=1 launched={d} probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
+            "target=webview api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched={d} probed=1 detected={d} signal_count={d} high_confidence_count={d} reason={s}\n",
             .{
+                apiTierName(api_tier),
                 @tagName(kind),
                 @tagName(runtime.engine),
                 webViewPlatformName(kind, host_platform),
@@ -935,7 +1048,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     }
 
     try report.writer(allocator).print(
-        "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d}\n",
+        "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d} modern_targeted={d} modern_discovered={d} modern_failed={d} legacy_targeted={d} legacy_discovered={d} legacy_failed={d}\n",
         .{
             totals.targeted,
             totals.discovered,
@@ -944,6 +1057,12 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             totals.detected,
             totals.failed,
             totals.skipped,
+            totals.modern_targeted,
+            totals.modern_discovered,
+            totals.modern_failed,
+            totals.legacy_targeted,
+            totals.legacy_discovered,
+            totals.legacy_failed,
         },
     );
 
@@ -966,6 +1085,13 @@ fn expectationSatisfied(expectation: GateExpectation, detected: bool) bool {
     };
 }
 
+fn apiTierName(tier: driver.support_tier.ApiTier) []const u8 {
+    return switch (tier) {
+        .modern => "modern",
+        .legacy => "legacy",
+    };
+}
+
 fn classifySignals(signals: DetectionSignals) DetectionClassification {
     const signal_count = signals.signalCount();
     const high_confidence_count = signals.highConfidenceCount();
@@ -981,17 +1107,17 @@ fn classifySignals(signals: DetectionSignals) DetectionClassification {
 fn targetBrowserKindsForHost(allocator: Allocator) ![]driver.BrowserKind {
     const list = switch (@import("builtin").os.tag) {
         .windows => &[_]driver.BrowserKind{
-            .chrome, .edge, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf,
-            .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx, .lightpanda, .palemoon,
+            .chrome, .edge, .firefox, .brave,    .tor,   .duckduckgo, .mullvad,    .librewolf,
+            .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx,    .lightpanda, .palemoon,
         },
         .macos => &[_]driver.BrowserKind{
-            .chrome, .edge, .safari, .firefox, .brave, .tor, .duckduckgo, .mullvad,
-            .librewolf, .epic, .arc, .vivaldi, .sigmaos, .sidekick, .shift, .operagx,
+            .chrome,     .edge,     .safari, .firefox, .brave,   .tor,      .duckduckgo, .mullvad,
+            .librewolf,  .epic,     .arc,    .vivaldi, .sigmaos, .sidekick, .shift,      .operagx,
             .lightpanda, .palemoon,
         },
         else => &[_]driver.BrowserKind{
-            .chrome, .edge, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf,
-            .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx, .lightpanda, .palemoon,
+            .chrome, .edge, .firefox, .brave,    .tor,   .duckduckgo, .mullvad,    .librewolf,
+            .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx,    .lightpanda, .palemoon,
         },
     };
 
@@ -1351,18 +1477,20 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
     const skip_marker_scan = std.mem.eql(u8, mapGetOr(&flags, "skip-marker-scan", "0"), "1");
     const skip_bundle = std.mem.eql(u8, mapGetOr(&flags, "skip-bundle", "0"), "1");
 
+    const ts = try nowStamp(allocator);
+    defer allocator.free(ts);
+
     var matrix_root_default: ?[]u8 = null;
     defer if (matrix_root_default) |p| allocator.free(p);
     const matrix_root_raw = flags.get("matrix-root") orelse blk: {
-        matrix_root_default = try pathJoin(allocator, &.{ root, "artifacts", "matrix" });
+        const run_id = try std.fmt.allocPrint(allocator, "prod-gate-{s}", .{ts});
+        defer allocator.free(run_id);
+        matrix_root_default = try pathJoin(allocator, &.{ root, "artifacts", "matrix", run_id });
         break :blk matrix_root_default.?;
     };
     const matrix_root = try toAbsolutePath(allocator, root, matrix_root_raw);
     defer allocator.free(matrix_root);
     try ensurePath(matrix_root);
-
-    const ts = try nowStamp(allocator);
-    defer allocator.free(ts);
 
     var out_default: ?[]u8 = null;
     defer if (out_default) |p| allocator.free(p);
@@ -1769,6 +1897,17 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         const st = std.mem.trim(u8, status_data, "\r\n\t ");
         try rpt.writer(allocator).print("- {s}: {s}\n", .{ name, st });
     }
+
+    const adversarial_counts = parseAdversarialTierCounts(allocator, adversarial_report_path) catch AdversarialTierCounts{};
+    try rpt.writer(allocator).print(
+        "\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\nadversarial_legacy_targets: {d}\nadversarial_legacy_failures: {d}\n",
+        .{
+            adversarial_counts.modern_targets,
+            adversarial_counts.modern_failures,
+            adversarial_counts.legacy_targets,
+            adversarial_counts.legacy_failures,
+        },
+    );
 
     try rpt.writer(allocator).print("\nOVERALL: {s}\n\n", .{if (overall) "PASS" else "FAIL"});
     const env_data = try readFileAlloc(allocator, env_txt_path, 4 * 1024 * 1024);
@@ -2828,6 +2967,11 @@ test "matrix collect non-strict pass with single report" {
         \\strict_ga: 0
         \\Checks:
         \\- behavioral_matrix: PASS
+        \\- adversarial_detection_gate: PASS
+        \\adversarial_modern_targets: 1
+        \\adversarial_modern_failures: 0
+        \\adversarial_legacy_targets: 0
+        \\adversarial_legacy_failures: 0
         \\OVERALL: PASS
         \\adb=/usr/bin/adb
         \\ios_webkit_debug_proxy=NOT_FOUND
@@ -2843,7 +2987,7 @@ test "matrix collect non-strict pass with single report" {
     const out = try tmpAbsPath(allocator, tmp, "matrix/summary.txt");
     defer allocator.free(out);
 
-    try cmdMatrixCollect(allocator, root, &.{ "--matrix-root", matrix_root, "--out", out });
+    try cmdMatrixCollect(allocator, root, &.{ "--strict-ga", "0", "--matrix-root", matrix_root, "--out", out });
 
     const summary = try readFileAlloc(allocator, out, 1024 * 1024);
     defer allocator.free(summary);

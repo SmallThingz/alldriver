@@ -11,6 +11,8 @@ const cdp_target_poll_timeout_ms: i64 = 8_000;
 const cdp_target_poll_sleep_ms: u64 = 100;
 const startup_connect_retry_timeout_ms: i64 = 8_000;
 const startup_connect_retry_sleep_ms: u64 = 100;
+const webdriver_navigation_commit_timeout_ms: i64 = 10_000;
+const webdriver_navigation_commit_sleep_ms: u64 = 100;
 
 pub fn navigate(session: *Session, url: []const u8) !void {
     switch (session.transport) {
@@ -29,7 +31,14 @@ pub fn navigate(session: *Session, url: []const u8) !void {
             defer session.allocator.free(body);
             const raw = try callWebDriver(session, .POST, "/url", body);
             defer session.allocator.free(raw);
-            try verifyWebDriverNavigationCommitted(session, url);
+            verifyWebDriverNavigationCommitted(session, url) catch |err| {
+                // WebKitGTK/MiniBrowser can transiently remain on about:blank even after
+                // a successful WebDriver navigate command; issue one protocol retry before failing.
+                if (err != error.NavigationNotCommitted) return err;
+                const retry_raw = try callWebDriver(session, .POST, "/url", body);
+                defer session.allocator.free(retry_raw);
+                try verifyWebDriverNavigationCommitted(session, url);
+            };
         },
         .bidi_ws => {
             const context_id = session.browsing_context_id orelse return error.SessionNotReady;
@@ -162,6 +171,13 @@ pub fn waitForDomReady(session: *Session, timeout_ms: u32) !void {
 
     while (true) {
         const res = evaluate(session, "document.readyState") catch {
+            if (session.transport == .webdriver_http) {
+                const current_url = webDriverCurrentUrlAlloc(session) catch null;
+                if (current_url) |url| {
+                    defer session.allocator.free(url);
+                    if (!isBlankishUrl(url)) return;
+                }
+            }
             if (std.time.milliTimestamp() >= deadline) return error.Timeout;
             std.Thread.sleep(25 * std.time.ns_per_ms);
             continue;
@@ -170,6 +186,14 @@ pub fn waitForDomReady(session: *Session, timeout_ms: u32) !void {
 
         if (std.mem.indexOf(u8, res, "complete") != null or std.mem.indexOf(u8, res, "interactive") != null) {
             return;
+        }
+
+        if (session.transport == .webdriver_http) {
+            const current_url = webDriverCurrentUrlAlloc(session) catch null;
+            if (current_url) |url| {
+                defer session.allocator.free(url);
+                if (!isBlankishUrl(url)) return;
+            }
         }
 
         if (std.time.milliTimestamp() >= deadline) return error.Timeout;
@@ -587,17 +611,65 @@ fn callWebDriver(
 fn verifyWebDriverNavigationCommitted(session: *Session, target_url: []const u8) !void {
     if (isBlankishUrl(target_url)) return;
 
-    const response = try evalViaWebDriver(session, "return window.location.href;");
-    defer session.allocator.free(response);
+    const deadline = std.time.milliTimestamp() + webdriver_navigation_commit_timeout_ms;
+    while (true) {
+        const current_url = try webDriverCurrentUrlAlloc(session);
+        defer if (current_url) |value| session.allocator.free(value);
 
-    const current_url = try extractWebDriverExecuteStringAlloc(session.allocator, response);
-    defer if (current_url) |value| session.allocator.free(value);
+        if (current_url) |value| {
+            if (!isBlankishUrl(value)) return;
+        }
 
-    if (current_url) |value| {
-        if (isBlankishUrl(value)) return error.NavigationNotCommitted;
-    } else {
-        return error.NavigationNotCommitted;
+        if (std.time.milliTimestamp() >= deadline) return error.NavigationNotCommitted;
+        std.Thread.sleep(webdriver_navigation_commit_sleep_ms * std.time.ns_per_ms);
     }
+}
+
+fn webDriverCurrentUrlAlloc(session: *Session) !?[]u8 {
+    const raw = callWebDriver(session, .GET, "/url", null) catch |err| switch (err) {
+        error.UnsupportedProtocol,
+        error.ProtocolCommandFailed,
+        => null,
+        else => return err,
+    };
+    if (raw) |payload| {
+        defer session.allocator.free(payload);
+        const current_url = try extractWebDriverExecuteStringAlloc(session.allocator, payload);
+        if (current_url != null) return current_url;
+    }
+
+    // Some legacy WebDriver surfaces may not expose GET /url consistently.
+    const eval_payload = try evalViaWebDriver(session, "return window.location.href;");
+    defer session.allocator.free(eval_payload);
+    return extractWebDriverExecuteStringAlloc(session.allocator, eval_payload);
+}
+
+fn urlFromWebDriverPayloadAlloc(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
+    return extractWebDriverExecuteStringAlloc(allocator, payload);
+}
+
+test "urlFromWebDriverPayloadAlloc parses W3C get current url payload" {
+    const allocator = std.testing.allocator;
+    const parsed = try urlFromWebDriverPayloadAlloc(allocator, "{\"value\":\"https://example.com/\"}");
+    defer if (parsed) |value| allocator.free(value);
+    try std.testing.expect(parsed != null);
+    try std.testing.expect(std.mem.eql(u8, parsed.?, "https://example.com/"));
+}
+
+test "extractWebDriverExecuteStringAlloc supports nested value object" {
+    const allocator = std.testing.allocator;
+    const parsed = try extractWebDriverExecuteStringAlloc(allocator, "{\"value\":{\"value\":\"https://example.org/\"}}");
+    defer if (parsed) |value| allocator.free(value);
+    try std.testing.expect(parsed != null);
+    try std.testing.expect(std.mem.eql(u8, parsed.?, "https://example.org/"));
+}
+
+test "isBlankishUrl handles blank and non-blank variants" {
+    try std.testing.expect(isBlankishUrl("about:blank"));
+    try std.testing.expect(isBlankishUrl(" ABOUT:BLANK \n"));
+    try std.testing.expect(isBlankishUrl(" \t\r\n"));
+    try std.testing.expect(!isBlankishUrl("about:blank?x=1"));
+    try std.testing.expect(!isBlankishUrl("https://example.com"));
 }
 
 fn extractWebDriverExecuteStringAlloc(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
@@ -721,13 +793,35 @@ fn evalViaCdp(session: *Session, expression: []const u8) ![]u8 {
 }
 
 fn evalViaWebDriver(session: *Session, script: []const u8) ![]u8 {
+    const wrapped = try std.fmt.allocPrint(session.allocator, "return ({s});", .{script});
+    defer session.allocator.free(wrapped);
+
+    const wrapped_body = try webDriverExecuteBodyAlloc(session, wrapped);
+    defer session.allocator.free(wrapped_body);
+
+    return callWebDriverExecute(session, wrapped_body) catch |err| switch (err) {
+        // Fall back to raw body form if expression-wrapping is not accepted.
+        error.ProtocolCommandFailed => blk: {
+            const raw_body = try webDriverExecuteBodyAlloc(session, script);
+            defer session.allocator.free(raw_body);
+            break :blk try callWebDriverExecute(session, raw_body);
+        },
+        else => err,
+    };
+}
+
+fn webDriverExecuteBodyAlloc(session: *Session, script: []const u8) ![]u8 {
     const escaped = try escapeJsonString(session.allocator, script);
     defer session.allocator.free(escaped);
+    return std.fmt.allocPrint(session.allocator, "{{\"script\":\"{s}\",\"args\":[]}}", .{escaped});
+}
 
-    const body = try std.fmt.allocPrint(session.allocator, "{{\"script\":\"{s}\",\"args\":[]}}", .{escaped});
-    defer session.allocator.free(body);
-
-    return callWebDriver(session, .POST, "/execute/sync", body);
+fn callWebDriverExecute(session: *Session, body: []const u8) ![]u8 {
+    return callWebDriver(session, .POST, "/execute/sync", body) catch |err| switch (err) {
+        // Legacy WebDriver endpoints (including some WebKitGTK stacks) expose /execute.
+        error.ProtocolCommandFailed => callWebDriver(session, .POST, "/execute", body),
+        else => err,
+    };
 }
 
 fn evalViaBidi(session: *Session, expression: []const u8) ![]u8 {
