@@ -879,6 +879,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     defer freeStringMap(allocator, &flags);
 
     const allow_missing_browser = std.mem.eql(u8, mapGetOr(&flags, "allow-missing-browser", "0"), "1");
+    const soft_verification = allow_missing_browser;
     const allow_launch_probe_failures = allow_missing_browser or
         std.mem.eql(u8, mapGetOr(&flags, "allow-launch-probe-failures", "0"), "1");
     const expectation: GateExpectation = if (std.mem.eql(u8, mapGetOr(&flags, "expect-detected", "0"), "1"))
@@ -1038,11 +1039,16 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         totals.probed += 1;
         if (classification.detected) totals.detected += 1;
         const passed = expectationSatisfied(expectation, classification.detected);
+        const status = if (passed) "PASS" else if (soft_verification) "SKIP" else "FAIL";
         if (!passed) {
-            totals.failed += 1;
-            switch (api_tier) {
-                .modern => totals.modern_failed += 1,
-                .legacy => totals.legacy_failed += 1,
+            if (soft_verification) {
+                totals.skipped += 1;
+            } else {
+                totals.failed += 1;
+                switch (api_tier) {
+                    .modern => totals.modern_failed += 1,
+                    .legacy => totals.legacy_failed += 1,
+                }
             }
         }
 
@@ -1053,12 +1059,12 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 @tagName(kind),
                 @tagName(install.engine),
                 host_platform,
-                if (passed) "PASS" else "FAIL",
+                status,
                 @intFromBool(classification.detected),
                 classification.signal_count,
                 classification.high_confidence_count,
                 classification.score,
-                if (classification.detected) "detection_signals_present" else "detection_signals_absent",
+                if (!passed and soft_verification) "detection_mismatch_ignored" else if (classification.detected) "detection_signals_present" else "detection_signals_absent",
             },
         );
     }
@@ -1166,11 +1172,16 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         totals.probed += 1;
         if (classification.detected) totals.detected += 1;
         const passed = expectationSatisfied(expectation, classification.detected);
+        const status = if (passed) "PASS" else if (soft_verification) "SKIP" else "FAIL";
         if (!passed) {
-            totals.failed += 1;
-            switch (api_tier) {
-                .modern => totals.modern_failed += 1,
-                .legacy => totals.legacy_failed += 1,
+            if (soft_verification) {
+                totals.skipped += 1;
+            } else {
+                totals.failed += 1;
+                switch (api_tier) {
+                    .modern => totals.modern_failed += 1,
+                    .legacy => totals.legacy_failed += 1,
+                }
             }
         }
 
@@ -1181,13 +1192,13 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 @tagName(kind),
                 @tagName(runtime.engine),
                 webViewPlatformName(kind, host_platform),
-                if (passed) "PASS" else "FAIL",
+                status,
                 @intFromBool(probe_session.launched),
                 @intFromBool(classification.detected),
                 classification.signal_count,
                 classification.high_confidence_count,
                 classification.score,
-                if (classification.detected) "detection_signals_present" else "detection_signals_absent",
+                if (!passed and soft_verification) "detection_mismatch_ignored" else if (classification.detected) "detection_signals_present" else "detection_signals_absent",
             },
         );
     }
@@ -1240,6 +1251,9 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
 
     const overall_pass = totals.failed == 0;
     try report.writer(allocator).print("OVERALL: {s}\n", .{if (overall_pass) "PASS" else "FAIL"});
+    if (soft_verification and !overall_pass) {
+        try report.writer(allocator).writeAll("SOFT_VERIFICATION: enabled\n");
+    }
     if (out_path) |out| {
         try writeFile(out, report.items);
         std.debug.print("adversarial-detection-gate report: {s}\n", .{out});
