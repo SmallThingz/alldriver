@@ -879,6 +879,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     defer freeStringMap(allocator, &flags);
 
     const allow_missing_browser = std.mem.eql(u8, mapGetOr(&flags, "allow-missing-browser", "0"), "1");
+    const allow_launch_probe_failures = allow_missing_browser or
+        std.mem.eql(u8, mapGetOr(&flags, "allow-launch-probe-failures", "0"), "1");
     const expectation: GateExpectation = if (std.mem.eql(u8, mapGetOr(&flags, "expect-detected", "0"), "1"))
         .detected
     else
@@ -952,15 +954,23 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                     .gecko_stealth_prefs = true,
                     .args = &.{},
                 }) catch |err| {
-                    totals.failed += 1;
-                    switch (api_tier) {
-                        .modern => totals.modern_failed += 1,
-                        .legacy => totals.legacy_failed += 1,
+                    if (allow_launch_probe_failures) {
+                        totals.skipped += 1;
+                        try report.writer(allocator).print(
+                            "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error_ignored error={s}\n",
+                            .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                        );
+                    } else {
+                        totals.failed += 1;
+                        switch (api_tier) {
+                            .modern => totals.modern_failed += 1,
+                            .legacy => totals.legacy_failed += 1,
+                        }
+                        try report.writer(allocator).print(
+                            "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
+                            .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                        );
                     }
-                    try report.writer(allocator).print(
-                        "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
-                        .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
-                    );
                     continue;
                 };
                 break :blk modern_session.intoBase();
@@ -972,15 +982,23 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 .gecko_stealth_prefs = true,
                 .args = &.{},
             }) catch |err| {
-                totals.failed += 1;
-                switch (api_tier) {
-                    .modern => totals.modern_failed += 1,
-                    .legacy => totals.legacy_failed += 1,
+                if (allow_launch_probe_failures) {
+                    totals.skipped += 1;
+                    try report.writer(allocator).print(
+                        "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error_ignored error={s}\n",
+                        .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                    );
+                } else {
+                    totals.failed += 1;
+                    switch (api_tier) {
+                        .modern => totals.modern_failed += 1,
+                        .legacy => totals.legacy_failed += 1,
+                    }
+                    try report.writer(allocator).print(
+                        "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
+                        .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                    );
                 }
-                try report.writer(allocator).print(
-                    "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
-                    .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
-                );
                 continue;
             };
             break :blk legacy_session.intoBase();
@@ -997,15 +1015,23 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             null,
             null,
         ) catch |err| {
-            totals.failed += 1;
-            switch (api_tier) {
-                .modern => totals.modern_failed += 1,
-                .legacy => totals.legacy_failed += 1,
+            if (allow_launch_probe_failures) {
+                totals.skipped += 1;
+                try report.writer(allocator).print(
+                    "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error_ignored error={s}\n",
+                    .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                );
+            } else {
+                totals.failed += 1;
+                switch (api_tier) {
+                    .modern => totals.modern_failed += 1,
+                    .legacy => totals.legacy_failed += 1,
+                }
+                try report.writer(allocator).print(
+                    "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
+                    .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
+                );
             }
-            try report.writer(allocator).print(
-                "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
-                .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
-            );
             continue;
         };
 
@@ -1072,15 +1098,23 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         }
 
         var probe_session = launchOrAttachWebViewForProbe(allocator, runtime) catch |err| {
-            totals.failed += 1;
-            switch (api_tier) {
-                .modern => totals.modern_failed += 1,
-                .legacy => totals.legacy_failed += 1,
+            if (allow_launch_probe_failures) {
+                totals.skipped += 1;
+                try report.writer(allocator).print(
+                    "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_or_attach_error_ignored error={s}\n",
+                    .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
+                );
+            } else {
+                totals.failed += 1;
+                switch (api_tier) {
+                    .modern => totals.modern_failed += 1,
+                    .legacy => totals.legacy_failed += 1,
+                }
+                try report.writer(allocator).print(
+                    "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_or_attach_error error={s}\n",
+                    .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
+                );
             }
-            try report.writer(allocator).print(
-                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_or_attach_error error={s}\n",
-                .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
-            );
             continue;
         };
         defer probe_session.session.deinit();
@@ -1095,22 +1129,37 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             runtime.runtime_path,
             runtime.bridge_tool_path,
         ) catch |err| {
-            totals.failed += 1;
-            switch (api_tier) {
-                .modern => totals.modern_failed += 1,
-                .legacy => totals.legacy_failed += 1,
+            if (allow_launch_probe_failures) {
+                totals.skipped += 1;
+                try report.writer(allocator).print(
+                    "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error_ignored error={s}\n",
+                    .{
+                        apiTierName(api_tier),
+                        @tagName(kind),
+                        @tagName(runtime.engine),
+                        webViewPlatformName(kind, host_platform),
+                        @intFromBool(probe_session.launched),
+                        @errorName(err),
+                    },
+                );
+            } else {
+                totals.failed += 1;
+                switch (api_tier) {
+                    .modern => totals.modern_failed += 1,
+                    .legacy => totals.legacy_failed += 1,
+                }
+                try report.writer(allocator).print(
+                    "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
+                    .{
+                        apiTierName(api_tier),
+                        @tagName(kind),
+                        @tagName(runtime.engine),
+                        webViewPlatformName(kind, host_platform),
+                        @intFromBool(probe_session.launched),
+                        @errorName(err),
+                    },
+                );
             }
-            try report.writer(allocator).print(
-                "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
-                .{
-                    apiTierName(api_tier),
-                    @tagName(kind),
-                    @tagName(runtime.engine),
-                    webViewPlatformName(kind, host_platform),
-                    @intFromBool(probe_session.launched),
-                    @errorName(err),
-                },
-            );
             continue;
         };
 
