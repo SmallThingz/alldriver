@@ -98,7 +98,7 @@ try legacy.navigate("https://example.com");
 - Base tooling: `zig`, `git`, `bash`, `tar`, `date`, `which` (or `where` on Windows), `chmod`.
 - Strict signing: `gpg`.
 - Remote matrix orchestration: `ssh`, `scp`, `rsync`.
-- VM/QEMU workflows: `qemu-system-x86_64`, `qemu-img`, `curl`, `python3`, `ssh-keygen`.
+- VM/QEMU workflows: `qemu-system-x86_64`, `qemu-img`, `curl`, `ssh-keygen`.
 - Optional VM image checksum verification: `sha256sum`.
 
 If you only call core APIs (`discover`, `modern.*`, `legacy.*`), you typically only need runtime binaries for your target browser/driver. Tooling binaries are only required for matrix/release/VM commands.

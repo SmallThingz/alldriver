@@ -8,7 +8,6 @@ This project supports a shared VM lab rooted at `VM_LAB_DIR` (default: `/home/a/
 - `ssh`
 - `rsync`
 - `curl`
-- `python3`
 - `ssh-keygen`
 
 Check locally:
@@ -49,7 +48,7 @@ zig build tools -- vm-create-linux \
 
 Start the VM in a dedicated terminal:
 ```bash
-/home/a/vm_lab/projects/browser_driver/linux-matrix/run.sh
+zig build tools -- vm-start-linux --project browser_driver --name linux-matrix
 ```
 
 Run matrix remotely in VM and collect artifacts back:

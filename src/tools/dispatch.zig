@@ -17,9 +17,12 @@ const VmEnv = struct {
     vm_user: []const u8,
     ssh_port: []const u8,
     ssh_key: []const u8,
-    run_script: []const u8,
     project_dir: []const u8,
     cloud_init_port: []const u8,
+    vm_memory_mb: []const u8,
+    vm_cpus: []const u8,
+    vm_disk_image: []const u8,
+    vm_cloud_init_dir: []const u8,
 };
 
 fn printUsage() void {
@@ -41,6 +44,7 @@ fn printUsage() void {
         \\  vm-init-lab
         \\  vm-register-host
         \\  vm-create-linux
+        \\  vm-start-linux
         \\  vm-run-linux-matrix
         \\  vm-run-remote-matrix
         \\  vm-ga-collect-and-bundle
@@ -98,6 +102,8 @@ pub fn main() !void {
         try cmdVmRegisterHost(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "vm-create-linux")) {
         try cmdVmCreateLinux(allocator, root, sub);
+    } else if (std.mem.eql(u8, cmd, "vm-start-linux")) {
+        try cmdVmStartLinux(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "vm-run-linux-matrix")) {
         try cmdVmRunLinuxMatrix(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "vm-run-remote-matrix")) {
@@ -2361,7 +2367,7 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
 
 fn cmdVmCheckPrereqs(allocator: Allocator, _: []const u8, _: []const []const u8) !void {
     var missing = false;
-    const cmds = [_][]const u8{ "qemu-system-x86_64", "qemu-img", "ssh", "rsync", "curl", "python3", "ssh-keygen" };
+    const cmds = [_][]const u8{ "qemu-system-x86_64", "qemu-img", "ssh", "rsync", "curl", "ssh-keygen" };
     for (cmds) |cmd| {
         if (try commandExists(allocator, cmd)) {
             const p = try runCaptureTrimmed(allocator, &.{ if (isWindowsHost()) "where" else "which", cmd }, null, null);
@@ -2461,7 +2467,7 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
 
     try cmdVmInitLab(allocator, root, &.{ "--project", project, "--lab-dir", vm_lab_dir });
 
-    for ([_][]const u8{ "qemu-img", "qemu-system-x86_64", "curl", "ssh-keygen", "python3" }) |cmd| {
+    for ([_][]const u8{ "qemu-img", "qemu-system-x86_64", "curl", "ssh-keygen" }) |cmd| {
         if (!(try commandExists(allocator, cmd))) {
             std.debug.print("missing required command: {s}\n", .{cmd});
             return ToolError.MissingDependency;
@@ -2485,8 +2491,6 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
     defer allocator.free(user_data);
     const meta_data = try pathJoin(allocator, &.{ cloud_init_dir, "meta-data" });
     defer allocator.free(meta_data);
-    const run_script = try pathJoin(allocator, &.{ vm_dir, "run.sh" });
-    defer allocator.free(run_script);
 
     if (std.fs.openFileAbsolute(base_img, .{}) catch null == null) {
         std.debug.print("downloading base image: {s}\n", .{base_url});
@@ -2533,28 +2537,20 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
     defer allocator.free(meta_data_text);
     try writeFile(meta_data, meta_data_text);
 
-    const run_text = try std.fmt.allocPrint(
-        allocator,
-        "#!/usr/bin/env bash\nset -euo pipefail\n\nSCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nCI_DIR=\"$SCRIPT_DIR/cloud-init\"\n\npython3 -m http.server {s} --bind 127.0.0.1 --directory \"$CI_DIR\" >\"/tmp/{s}-cloud-init.log\" 2>&1 &\nCI_PID=$!\ncleanup() {{\n  kill \"$CI_PID\" >/dev/null 2>&1 || true\n}}\ntrap cleanup EXIT\n\nqemu-system-x86_64 \\\n  -name \"{s}\" \\\n  -machine q35,accel=kvm:tcg \\\n  -cpu host \\\n  -smp {s} \\\n  -m {s} \\\n  -drive if=virtio,file=\"{s}\",format=qcow2 \\\n  -netdev user,id=n1,hostfwd=tcp::{s}-:22 \\\n  -device virtio-net-pci,netdev=n1 \\\n  -smbios type=1,serial=ds=nocloud-net;s=http://10.0.2.2:{s}/ \\\n  -nographic\n",
-        .{ cloud_init_port, vm_name, vm_name, vm_cpus, vm_mem_mb, overlay_img, ssh_port, cloud_init_port },
-    );
-    defer allocator.free(run_text);
-    try writeFile(run_script, run_text);
-    if (!isWindowsHost()) {
-        try runInherit(allocator, &.{ "chmod", "+x", run_script }, root, null);
-    }
-
     const vm_env_path = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env_path);
     const vm_env = try std.fmt.allocPrint(
         allocator,
-        "VM_NAME={s}\nVM_USER={s}\nSSH_PORT={s}\nSSH_KEY={s}\nRUN_SCRIPT={s}\nPROJECT_DIR={s}\nCLOUD_INIT_PORT={s}\n",
-        .{ vm_name, vm_user, ssh_port, ssh_key, run_script, project_dir, cloud_init_port },
+        "VM_NAME={s}\nVM_USER={s}\nSSH_PORT={s}\nSSH_KEY={s}\nPROJECT_DIR={s}\nCLOUD_INIT_PORT={s}\nVM_MEMORY_MB={s}\nVM_CPUS={s}\nVM_DISK_IMAGE={s}\nVM_CLOUD_INIT_DIR={s}\n",
+        .{ vm_name, vm_user, ssh_port, ssh_key, project_dir, cloud_init_port, vm_mem_mb, vm_cpus, overlay_img, cloud_init_dir },
     );
     defer allocator.free(vm_env);
     try writeFile(vm_env_path, vm_env);
 
-    std.debug.print("linux vm created\nvm_dir={s}\nrun_script={s}\nssh: ssh -i {s} -p {s} {s}@127.0.0.1\n", .{ vm_dir, run_script, ssh_key, ssh_port, vm_user });
+    std.debug.print(
+        "linux vm created\nvm_dir={s}\nstart_cmd=zig build tools -- vm-start-linux --project {s} --name {s}\nssh: ssh -i {s} -p {s} {s}@127.0.0.1\n",
+        .{ vm_dir, project, vm_name, ssh_key, ssh_port, vm_user },
+    );
 }
 
 fn loadVmEnv(allocator: Allocator, vm_env_path: []const u8) !VmEnv {
@@ -2566,9 +2562,12 @@ fn loadVmEnv(allocator: Allocator, vm_env_path: []const u8) !VmEnv {
         .vm_user = try allocator.dupe(u8, map.get("VM_USER") orelse ""),
         .ssh_port = try allocator.dupe(u8, map.get("SSH_PORT") orelse ""),
         .ssh_key = try allocator.dupe(u8, map.get("SSH_KEY") orelse ""),
-        .run_script = try allocator.dupe(u8, map.get("RUN_SCRIPT") orelse ""),
         .project_dir = try allocator.dupe(u8, map.get("PROJECT_DIR") orelse ""),
         .cloud_init_port = try allocator.dupe(u8, map.get("CLOUD_INIT_PORT") orelse ""),
+        .vm_memory_mb = try allocator.dupe(u8, map.get("VM_MEMORY_MB") orelse "8192"),
+        .vm_cpus = try allocator.dupe(u8, map.get("VM_CPUS") orelse "4"),
+        .vm_disk_image = try allocator.dupe(u8, map.get("VM_DISK_IMAGE") orelse ""),
+        .vm_cloud_init_dir = try allocator.dupe(u8, map.get("VM_CLOUD_INIT_DIR") orelse ""),
     };
 }
 
@@ -2577,9 +2576,194 @@ fn freeVmEnv(allocator: Allocator, vm: *const VmEnv) void {
     allocator.free(vm.vm_user);
     allocator.free(vm.ssh_port);
     allocator.free(vm.ssh_key);
-    allocator.free(vm.run_script);
     allocator.free(vm.project_dir);
     allocator.free(vm.cloud_init_port);
+    allocator.free(vm.vm_memory_mb);
+    allocator.free(vm.vm_cpus);
+    allocator.free(vm.vm_disk_image);
+    allocator.free(vm.vm_cloud_init_dir);
+}
+
+const CloudInitServerCtx = struct {
+    port: u16,
+    cloud_init_dir: []const u8,
+    stop: *std.atomic.Value(bool),
+};
+
+fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
+    var flags = try parseFlags(allocator, args);
+    defer freeStringMap(allocator, &flags);
+
+    const project = mapGetOr(&flags, "project", "browser_driver");
+    const vm_name = mapGetOr(&flags, "name", "linux-matrix");
+    const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
+
+    const vm_dir = try pathJoin(allocator, &.{ vm_lab_dir, "projects", project, vm_name });
+    defer allocator.free(vm_dir);
+    const vm_env_path = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
+    defer allocator.free(vm_env_path);
+    if (std.fs.openFileAbsolute(vm_env_path, .{}) catch null == null) {
+        std.debug.print("vm metadata missing: {s}\ncreate vm first: vm-create-linux\n", .{vm_env_path});
+        return ToolError.NotFound;
+    }
+
+    var vm = try loadVmEnv(allocator, vm_env_path);
+    defer freeVmEnv(allocator, &vm);
+
+    if (!(try commandExists(allocator, "qemu-system-x86_64"))) {
+        std.debug.print("missing required command: qemu-system-x86_64\n", .{});
+        return ToolError.MissingDependency;
+    }
+
+    const disk_path = if (vm.vm_disk_image.len > 0) vm.vm_disk_image else blk: {
+        break :blk try pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
+    };
+    defer if (disk_path.ptr != vm.vm_disk_image.ptr) allocator.free(disk_path);
+    if (std.fs.openFileAbsolute(disk_path, .{}) catch null == null) {
+        std.debug.print("vm disk image missing: {s}\n", .{disk_path});
+        return ToolError.NotFound;
+    }
+
+    const cloud_init_dir = if (vm.vm_cloud_init_dir.len > 0) vm.vm_cloud_init_dir else blk: {
+        break :blk try pathJoin(allocator, &.{ vm_dir, "cloud-init" });
+    };
+    defer if (cloud_init_dir.ptr != vm.vm_cloud_init_dir.ptr) allocator.free(cloud_init_dir);
+    if (std.fs.openDirAbsolute(cloud_init_dir, .{}) catch null == null) {
+        std.debug.print("cloud-init dir missing: {s}\n", .{cloud_init_dir});
+        return ToolError.NotFound;
+    }
+
+    const cloud_init_port = std.fmt.parseInt(u16, vm.cloud_init_port, 10) catch {
+        std.debug.print("invalid CLOUD_INIT_PORT in vm env: {s}\n", .{vm.cloud_init_port});
+        return ToolError.InvalidArgs;
+    };
+
+    var stop = std.atomic.Value(bool).init(false);
+    var ctx = CloudInitServerCtx{
+        .port = cloud_init_port,
+        .cloud_init_dir = cloud_init_dir,
+        .stop = &stop,
+    };
+    var server_thread = try std.Thread.spawn(.{}, runCloudInitServer, .{&ctx});
+    defer {
+        stop.store(true, .release);
+        const wake_addr = std.net.Address.parseIp("127.0.0.1", cloud_init_port) catch null;
+        if (wake_addr) |addr| {
+            const wake = std.net.tcpConnectToAddress(addr) catch null;
+            if (wake) |stream| stream.close();
+        }
+        server_thread.join();
+    }
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
+        "qemu-system-x86_64",
+        "-name",
+        vm.vm_name,
+        "-machine",
+        "q35,accel=kvm:tcg",
+        "-cpu",
+        "host",
+        "-smp",
+        vm.vm_cpus,
+        "-m",
+        vm.vm_memory_mb,
+    });
+
+    const drive_arg = try std.fmt.allocPrint(allocator, "if=virtio,file={s},format=qcow2", .{disk_path});
+    defer allocator.free(drive_arg);
+    try argv.appendSlice(allocator, &.{ "-drive", drive_arg });
+
+    const netdev_arg = try std.fmt.allocPrint(allocator, "user,id=n1,hostfwd=tcp::{s}-:22", .{vm.ssh_port});
+    defer allocator.free(netdev_arg);
+    try argv.appendSlice(allocator, &.{ "-netdev", netdev_arg, "-device", "virtio-net-pci,netdev=n1" });
+
+    const smbios_arg = try std.fmt.allocPrint(allocator, "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:{d}/", .{cloud_init_port});
+    defer allocator.free(smbios_arg);
+    try argv.appendSlice(allocator, &.{ "-smbios", smbios_arg, "-nographic" });
+
+    std.debug.print("starting linux vm {s} (ctrl+c to stop)\n", .{vm.vm_name});
+    try runInherit(allocator, argv.items, root, null);
+}
+
+fn runCloudInitServer(ctx: *CloudInitServerCtx) void {
+    const address = std.net.Address.parseIp("127.0.0.1", ctx.port) catch return;
+    var server = address.listen(.{ .reuse_address = true }) catch return;
+    defer server.deinit();
+
+    while (!ctx.stop.load(.acquire)) {
+        var conn = server.accept() catch {
+            if (ctx.stop.load(.acquire)) break;
+            continue;
+        };
+        defer conn.stream.close();
+        handleCloudInitConnection(ctx, &conn.stream) catch {};
+    }
+}
+
+fn handleCloudInitConnection(ctx: *const CloudInitServerCtx, stream: *std.net.Stream) !void {
+    var req_buf: [4096]u8 = undefined;
+    const n = try stream.read(&req_buf);
+    if (n == 0) return;
+
+    const req = req_buf[0..n];
+    const line_end = std.mem.indexOf(u8, req, "\r\n") orelse std.mem.indexOfScalar(u8, req, '\n') orelse {
+        try writeSimpleHttpResponse(stream, "400 Bad Request", "bad request");
+        return;
+    };
+    const line = req[0..line_end];
+    var it = std.mem.tokenizeScalar(u8, line, ' ');
+    const method = it.next() orelse "";
+    const target = it.next() orelse "";
+
+    if (!std.mem.eql(u8, method, "GET")) {
+        try writeSimpleHttpResponse(stream, "405 Method Not Allowed", "method not allowed");
+        return;
+    }
+
+    const rel_path = if (target.len > 0 and target[0] == '/') target[1..] else target;
+    if (rel_path.len == 0 or std.mem.indexOf(u8, rel_path, "..") != null) {
+        try writeSimpleHttpResponse(stream, "404 Not Found", "not found");
+        return;
+    }
+
+    var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ ctx.cloud_init_dir, rel_path }) catch {
+        try writeSimpleHttpResponse(stream, "414 URI Too Long", "uri too long");
+        return;
+    };
+
+    const file = std.fs.openFileAbsolute(full_path, .{}) catch {
+        try writeSimpleHttpResponse(stream, "404 Not Found", "not found");
+        return;
+    };
+    defer file.close();
+    const body = file.readToEndAlloc(std.heap.page_allocator, 1 * 1024 * 1024) catch {
+        try writeSimpleHttpResponse(stream, "404 Not Found", "not found");
+        return;
+    };
+    defer std.heap.page_allocator.free(body);
+
+    var header_buf: [256]u8 = undefined;
+    const header = try std.fmt.bufPrint(
+        &header_buf,
+        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+        .{body.len},
+    );
+    try stream.writeAll(header);
+    try stream.writeAll(body);
+}
+
+fn writeSimpleHttpResponse(stream: *std.net.Stream, status: []const u8, body: []const u8) !void {
+    var header_buf: [256]u8 = undefined;
+    const header = try std.fmt.bufPrint(
+        &header_buf,
+        "HTTP/1.1 {s}\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+        .{ status, body.len },
+    );
+    try stream.writeAll(header);
+    try stream.writeAll(body);
 }
 
 fn cmdVmRunLinuxMatrix(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
@@ -2931,37 +3115,10 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
     defer allocator.free(vm_env_txt);
     try writeFile(vm_env, vm_env_txt);
 
-    const start = try pathJoin(allocator, &.{ vm_dir, "start.sh" });
-    const start_txt =
-        "#!/usr/bin/env bash\n" ++
-        "set -euo pipefail\n\n" ++
-        "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n" ++
-        "source \"$SCRIPT_DIR/vm.env\"\n\n" ++
-        "args=(\n" ++
-        "  -name \"$VM_NAME\"\n" ++
-        "  -machine q35,accel=kvm:tcg\n" ++
-        "  -cpu host\n" ++
-        "  -smp \"$VM_CPUS\"\n" ++
-        "  -m \"$VM_MEMORY_MB\"\n" ++
-        "  -drive \"file=$VM_IMAGE,if=virtio,format=qcow2\"\n" ++
-        "  -netdev \"user,id=net0,hostfwd=tcp::${VM_SSH_PORT}-:22\"\n" ++
-        "  -device virtio-net-pci,netdev=net0\n" ++
-        "  -virtfs \"local,path=$VM_HOST_SHARE_PATH,mount_tag=hostshare,security_model=none\"\n" ++
-        ")\n\n" ++
-        "if [[ -n \"$VM_ISO\" ]]; then\n" ++
-        "  args+=( -cdrom \"$VM_ISO\" )\n" ++
-        "fi\n\n" ++
-        "if [[ \"${1:-}\" == \"--foreground\" ]]; then\n" ++
-        "  qemu-system-x86_64 \"${args[@]}\"\n" ++
-        "else\n" ++
-        "  qemu-system-x86_64 \"${args[@]}\" -daemonize -display none\n" ++
-        "fi\n";
-    try writeFile(start, start_txt);
-    if (!isWindowsHost()) {
-        try runInherit(allocator, &.{ "chmod", "+x", start }, root, null);
-    }
-
-    std.debug.print("vm created\nvm_dir={s}\nstart_cmd={s}\n", .{ vm_dir, start });
+    std.debug.print(
+        "vm created\nvm_dir={s}\nstart_cmd=zig build tools -- vm-qemu-start --name {s} --platform {s}\n",
+        .{ vm_dir, name, platform },
+    );
 }
 
 fn cmdVmQemuList(allocator: Allocator, _: []const u8, _: []const []const u8) !void {
@@ -3008,19 +3165,58 @@ fn cmdVmQemuStart(allocator: Allocator, root: []const u8, args: []const []const 
 
     const vm_dir = try pathJoin(allocator, &.{ vm_root, "browser_driver", platform, name });
     defer allocator.free(vm_dir);
-    const start = try pathJoin(allocator, &.{ vm_dir, "start.sh" });
-    defer allocator.free(start);
-
-    if (std.fs.openFileAbsolute(start, .{}) catch null == null) {
-        std.debug.print("vm start script not found: {s}\n", .{start});
+    const vm_env = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
+    defer allocator.free(vm_env);
+    if (std.fs.openFileAbsolute(vm_env, .{}) catch null == null) {
+        std.debug.print("vm env not found: {s}\n", .{vm_env});
         return ToolError.NotFound;
     }
 
-    if (foreground) {
-        try runInherit(allocator, &.{ start, "--foreground" }, root, null);
-    } else {
-        try runInherit(allocator, &.{start}, root, null);
-    }
+    var map = try parseKvFile(allocator, vm_env);
+    defer freeStringMap(allocator, &map);
+
+    const vm_name = map.get("VM_NAME") orelse return ToolError.InvalidArgs;
+    const vm_image = map.get("VM_IMAGE") orelse return ToolError.InvalidArgs;
+    const vm_iso = map.get("VM_ISO") orelse "";
+    const vm_memory_mb = map.get("VM_MEMORY_MB") orelse "8192";
+    const vm_cpus = map.get("VM_CPUS") orelse "4";
+    const vm_ssh_port = map.get("VM_SSH_PORT") orelse "2222";
+    const host_share = map.get("VM_HOST_SHARE_PATH") orelse root;
+
+    if (!(try commandExists(allocator, "qemu-system-x86_64"))) return ToolError.MissingDependency;
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
+        "qemu-system-x86_64",
+        "-name",
+        vm_name,
+        "-machine",
+        "q35,accel=kvm:tcg",
+        "-cpu",
+        "host",
+        "-smp",
+        vm_cpus,
+        "-m",
+        vm_memory_mb,
+    });
+
+    const drive_arg = try std.fmt.allocPrint(allocator, "file={s},if=virtio,format=qcow2", .{vm_image});
+    defer allocator.free(drive_arg);
+    try argv.appendSlice(allocator, &.{ "-drive", drive_arg });
+
+    const netdev_arg = try std.fmt.allocPrint(allocator, "user,id=net0,hostfwd=tcp::{s}-:22", .{vm_ssh_port});
+    defer allocator.free(netdev_arg);
+    try argv.appendSlice(allocator, &.{ "-netdev", netdev_arg, "-device", "virtio-net-pci,netdev=net0" });
+
+    const virtfs_arg = try std.fmt.allocPrint(allocator, "local,path={s},mount_tag=hostshare,security_model=none", .{host_share});
+    defer allocator.free(virtfs_arg);
+    try argv.appendSlice(allocator, &.{ "-virtfs", virtfs_arg });
+
+    if (vm_iso.len > 0) try argv.appendSlice(allocator, &.{ "-cdrom", vm_iso });
+    if (!foreground) try argv.appendSlice(allocator, &.{ "-daemonize", "-display", "none" });
+
+    try runInherit(allocator, argv.items, root, null);
 }
 
 fn tmpAbsPath(allocator: Allocator, tmp: anytype, suffix: []const u8) ![]u8 {
