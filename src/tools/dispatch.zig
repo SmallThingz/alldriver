@@ -1,5 +1,5 @@
 const std = @import("std");
-const driver = @import("browser_driver");
+const driver = @import("alldriver");
 
 const Allocator = std.mem.Allocator;
 const containsIgnoreCase = driver.strings.containsIgnoreCase;
@@ -27,8 +27,8 @@ const VmEnv = struct {
 
 fn printUsage() void {
     std.debug.print(
-        \\browser_driver_tools
-        \\usage: browser_driver_tools <command> [args]
+        \\alldriver_tools
+        \\usage: alldriver_tools <command> [args]
         \\
         \\commands:
         \\  matrix-run
@@ -670,15 +670,15 @@ fn cmdTestBehavioral(allocator: Allocator, root: []const u8, _: []const []const 
     var env = try setDefaultZigGlobalCache(allocator, root);
     defer env.deinit();
 
-    if (env.get("BROWSER_DRIVER_BEHAVIORAL") == null) try env.put("BROWSER_DRIVER_BEHAVIORAL", "0");
-    if (env.get("BROWSER_DRIVER_BEHAVIORAL_STRICT") == null) try env.put("BROWSER_DRIVER_BEHAVIORAL_STRICT", "0");
+    if (env.get("ALLDRIVER_BEHAVIORAL") == null) try env.put("ALLDRIVER_BEHAVIORAL", "0");
+    if (env.get("ALLDRIVER_BEHAVIORAL_STRICT") == null) try env.put("ALLDRIVER_BEHAVIORAL_STRICT", "0");
     if (env.get("WEBVIEW_BRIDGE_BEHAVIORAL") == null) try env.put("WEBVIEW_BRIDGE_BEHAVIORAL", "0");
     if (env.get("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT") == null) try env.put("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT", "0");
     if (env.get("ELECTRON_BEHAVIORAL") == null) try env.put("ELECTRON_BEHAVIORAL", "0");
     if (env.get("ELECTRON_BEHAVIORAL_STRICT") == null) try env.put("ELECTRON_BEHAVIORAL_STRICT", "0");
     if (env.get("WEBKITGTK_BEHAVIORAL") == null) try env.put("WEBKITGTK_BEHAVIORAL", "0");
     if (env.get("WEBKITGTK_BEHAVIORAL_STRICT") == null) try env.put("WEBKITGTK_BEHAVIORAL_STRICT", "0");
-    if (env.get("BROWSER_DRIVER_TEST_IGNORE_TLS") == null) try env.put("BROWSER_DRIVER_TEST_IGNORE_TLS", "1");
+    if (env.get("ALLDRIVER_TEST_IGNORE_TLS") == null) try env.put("ALLDRIVER_TEST_IGNORE_TLS", "1");
 
     try runInherit(allocator, &.{ "zig", "build", "test" }, root, &env);
 }
@@ -732,21 +732,21 @@ const adversarial_probe_url = "data:text/html,<html><head><title>gate</title></h
 
 const adversarial_probe_script =
     "(function(){var s=[];" ++
-    "try{s.push(navigator.webdriver===true?'BROWSER_DRIVER_SIG_WEBDRIVER_TRUE':'BROWSER_DRIVER_SIG_WEBDRIVER_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_ERROR');}" ++
-    "try{s.push(('webdriver' in navigator)?'BROWSER_DRIVER_SIG_WEBDRIVER_PROP_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_PROP_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_PROP_ERROR');}" ++
-    "try{var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver');s.push(d?'BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_ERROR');}" ++
-    "try{var de=(document&&document.documentElement);s.push((de&&de.hasAttribute&&de.hasAttribute('webdriver'))?'BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_PRESENT':'BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_ABSENT');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_ERROR');}" ++
-    "try{s.push(/Headless|PhantomJS|SlimerJS/i.test(navigator.userAgent)?'BROWSER_DRIVER_SIG_HEADLESS_UA_TRUE':'BROWSER_DRIVER_SIG_HEADLESS_UA_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_HEADLESS_UA_ERROR');}" ++
-    "try{var g=false;for(var k in window){if(k.indexOf('cdc_')===0||k.indexOf('__webdriver')===0){g=true;break;}}s.push(g?'BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_ERROR');}" ++
-    "try{s.push((window.domAutomation||window.domAutomationController)?'BROWSER_DRIVER_SIG_DOM_AUTOMATION_TRUE':'BROWSER_DRIVER_SIG_DOM_AUTOMATION_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_DOM_AUTOMATION_ERROR');}" ++
-    "try{s.push((window.__playwright__binding__||window.__pwInitScripts)?'BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_ERROR');}" ++
-    "try{s.push((window.__puppeteer_evaluation_script__||window.__puppeteer_stealth__)?'BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_ERROR');}" ++
-    "try{s.push((window.__webdriver_script_fn||window.__driver_evaluate||window.__webdriver_evaluate||window.__selenium_unwrapped||window.__fxdriver_unwrapped||window._Selenium_IDE_Recorder)?'BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_ERROR');}" ++
-    "try{s.push((window.callPhantom||window._phantom||window.phantom||window.__nightmare)?'BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_TRUE':'BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_ERROR');}" ++
-    "try{s.push((window.outerWidth===0||window.outerHeight===0)?'BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_TRUE':'BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_ERROR');}" ++
-    "try{var sw=false;var c=document.createElement('canvas');var gl=c.getContext('webgl')||c.getContext('experimental-webgl');if(gl){var ext=gl.getExtension('WEBGL_debug_renderer_info');if(ext){var r=gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)||'';sw=/swiftshader/i.test(String(r));}}s.push(sw?'BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_TRUE':'BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_ERROR');}" ++
-    "try{s.push((navigator.languages&&navigator.languages.length===0)?'BROWSER_DRIVER_SIG_LANG_EMPTY_TRUE':'BROWSER_DRIVER_SIG_LANG_EMPTY_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_LANG_EMPTY_ERROR');}" ++
-    "try{s.push((navigator.plugins&&navigator.plugins.length===0)?'BROWSER_DRIVER_SIG_PLUGINS_EMPTY_TRUE':'BROWSER_DRIVER_SIG_PLUGINS_EMPTY_FALSE');}catch(e){s.push('BROWSER_DRIVER_SIG_PLUGINS_EMPTY_ERROR');}" ++
+    "try{s.push(navigator.webdriver===true?'ALLDRIVER_SIG_WEBDRIVER_TRUE':'ALLDRIVER_SIG_WEBDRIVER_FALSE');}catch(e){s.push('ALLDRIVER_SIG_WEBDRIVER_ERROR');}" ++
+    "try{s.push(('webdriver' in navigator)?'ALLDRIVER_SIG_WEBDRIVER_PROP_PRESENT':'ALLDRIVER_SIG_WEBDRIVER_PROP_ABSENT');}catch(e){s.push('ALLDRIVER_SIG_WEBDRIVER_PROP_ERROR');}" ++
+    "try{var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver');s.push(d?'ALLDRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT':'ALLDRIVER_SIG_WEBDRIVER_DESCRIPTOR_ABSENT');}catch(e){s.push('ALLDRIVER_SIG_WEBDRIVER_DESCRIPTOR_ERROR');}" ++
+    "try{var de=(document&&document.documentElement);s.push((de&&de.hasAttribute&&de.hasAttribute('webdriver'))?'ALLDRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_PRESENT':'ALLDRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_ABSENT');}catch(e){s.push('ALLDRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_ERROR');}" ++
+    "try{s.push(/Headless|PhantomJS|SlimerJS/i.test(navigator.userAgent)?'ALLDRIVER_SIG_HEADLESS_UA_TRUE':'ALLDRIVER_SIG_HEADLESS_UA_FALSE');}catch(e){s.push('ALLDRIVER_SIG_HEADLESS_UA_ERROR');}" ++
+    "try{var g=false;for(var k in window){if(k.indexOf('cdc_')===0||k.indexOf('__webdriver')===0){g=true;break;}}s.push(g?'ALLDRIVER_SIG_AUTOMATION_GLOBAL_TRUE':'ALLDRIVER_SIG_AUTOMATION_GLOBAL_FALSE');}catch(e){s.push('ALLDRIVER_SIG_AUTOMATION_GLOBAL_ERROR');}" ++
+    "try{s.push((window.domAutomation||window.domAutomationController)?'ALLDRIVER_SIG_DOM_AUTOMATION_TRUE':'ALLDRIVER_SIG_DOM_AUTOMATION_FALSE');}catch(e){s.push('ALLDRIVER_SIG_DOM_AUTOMATION_ERROR');}" ++
+    "try{s.push((window.__playwright__binding__||window.__pwInitScripts)?'ALLDRIVER_SIG_PLAYWRIGHT_GLOBAL_TRUE':'ALLDRIVER_SIG_PLAYWRIGHT_GLOBAL_FALSE');}catch(e){s.push('ALLDRIVER_SIG_PLAYWRIGHT_GLOBAL_ERROR');}" ++
+    "try{s.push((window.__puppeteer_evaluation_script__||window.__puppeteer_stealth__)?'ALLDRIVER_SIG_PUPPETEER_GLOBAL_TRUE':'ALLDRIVER_SIG_PUPPETEER_GLOBAL_FALSE');}catch(e){s.push('ALLDRIVER_SIG_PUPPETEER_GLOBAL_ERROR');}" ++
+    "try{s.push((window.__webdriver_script_fn||window.__driver_evaluate||window.__webdriver_evaluate||window.__selenium_unwrapped||window.__fxdriver_unwrapped||window._Selenium_IDE_Recorder)?'ALLDRIVER_SIG_SELENIUM_GLOBAL_TRUE':'ALLDRIVER_SIG_SELENIUM_GLOBAL_FALSE');}catch(e){s.push('ALLDRIVER_SIG_SELENIUM_GLOBAL_ERROR');}" ++
+    "try{s.push((window.callPhantom||window._phantom||window.phantom||window.__nightmare)?'ALLDRIVER_SIG_PHANTOM_GLOBAL_TRUE':'ALLDRIVER_SIG_PHANTOM_GLOBAL_FALSE');}catch(e){s.push('ALLDRIVER_SIG_PHANTOM_GLOBAL_ERROR');}" ++
+    "try{s.push((window.outerWidth===0||window.outerHeight===0)?'ALLDRIVER_SIG_OUTER_DIMENSIONS_ZERO_TRUE':'ALLDRIVER_SIG_OUTER_DIMENSIONS_ZERO_FALSE');}catch(e){s.push('ALLDRIVER_SIG_OUTER_DIMENSIONS_ZERO_ERROR');}" ++
+    "try{var sw=false;var c=document.createElement('canvas');var gl=c.getContext('webgl')||c.getContext('experimental-webgl');if(gl){var ext=gl.getExtension('WEBGL_debug_renderer_info');if(ext){var r=gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)||'';sw=/swiftshader/i.test(String(r));}}s.push(sw?'ALLDRIVER_SIG_WEBGL_SWIFTSHADER_TRUE':'ALLDRIVER_SIG_WEBGL_SWIFTSHADER_FALSE');}catch(e){s.push('ALLDRIVER_SIG_WEBGL_SWIFTSHADER_ERROR');}" ++
+    "try{s.push((navigator.languages&&navigator.languages.length===0)?'ALLDRIVER_SIG_LANG_EMPTY_TRUE':'ALLDRIVER_SIG_LANG_EMPTY_FALSE');}catch(e){s.push('ALLDRIVER_SIG_LANG_EMPTY_ERROR');}" ++
+    "try{s.push((navigator.plugins&&navigator.plugins.length===0)?'ALLDRIVER_SIG_PLUGINS_EMPTY_TRUE':'ALLDRIVER_SIG_PLUGINS_EMPTY_FALSE');}catch(e){s.push('ALLDRIVER_SIG_PLUGINS_EMPTY_ERROR');}" ++
     "return s.join('|');})();";
 
 const DetectionSignals = struct {
@@ -1450,21 +1450,21 @@ fn isNavigationCommitted(href_payload: []const u8) bool {
 }
 
 fn applyJsSignalTokens(signals: *DetectionSignals, js_payload: []const u8) void {
-    signals.js_webdriver_true = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_TRUE");
-    signals.js_webdriver_prop_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_PROP_PRESENT");
-    signals.js_webdriver_descriptor_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT");
-    signals.js_webdriver_dom_attribute_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_PRESENT");
-    signals.js_headless_ua_true = containsToken(js_payload, "BROWSER_DRIVER_SIG_HEADLESS_UA_TRUE");
-    signals.js_automation_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_AUTOMATION_GLOBAL_TRUE");
-    signals.js_dom_automation_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_DOM_AUTOMATION_TRUE");
-    signals.js_playwright_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_PLAYWRIGHT_GLOBAL_TRUE");
-    signals.js_puppeteer_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_PUPPETEER_GLOBAL_TRUE");
-    signals.js_selenium_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_SELENIUM_GLOBAL_TRUE");
-    signals.js_phantom_globals_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_PHANTOM_GLOBAL_TRUE");
-    signals.js_outer_dimensions_zero = containsToken(js_payload, "BROWSER_DRIVER_SIG_OUTER_DIMENSIONS_ZERO_TRUE");
-    signals.js_webgl_swiftshader_present = containsToken(js_payload, "BROWSER_DRIVER_SIG_WEBGL_SWIFTSHADER_TRUE");
-    signals.js_languages_empty = containsToken(js_payload, "BROWSER_DRIVER_SIG_LANG_EMPTY_TRUE");
-    signals.js_plugins_empty = containsToken(js_payload, "BROWSER_DRIVER_SIG_PLUGINS_EMPTY_TRUE");
+    signals.js_webdriver_true = containsToken(js_payload, "ALLDRIVER_SIG_WEBDRIVER_TRUE");
+    signals.js_webdriver_prop_present = containsToken(js_payload, "ALLDRIVER_SIG_WEBDRIVER_PROP_PRESENT");
+    signals.js_webdriver_descriptor_present = containsToken(js_payload, "ALLDRIVER_SIG_WEBDRIVER_DESCRIPTOR_PRESENT");
+    signals.js_webdriver_dom_attribute_present = containsToken(js_payload, "ALLDRIVER_SIG_WEBDRIVER_DOM_ATTRIBUTE_PRESENT");
+    signals.js_headless_ua_true = containsToken(js_payload, "ALLDRIVER_SIG_HEADLESS_UA_TRUE");
+    signals.js_automation_globals_present = containsToken(js_payload, "ALLDRIVER_SIG_AUTOMATION_GLOBAL_TRUE");
+    signals.js_dom_automation_present = containsToken(js_payload, "ALLDRIVER_SIG_DOM_AUTOMATION_TRUE");
+    signals.js_playwright_globals_present = containsToken(js_payload, "ALLDRIVER_SIG_PLAYWRIGHT_GLOBAL_TRUE");
+    signals.js_puppeteer_globals_present = containsToken(js_payload, "ALLDRIVER_SIG_PUPPETEER_GLOBAL_TRUE");
+    signals.js_selenium_globals_present = containsToken(js_payload, "ALLDRIVER_SIG_SELENIUM_GLOBAL_TRUE");
+    signals.js_phantom_globals_present = containsToken(js_payload, "ALLDRIVER_SIG_PHANTOM_GLOBAL_TRUE");
+    signals.js_outer_dimensions_zero = containsToken(js_payload, "ALLDRIVER_SIG_OUTER_DIMENSIONS_ZERO_TRUE");
+    signals.js_webgl_swiftshader_present = containsToken(js_payload, "ALLDRIVER_SIG_WEBGL_SWIFTSHADER_TRUE");
+    signals.js_languages_empty = containsToken(js_payload, "ALLDRIVER_SIG_LANG_EMPTY_TRUE");
+    signals.js_plugins_empty = containsToken(js_payload, "ALLDRIVER_SIG_PLUGINS_EMPTY_TRUE");
 }
 
 fn collectSessionSignals(signals: *DetectionSignals, session: *const driver.Session) void {
@@ -1885,11 +1885,11 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     if (strict_ga) enable_behavioral = true;
 
     if (enable_behavioral) {
-        try env.put("BROWSER_DRIVER_BEHAVIORAL", "1");
+        try env.put("ALLDRIVER_BEHAVIORAL", "1");
         try env.put("WEBVIEW_BRIDGE_BEHAVIORAL", "1");
 
         if (strict_ga) {
-            try env.put("BROWSER_DRIVER_BEHAVIORAL_STRICT", "1");
+            try env.put("ALLDRIVER_BEHAVIORAL_STRICT", "1");
             try env.put("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT", "0");
             try env.put("WEBVIEW_BRIDGE_REQUIRED", "none");
             try env.put("ELECTRON_BEHAVIORAL", "1");
@@ -2156,10 +2156,10 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
     try ensurePath(try pathJoin(allocator, &.{ bundle_dir, "docs" }));
     try ensurePath(try pathJoin(allocator, &.{ bundle_dir, "logs" }));
 
-    const bin_unix = try pathJoin(allocator, &.{ root, "zig-out", "bin", "browser_driver" });
-    const bin_win = try pathJoin(allocator, &.{ root, "zig-out", "bin", "browser_driver.exe" });
-    const out_bin_unix = try pathJoin(allocator, &.{ bundle_dir, "bin", "browser_driver" });
-    const out_bin_win = try pathJoin(allocator, &.{ bundle_dir, "bin", "browser_driver.exe" });
+    const bin_unix = try pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver" });
+    const bin_win = try pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver.exe" });
+    const out_bin_unix = try pathJoin(allocator, &.{ bundle_dir, "bin", "alldriver" });
+    const out_bin_win = try pathJoin(allocator, &.{ bundle_dir, "bin", "alldriver.exe" });
     defer {
         allocator.free(bin_unix);
         allocator.free(bin_win);
@@ -2400,7 +2400,7 @@ fn cmdVmInitLab(allocator: Allocator, _: []const u8, args: []const []const u8) !
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const project = mapGetOr(&flags, "project", "browser_driver");
+    const project = mapGetOr(&flags, "project", "alldriver");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
 
     try ensurePath(try pathJoin(allocator, &.{ vm_lab_dir, "images" }));
@@ -2454,7 +2454,7 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const project = mapGetOr(&flags, "project", "browser_driver");
+    const project = mapGetOr(&flags, "project", "alldriver");
     const vm_name = mapGetOr(&flags, "name", "linux-matrix");
     const vm_user = mapGetOr(&flags, "user", "vmrunner");
     const ssh_port = mapGetOr(&flags, "ssh-port", "2222");
@@ -2594,7 +2594,7 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const project = mapGetOr(&flags, "project", "browser_driver");
+    const project = mapGetOr(&flags, "project", "alldriver");
     const vm_name = mapGetOr(&flags, "name", "linux-matrix");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
 
@@ -2770,10 +2770,10 @@ fn cmdVmRunLinuxMatrix(allocator: Allocator, root: []const u8, args: []const []c
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const project = mapGetOr(&flags, "project", "browser_driver");
+    const project = mapGetOr(&flags, "project", "alldriver");
     const vm_name = mapGetOr(&flags, "name", "linux-matrix");
     const workspace_repo = mapGetOr(&flags, "workspace", root);
-    const remote_repo = mapGetOr(&flags, "remote-repo", "~/browser_driver");
+    const remote_repo = mapGetOr(&flags, "remote-repo", "~/alldriver");
     const strict_ga = mapGetOr(&flags, "strict-ga", "1");
     const matrix_behavioral = mapGetOr(&flags, "behavioral", "1");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
@@ -2840,9 +2840,9 @@ fn cmdVmRunRemoteMatrix(allocator: Allocator, root: []const u8, args: []const []
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const project = mapGetOr(&flags, "project", "browser_driver");
+    const project = mapGetOr(&flags, "project", "alldriver");
     const host_name = flags.get("host") orelse return ToolError.InvalidArgs;
-    const remote_repo = mapGetOr(&flags, "remote-repo", "~/browser_driver");
+    const remote_repo = mapGetOr(&flags, "remote-repo", "~/alldriver");
     const strict_ga = mapGetOr(&flags, "strict-ga", "1");
     const matrix_behavioral = mapGetOr(&flags, "behavioral", "1");
     const ssh_key = mapGetOr(&flags, "ssh-key", "");
@@ -2937,7 +2937,7 @@ fn cmdVmGaCollectAndBundle(allocator: Allocator, root: []const u8, args: []const
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const project = mapGetOr(&flags, "project", "browser_driver");
+    const project = mapGetOr(&flags, "project", "alldriver");
     const linux_host = flags.get("linux-host") orelse return ToolError.InvalidArgs;
     const macos_host = flags.get("macos-host") orelse return ToolError.InvalidArgs;
     const windows_host = flags.get("windows-host") orelse return ToolError.InvalidArgs;
@@ -3067,7 +3067,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const vm_root = std.posix.getenv("BROWSER_DRIVER_VM_ROOT") orelse "/tmp/codex-vms";
+    const vm_root = std.posix.getenv("ALLDRIVER_VM_ROOT") orelse "/tmp/codex-vms";
     const name = flags.get("name") orelse {
         std.debug.print("usage: vm-qemu-create --name <name> --platform <linux|windows|macos> [--iso <path>] [--disk-gb N] [--memory-mb N] [--cpus N] [--ssh-port N]\n", .{});
         return ToolError.InvalidArgs;
@@ -3077,7 +3077,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
     const disk_gb = mapGetOr(&flags, "disk-gb", "80");
     const memory_mb = mapGetOr(&flags, "memory-mb", "8192");
     const cpus = mapGetOr(&flags, "cpus", "4");
-    const host_share = mapGetOr(&flags, "host-share-path", std.posix.getenv("BROWSER_DRIVER_VM_SHARE_PATH") orelse root);
+    const host_share = mapGetOr(&flags, "host-share-path", std.posix.getenv("ALLDRIVER_VM_SHARE_PATH") orelse root);
 
     if (!(std.mem.eql(u8, platform, "linux") or std.mem.eql(u8, platform, "windows") or std.mem.eql(u8, platform, "macos"))) {
         std.debug.print("invalid platform: {s}\n", .{platform});
@@ -3090,7 +3090,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
 
     const ssh_port: []const u8 = flags.get("ssh-port") orelse if (std.mem.eql(u8, platform, "linux")) "2222" else if (std.mem.eql(u8, platform, "windows")) "2223" else "2224";
 
-    const vm_dir = try pathJoin(allocator, &.{ vm_root, "browser_driver", platform, name });
+    const vm_dir = try pathJoin(allocator, &.{ vm_root, "alldriver", platform, name });
     try ensurePath(vm_dir);
     const image_path = try pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
     if (std.fs.openFileAbsolute(image_path, .{}) catch null == null) {
@@ -3122,8 +3122,8 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
 }
 
 fn cmdVmQemuList(allocator: Allocator, _: []const u8, _: []const []const u8) !void {
-    const vm_root = std.posix.getenv("BROWSER_DRIVER_VM_ROOT") orelse "/tmp/codex-vms";
-    const base = try pathJoin(allocator, &.{ vm_root, "browser_driver" });
+    const vm_root = std.posix.getenv("ALLDRIVER_VM_ROOT") orelse "/tmp/codex-vms";
+    const base = try pathJoin(allocator, &.{ vm_root, "alldriver" });
 
     if (std.fs.openDirAbsolute(base, .{}) catch null == null) {
         std.debug.print("no VMs registered under {s}\n", .{base});
@@ -3155,7 +3155,7 @@ fn cmdVmQemuStart(allocator: Allocator, root: []const u8, args: []const []const 
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const vm_root = std.posix.getenv("BROWSER_DRIVER_VM_ROOT") orelse "/tmp/codex-vms";
+    const vm_root = std.posix.getenv("ALLDRIVER_VM_ROOT") orelse "/tmp/codex-vms";
     const name = flags.get("name") orelse {
         std.debug.print("usage: vm-qemu-start --name <name> --platform <linux|windows|macos> [--foreground]\n", .{});
         return ToolError.InvalidArgs;
@@ -3163,7 +3163,7 @@ fn cmdVmQemuStart(allocator: Allocator, root: []const u8, args: []const []const 
     const platform = flags.get("platform") orelse return ToolError.InvalidArgs;
     const foreground = std.mem.eql(u8, mapGetOr(&flags, "foreground", "0"), "1");
 
-    const vm_dir = try pathJoin(allocator, &.{ vm_root, "browser_driver", platform, name });
+    const vm_dir = try pathJoin(allocator, &.{ vm_root, "alldriver", platform, name });
     defer allocator.free(vm_dir);
     const vm_env = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env);
@@ -3479,7 +3479,7 @@ test "collectSessionSignals captures endpoint and launch argument markers" {
     argv[2] = try allocator.dupe(u8, "--headless=new");
     argv[3] = try allocator.dupe(u8, "--disable-blink-features=AutomationControlled");
     session.owned_argv = argv;
-    session.ephemeral_profile_dir = try allocator.dupe(u8, "/tmp/browser-driver-ephemeral-test");
+    session.ephemeral_profile_dir = try allocator.dupe(u8, "/tmp/alldriver-ephemeral-test");
 
     var signals: DetectionSignals = .{};
     collectSessionSignals(&signals, &session);

@@ -1,18 +1,18 @@
 const std = @import("std");
-const driver = @import("browser_driver");
+const driver = @import("alldriver");
 
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const explicit = std.posix.getenv("BROWSER_DRIVER_EXPLICIT_PATH");
+    const explicit = std.posix.getenv("ALLDRIVER_EXPLICIT_PATH");
 
     var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox },
         .explicit_path = explicit,
         .allow_managed_download = true,
-        .managed_cache_dir = "/home/a/.cache/browser_driver",
+        .managed_cache_dir = "/home/a/.cache/alldriver",
     }, .{});
     defer installs.deinit();
 
@@ -25,7 +25,7 @@ pub fn main() !void {
     var persistent = try driver.modern.launch(allocator, .{
         .install = installs.items[0],
         .profile_mode = .persistent,
-        .profile_dir = "/tmp/browser-driver-profile",
+        .profile_dir = "/tmp/alldriver-profile",
         .headless = true,
         .args = &.{},
     });

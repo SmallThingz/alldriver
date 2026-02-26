@@ -1,7 +1,7 @@
 const std = @import("std");
 const driver = @import("../root.zig");
 const helpers = @import("helpers.zig");
-const config = @import("browser_driver_config");
+const config = @import("alldriver_config");
 
 const example_url = "data:text/html,<html><head><title>gate</title></head><body>gate</body></html>";
 
@@ -61,7 +61,7 @@ fn includeLightpandaBehavioral() bool {
 }
 
 fn behavioralIgnoreTls() bool {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "BROWSER_DRIVER_TEST_IGNORE_TLS") catch return true;
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ALLDRIVER_TEST_IGNORE_TLS") catch return true;
     defer std.heap.page_allocator.free(value);
     return !std.mem.eql(u8, value, "0");
 }
@@ -112,9 +112,9 @@ fn behavioralBrowserKinds() []const driver.BrowserKind {
 }
 
 test "behavioral browser smoke matrix (opt-in)" {
-    if (!helpers.envEnabled("BROWSER_DRIVER_BEHAVIORAL")) return error.SkipZigTest;
+    if (!helpers.envEnabled("ALLDRIVER_BEHAVIORAL")) return error.SkipZigTest;
 
-    const strict = helpers.envEnabled("BROWSER_DRIVER_BEHAVIORAL_STRICT");
+    const strict = helpers.envEnabled("ALLDRIVER_BEHAVIORAL_STRICT");
     const allocator = std.testing.allocator;
 
     var discovered_any: bool = false;

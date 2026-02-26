@@ -1,18 +1,18 @@
 const std = @import("std");
-const browser_driver = @import("browser_driver");
+const alldriver = @import("alldriver");
 
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
-    var installs = try browser_driver.discover(gpa, .{
+    var installs = try alldriver.discover(gpa, .{
         .kinds = &.{ .chrome, .edge, .safari, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf, .epic, .arc, .vivaldi, .sigmaos, .sidekick, .shift, .operagx, .lightpanda, .palemoon },
         .allow_managed_download = false,
     }, .{});
     defer installs.deinit();
 
-    try browser_driver.bufferedPrint();
+    try alldriver.bufferedPrint();
 
     std.debug.print("Discovered {d} browser installs\n", .{installs.items.len});
     for (installs.items) |install| {

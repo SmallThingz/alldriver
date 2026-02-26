@@ -10,7 +10,7 @@ const cache_manager = @import("../provision/cache_manager.zig");
 const extensions = @import("../extensions/api.zig");
 const util = @import("util.zig");
 const string_util = @import("../util/strings.zig");
-const config = @import("browser_driver_config");
+const config = @import("alldriver_config");
 
 const Candidate = struct {
     install: types.BrowserInstall,

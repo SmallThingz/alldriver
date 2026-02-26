@@ -26,7 +26,7 @@ Provide a migration-friendly API shape over the idiomatic Zig core runtime.
 
 ## Example
 ```zig
-const nodriver = @import("browser_driver").nodriver;
+const nodriver = @import("alldriver").nodriver;
 
 var client = try nodriver.start(allocator, .{
     .preference = .{ .kinds = &.{.chrome} },

@@ -21,7 +21,7 @@ pub const InstallOptions = struct {
 pub fn defaultCacheDir(allocator: std.mem.Allocator) ![]u8 {
     const home = try std.process.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
-    return std.fs.path.join(allocator, &.{ home, ".cache", "browser_driver", "browsers" });
+    return std.fs.path.join(allocator, &.{ home, ".cache", "alldriver", "browsers" });
 }
 
 pub fn discoverManaged(

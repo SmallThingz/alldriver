@@ -1,5 +1,5 @@
 const std = @import("std");
-const driver = @import("browser_driver");
+const driver = @import("alldriver");
 
 const target_url = "https://www.opensubtitles.com/";
 const connect_retry_sleep_ms = 500;

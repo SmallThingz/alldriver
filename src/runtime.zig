@@ -1040,7 +1040,7 @@ fn createEphemeralProfileDir(allocator: std.mem.Allocator) ![]u8 {
     std.crypto.random.bytes(&nonce_bytes);
     const nonce = std.mem.readInt(u64, &nonce_bytes, .little);
     const stamp = @as(u64, @intCast(std.time.nanoTimestamp()));
-    const leaf = try std.fmt.allocPrint(allocator, "browser-driver-ephemeral-{x}-{x}", .{ stamp, nonce });
+    const leaf = try std.fmt.allocPrint(allocator, "alldriver-ephemeral-{x}-{x}", .{ stamp, nonce });
     defer allocator.free(leaf);
 
     const profile_dir = try std.fs.path.join(allocator, &.{ base_dir, leaf });
@@ -1417,7 +1417,7 @@ test "launch gecko writes stealth prefs when enabled" {
 
 test "persistent chromium includes user data dir argument" {
     const allocator = std.testing.allocator;
-    const profile_dir = try resolveEffectiveProfileDir(allocator, .persistent, "/tmp/browser-driver-persistent-chromium");
+    const profile_dir = try resolveEffectiveProfileDir(allocator, .persistent, "/tmp/alldriver-persistent-chromium");
     defer allocator.free(profile_dir);
 
     var args: std.ArrayList([]const u8) = .empty;
@@ -1437,7 +1437,7 @@ test "persistent chromium includes user data dir argument" {
 
 test "persistent gecko includes profile argument pair" {
     const allocator = std.testing.allocator;
-    const profile_dir = try resolveEffectiveProfileDir(allocator, .persistent, "/tmp/browser-driver-persistent-gecko");
+    const profile_dir = try resolveEffectiveProfileDir(allocator, .persistent, "/tmp/alldriver-persistent-gecko");
     defer allocator.free(profile_dir);
 
     var args: std.ArrayList([]const u8) = .empty;

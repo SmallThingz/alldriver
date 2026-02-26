@@ -26,7 +26,7 @@ pub const PageClient = struct {
     pub fn setViewport(self: *PageClient, width: u32, height: u32) !void {
         const script = try std.fmt.allocPrint(
             self.session.base.allocator,
-            "(function(){{window.__browser_driver_viewport={{width:{d},height:{d}}}; return true;}})();",
+            "(function(){{window.__alldriver_viewport={{width:{d},height:{d}}}; return true;}})();",
             .{ width, height },
         );
         defer self.session.base.allocator.free(script);

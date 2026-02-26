@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Cache Zig Artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: zig-${{ runner.os }}-0.15.2-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**/*.zig', 'examples/**/*.zig', 'scripts/**/*.zig') }}
+          restore-keys: |
+            zig-${{ runner.os }}-0.15.2-
+
+      - name: Zig Version
+        run: zig version
+
+      - name: Test
+        run: zig build test
+
+      - name: Build Examples
+        run: zig build examples
+
+      - name: Adversarial Gate (CI Smoke)
+        run: |
+          mkdir -p artifacts/reports
+          zig build tools -- adversarial-detection-gate --allow-missing-browser=1 --out artifacts/reports/ci-adversarial-detection.txt
+
+      - name: Upload CI Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports-${{ github.run_id }}
+          path: |
+            artifacts/reports/ci-adversarial-detection.txt

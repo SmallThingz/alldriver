@@ -19,28 +19,28 @@ Official VM image source links:
 ```bash
 zig build tools -- vm-image-sources --check
 ```
-See `/home/a/projects/zig/browser_driver/docs/vm-image-sources.md` for the curated source list.
+See `/home/a/projects/zig/alldriver/docs/vm-image-sources.md` for the curated source list.
 
 ## 1) Initialize Shared VM Lab
 ```bash
-zig build tools -- vm-init-lab --project browser_driver
+zig build tools -- vm-init-lab --project alldriver
 ```
 
 This creates:
 - `/home/a/vm_lab/images`
-- `/home/a/vm_lab/projects/browser_driver`
+- `/home/a/vm_lab/projects/alldriver`
 - `/home/a/vm_lab/hosts`
 
 ## 2) Linux VM (QEMU) for Matrix Runs
 Create VM assets:
 ```bash
-zig build tools -- vm-create-linux --project browser_driver --name linux-matrix
+zig build tools -- vm-create-linux --project alldriver --name linux-matrix
 ```
 
 Override the Linux base image URL (and optional SHA256):
 ```bash
 zig build tools -- vm-create-linux \
-  --project browser_driver \
+  --project alldriver \
   --name linux-matrix \
   --base-url "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img" \
   --base-sha256 "<sha256>"
@@ -48,12 +48,12 @@ zig build tools -- vm-create-linux \
 
 Start the VM in a dedicated terminal:
 ```bash
-zig build tools -- vm-start-linux --project browser_driver --name linux-matrix
+zig build tools -- vm-start-linux --project alldriver --name linux-matrix
 ```
 
 Run matrix remotely in VM and collect artifacts back:
 ```bash
-zig build tools -- vm-run-linux-matrix --project browser_driver --name linux-matrix
+zig build tools -- vm-run-linux-matrix --project alldriver --name linux-matrix
 ```
 
 ## 3) Register macOS/Windows Hosts
@@ -65,8 +65,8 @@ zig build tools -- vm-register-host --name windows-host --os windows --arch x64 
 
 Run matrix on a registered host:
 ```bash
-zig build tools -- vm-run-remote-matrix --project browser_driver --host macos-host
-zig build tools -- vm-run-remote-matrix --project browser_driver --host windows-host
+zig build tools -- vm-run-remote-matrix --project alldriver --host macos-host
+zig build tools -- vm-run-remote-matrix --project alldriver --host windows-host
 ```
 
 ## 4) Signed Evidence and GA Bundle
@@ -77,7 +77,7 @@ If signatures are required, set:
 Collect Linux/macOS/Windows evidence and build final bundle:
 ```bash
 zig build tools -- vm-ga-collect-and-bundle \
-  --project browser_driver \
+  --project alldriver \
   --release-id v1-ga \
   --linux-host linux-matrix \
   --macos-host macos-host \

@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const driver = @import("browser_driver");
+const driver = @import("alldriver");
 
 const target_url = "https://www.opensubtitles.com/";
 

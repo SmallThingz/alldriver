@@ -92,7 +92,7 @@ pub fn bufferedPrint() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("browser_driver ready. Use modern/legacy namespaced APIs.\n", .{});
+    try stdout.print("alldriver ready. Use modern/legacy namespaced APIs.\n", .{});
     try stdout.flush();
 }
 

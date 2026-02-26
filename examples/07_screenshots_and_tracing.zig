@@ -1,5 +1,5 @@
 const std = @import("std");
-const driver = @import("browser_driver");
+const driver = @import("alldriver");
 
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};

@@ -1,5 +1,5 @@
 const std = @import("std");
-const driver = @import("browser_driver");
+const driver = @import("alldriver");
 
 fn onRequest(evt: driver.RequestEvent) void {
     std.debug.print("request: {s} {s}\n", .{ evt.method, evt.url });

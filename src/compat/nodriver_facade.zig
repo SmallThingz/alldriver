@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("../types.zig");
 const runtime = @import("../runtime.zig");
-const config = @import("browser_driver_config");
+const config = @import("alldriver_config");
 
 pub const NodriverFacade = struct {
     allocator: std.mem.Allocator,

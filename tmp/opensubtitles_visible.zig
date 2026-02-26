@@ -1,5 +1,5 @@
 const std = @import("std");
-const driver = @import("browser_driver");
+const driver = @import("alldriver");
 
 const target_url = "https://www.opensubtitles.com/";
 
@@ -46,7 +46,7 @@ pub fn main() !void {
     }, .{});
     defer driver.freeInstalls(allocator, installs);
 
-    const profile_dir = std.posix.getenv("BROWSER_DRIVER_VISIBLE_PROFILE_DIR") orelse "/tmp/browser-driver-visible-profile";
+    const profile_dir = std.posix.getenv("ALLDRIVER_VISIBLE_PROFILE_DIR") orelse "/tmp/alldriver-visible-profile";
 
     if (installs.len == 0) {
         std.debug.print("No supported browser install found.\n", .{});

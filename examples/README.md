@@ -1,6 +1,6 @@
 # Examples
 
-This folder contains many focused usage examples for `browser_driver`.
+This folder contains many focused usage examples for `alldriver`.
 
 ## Build All Examples
 
@@ -8,7 +8,7 @@ This folder contains many focused usage examples for `browser_driver`.
 zig build examples
 ```
 
-Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/examples`.
+Built executables are written to `/home/a/projects/zig/alldriver/zig-out/examples`.
 
 ## Example Index
 

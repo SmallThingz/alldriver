@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("../types.zig");
-const config = @import("browser_driver_config");
+const config = @import("alldriver_config");
 
 pub const ScoreInstallHook = fn (install: types.BrowserInstall) i32;
 pub const LaunchArgsHook = fn (

@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("browser_driver", .{
+    const mod = b.addModule("alldriver", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
         .imports = &.{
-            .{ .name = "browser_driver_config", .module = config.createModule() },
+            .{ .name = "alldriver_config", .module = config.createModule() },
         },
     });
 
@@ -90,7 +90,7 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
-        .name = "browser_driver",
+        .name = "alldriver",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
@@ -105,12 +105,12 @@ pub fn build(b: *std.Build) void {
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
-                // Here "browser_driver" is the name you will use in your source code to
-                // import this module (e.g. `@import("browser_driver")`). The name is
+                // Here "alldriver" is the name you will use in your source code to
+                // import this module (e.g. `@import("alldriver")`). The name is
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
-                .{ .name = "browser_driver", .module = mod },
+                .{ .name = "alldriver", .module = mod },
             },
         }),
     });
@@ -122,14 +122,14 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const tools_exe = b.addExecutable(.{
-        .name = "browser_driver_tools",
+        .name = "alldriver_tools",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tools_main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "browser_driver", .module = mod },
-                .{ .name = "browser_driver_config", .module = config.createModule() },
+                .{ .name = "alldriver", .module = mod },
+                .{ .name = "alldriver_config", .module = config.createModule() },
             },
         }),
     });
@@ -161,7 +161,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const tools_step = b.step("tools", "Run browser_driver_tools commands (pass args after --)");
+    const tools_step = b.step("tools", "Run alldriver_tools commands (pass args after --)");
     const run_tools_cmd = b.addRunArtifact(tools_exe);
     tools_step.dependOn(&run_tools_cmd.step);
     if (b.args) |args| {
@@ -193,7 +193,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "browser_driver", .module = mod },
+                    .{ .name = "alldriver", .module = mod },
                 },
             }),
         });
@@ -247,27 +247,27 @@ pub fn build(b: *std.Build) void {
     vm_image_sources_step.dependOn(&vm_image_sources_cmd.step);
 
     const vm_init_cmd = b.addRunArtifact(tools_exe);
-    vm_init_cmd.addArgs(&.{ "vm-init-lab", "--project", "browser_driver", "--lab-dir", vm_lab_dir });
+    vm_init_cmd.addArgs(&.{ "vm-init-lab", "--project", "alldriver", "--lab-dir", vm_lab_dir });
     const vm_init_step = b.step("vm-init", "Initialize shared VM lab");
     vm_init_step.dependOn(&vm_init_cmd.step);
 
     const vm_linux_create_cmd = b.addRunArtifact(tools_exe);
-    vm_linux_create_cmd.addArgs(&.{ "vm-create-linux", "--project", "browser_driver", "--name", "linux-matrix", "--lab-dir", vm_lab_dir });
+    vm_linux_create_cmd.addArgs(&.{ "vm-create-linux", "--project", "alldriver", "--name", "linux-matrix", "--lab-dir", vm_lab_dir });
     const vm_linux_create_step = b.step("vm-linux-create", "Create Linux matrix VM assets");
     vm_linux_create_step.dependOn(&vm_linux_create_cmd.step);
 
     const vm_linux_matrix_cmd = b.addRunArtifact(tools_exe);
-    vm_linux_matrix_cmd.addArgs(&.{ "vm-run-linux-matrix", "--project", "browser_driver", "--name", "linux-matrix", "--lab-dir", vm_lab_dir });
+    vm_linux_matrix_cmd.addArgs(&.{ "vm-run-linux-matrix", "--project", "alldriver", "--name", "linux-matrix", "--lab-dir", vm_lab_dir });
     const vm_linux_matrix_step = b.step("vm-linux-matrix", "Run Linux matrix inside VM and collect artifacts");
     vm_linux_matrix_step.dependOn(&vm_linux_matrix_cmd.step);
 
     const vm_remote_matrix_cmd = b.addRunArtifact(tools_exe);
-    vm_remote_matrix_cmd.addArgs(&.{ "vm-run-remote-matrix", "--project", "browser_driver", "--host", vm_host, "--lab-dir", vm_lab_dir });
+    vm_remote_matrix_cmd.addArgs(&.{ "vm-run-remote-matrix", "--project", "alldriver", "--host", vm_host, "--lab-dir", vm_lab_dir });
     const vm_remote_matrix_step = b.step("vm-remote-matrix", "Run matrix on a registered remote host (set -Dvm_host=...)");
     vm_remote_matrix_step.dependOn(&vm_remote_matrix_cmd.step);
 
     const vm_ga_bundle_cmd = b.addRunArtifact(tools_exe);
-    vm_ga_bundle_cmd.addArgs(&.{ "vm-ga-collect-and-bundle", "--project", "browser_driver", "--linux-host", "linux-matrix", "--macos-host", "macos-host", "--windows-host", "windows-host", "--lab-dir", vm_lab_dir });
+    vm_ga_bundle_cmd.addArgs(&.{ "vm-ga-collect-and-bundle", "--project", "alldriver", "--linux-host", "linux-matrix", "--macos-host", "macos-host", "--windows-host", "windows-host", "--lab-dir", vm_lab_dir });
     const vm_ga_bundle_step = b.step("vm-ga-bundle", "Collect Linux/macOS/Windows matrix evidence and build GA bundle");
     vm_ga_bundle_step.dependOn(&vm_ga_bundle_cmd.step);
 
@@ -287,7 +287,7 @@ pub fn build(b: *std.Build) void {
             .target = qemu_target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "browser_driver_config", .module = config.createModule() },
+                .{ .name = "alldriver_config", .module = config.createModule() },
             },
         }),
     });

@@ -15,9 +15,9 @@ Extension hooks are defined in:
 
 ## Registering Hooks
 ```zig
-const ext = @import("browser_driver").extension_hooks;
+const ext = @import("alldriver").extension_hooks;
 
-fn score(install: @import("browser_driver").BrowserInstall) i32 {
+fn score(install: @import("alldriver").BrowserInstall) i32 {
     return if (install.kind == .firefox) 20 else 0;
 }
 
