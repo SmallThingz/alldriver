@@ -10,6 +10,7 @@
   - `discoverWebViews(...) -> WebViewRuntimeList`
   - Call `.deinit()` on returned lists.
 - Root compatibility launch/attach/webview shims were removed.
+- `nodriver` compatibility facade was removed.
 
 ## Namespace Split
 - New public namespaces:
@@ -39,6 +40,7 @@
 | `attachIosWebView(...)` | `legacy.attachIosWebView(...)` |
 | `attachElectronWebView(...)` | `modern.attachElectronWebView(...)` |
 | `attachWebKitGtkWebView(...)` | `legacy.attachWebKitGtkWebView(...)` |
+| `nodriver.start(...)` | Use `modern.launch(...)` directly with explicit discovery + profile/args policy |
 
 ## Upgrade Pattern
 1. Replace direct field access (`session.capabilities.*`) with method calls.

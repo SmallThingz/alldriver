@@ -177,12 +177,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "example-06-cookies-and-storage", .path = "examples/06_cookies_and_storage.zig" },
         .{ .name = "example-07-screenshots-and-tracing", .path = "examples/07_screenshots_and_tracing.zig" },
         .{ .name = "example-08-async-api", .path = "examples/08_async_api.zig" },
-        .{ .name = "example-09-nodriver-facade", .path = "examples/09_nodriver_facade.zig" },
+        .{ .name = "example-09-modern-contexts-and-targets", .path = "examples/09_modern_contexts_and_targets.zig" },
         .{ .name = "example-10-webview-discovery-and-attach", .path = "examples/10_webview_discovery_and_attach.zig" },
         .{ .name = "example-11-mobile-webview-attach", .path = "examples/11_mobile_webview_attach.zig" },
         .{ .name = "example-12-managed-cache-and-profile-modes", .path = "examples/12_managed_cache_and_profile_modes.zig" },
         .{ .name = "example-13-capability-aware-flow", .path = "examples/13_capability_aware_flow.zig" },
         .{ .name = "example-14-electron-webview", .path = "examples/14_electron_webview.zig" },
+        .{ .name = "example-15-legacy-webkitgtk-webview", .path = "examples/15_legacy_webkitgtk_webview.zig" },
     };
     const examples_step = b.step("examples", "Build all library usage examples");
     inline for (example_specs) |spec| {

@@ -8,7 +8,7 @@ This folder contains many focused usage examples for `alldriver`.
 zig build examples
 ```
 
-Built executables are written to `/home/a/projects/zig/alldriver/zig-out/examples`.
+Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/examples`.
 
 ## Example Index
 
@@ -20,12 +20,13 @@ Built executables are written to `/home/a/projects/zig/alldriver/zig-out/example
 - `06_cookies_and_storage.zig`: cookie write plus localStorage read/write via JS.
 - `07_screenshots_and_tracing.zig`: capture screenshots and tracing artifacts.
 - `08_async_api.zig`: use thread-backed async operations and await results.
-- `09_nodriver_facade.zig`: nodriver-style API usage.
+- `09_modern_contexts_and_targets.zig`: modern context/target domain clients.
 - `10_webview_discovery_and_attach.zig`: discover desktop webview runtimes and attach.
 - `11_mobile_webview_attach.zig`: Android/iOS webview attach helper usage.
 - `12_managed_cache_and_profile_modes.zig`: managed cache preference and profile modes.
 - `13_capability_aware_flow.zig`: capability-checked flow with graceful fallbacks.
 - `14_electron_webview.zig`: discover and launch Electron as a dedicated webview driver.
+- `15_legacy_webkitgtk_webview.zig`: launch WebKitGTK through `WebKitWebDriver` and probe MiniBrowser when present.
 
 ## Notes
 

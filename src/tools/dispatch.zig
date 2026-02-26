@@ -1798,7 +1798,6 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
             "README.md",
             "docs/support-matrix.md",
             "docs/path-discovery.md",
-            "docs/compat-nodriver.md",
             "docs/extensions.md",
             "docs/migration-v1.md",
             "docs/known-limitations.md",

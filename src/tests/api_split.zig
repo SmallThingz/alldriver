@@ -144,6 +144,7 @@ test "root API no longer exports compatibility launch/attach shims" {
     const source = @embedFile("../root.zig");
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn launch(") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn attach(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "pub const nodriver") == null);
 }
 
 test "modern executor source does not reference webdriver transport branch" {

@@ -71,6 +71,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 ### Namespace split
 - `driver.modern.*` for Chromium/Gecko + CDP-capable webviews.
 - `driver.legacy.*` for WebDriver-only browser/webview paths.
+- Compatibility facades and root launch/attach shims are removed.
 
 ### Modern domains
 - `page()`, `runtime()`, `network()`, `input()`, `log()`, `storage()`, `contexts()`, `targets()`
@@ -127,13 +128,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
 ## Docs
 - `docs/support-matrix.md`
 - `docs/path-discovery.md`
-- `docs/compat-nodriver.md`
 - `docs/extensions.md`
 - `docs/migration-v1.md`
 - `docs/known-limitations.md`
 - `docs/vm-matrix.md`
 - `docs/vm-image-sources.md`
-
----
-
-If you want, I can also do a full repository rename pass from `alldriver` -> `alldriver` (module name, binary names, docs paths, commands, and migration notes) as a separate breaking change.

@@ -63,7 +63,6 @@ pub const path = @import("util/path.zig");
 pub const process = @import("util/process.zig");
 
 pub const extension_hooks = extensions;
-pub const nodriver = @import("compat/nodriver_facade.zig");
 pub const async_api = @import("core/async.zig");
 
 pub fn discover(
