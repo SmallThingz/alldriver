@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    var android_session = driver.attachAndroidWebView(allocator, .{
+    var android_session = driver.modern.attachAndroidWebView(allocator, .{
         .device_id = "emulator-5554",
         .bridge_kind = .adb,
         .pid = 1234,
@@ -16,9 +16,9 @@ pub fn main() !void {
     };
     defer android_session.deinit();
 
-    std.debug.print("android webview attached: endpoint={s}\n", .{android_session.endpoint.?});
+    std.debug.print("android webview attached: endpoint={s}\n", .{android_session.base.endpoint.?});
 
-    var shizuku_session = driver.attachAndroidWebView(allocator, .{
+    var shizuku_session = driver.modern.attachAndroidWebView(allocator, .{
         .device_id = "emulator-5554",
         .bridge_kind = .shizuku,
         .host = "127.0.0.1",
@@ -30,9 +30,9 @@ pub fn main() !void {
     };
     defer shizuku_session.deinit();
 
-    std.debug.print("shizuku android webview attached: endpoint={s}\n", .{shizuku_session.endpoint.?});
+    std.debug.print("shizuku android webview attached: endpoint={s}\n", .{shizuku_session.base.endpoint.?});
 
-    var ios_session = driver.attachIosWebView(allocator, .{
+    var ios_session = driver.legacy.attachIosWebView(allocator, .{
         .udid = "ios-simulator-udid",
         .page_id = "1",
     }) catch |err| {
@@ -41,5 +41,5 @@ pub fn main() !void {
     };
     defer ios_session.deinit();
 
-    std.debug.print("ios webview attached: endpoint={s}\n", .{ios_session.endpoint.?});
+    std.debug.print("ios webview attached: endpoint={s}\n", .{ios_session.base.endpoint.?});
 }

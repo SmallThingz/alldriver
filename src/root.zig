@@ -14,11 +14,13 @@ const legacy_api = @import("legacy/api.zig");
 pub const BrowserKind = types.BrowserKind;
 pub const EngineKind = types.EngineKind;
 pub const Platform = types.Platform;
+pub const ApiTier = types.ApiTier;
 pub const WebViewPlatform = types.WebViewPlatform;
 pub const ProfileMode = types.ProfileMode;
 pub const BrowserPreference = types.BrowserPreference;
 pub const DiscoveryOptions = types.DiscoveryOptions;
 pub const BrowserInstall = types.BrowserInstall;
+pub const BrowserInstallList = types.BrowserInstallList;
 pub const LaunchOptions = types.LaunchOptions;
 pub const CapabilitySet = types.CapabilitySet;
 pub const CapabilityFeature = types.CapabilityFeature;
@@ -31,6 +33,7 @@ pub const WebViewKind = types.WebViewKind;
 pub const WebViewRuntimeSource = types.WebViewRuntimeSource;
 pub const WebViewPreference = types.WebViewPreference;
 pub const WebViewRuntime = types.WebViewRuntime;
+pub const WebViewRuntimeList = types.WebViewRuntimeList;
 pub const WebViewAttachOptions = types.WebViewAttachOptions;
 pub const WebViewLaunchOptions = types.WebViewLaunchOptions;
 pub const AndroidBridgeKind = types.AndroidBridgeKind;
@@ -50,11 +53,14 @@ pub const DiscoveryError = errors.DiscoveryError;
 pub const LaunchError = errors.LaunchError;
 pub const WebViewError = errors.WebViewError;
 pub const UnsupportedCapabilityInfo = errors.UnsupportedCapabilityInfo;
-
 pub const Session = session_mod.Session;
+
 pub const modern = modern_api;
 pub const legacy = legacy_api;
 pub const support_tier = support_tier_catalog;
+pub const strings = @import("util/strings.zig");
+pub const path = @import("util/path.zig");
+pub const process = @import("util/process.zig");
 
 pub const extension_hooks = extensions;
 pub const nodriver = @import("compat/nodriver_facade.zig");
@@ -64,124 +70,21 @@ pub fn discover(
     allocator: std.mem.Allocator,
     prefs: BrowserPreference,
     opts: DiscoveryOptions,
-) ![]BrowserInstall {
-    return runtime.discover(allocator, prefs, opts);
-}
-
-/// Deprecated shim: prefer `modern.launch` or `legacy.launch`.
-pub fn launch(allocator: std.mem.Allocator, opts: LaunchOptions) !Session {
-    if (support_tier_catalog.browserTier(opts.install.kind) == .modern) {
-        var session = try modern_api.launch(allocator, opts);
-        return session.intoBase();
-    }
-
-    var session = try legacy_api.launch(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `modern.attach` or `legacy.attachWebDriver`.
-pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
-    if (support_tier_catalog.endpointTier(endpoint) == .modern) {
-        var session = try modern_api.attach(allocator, endpoint);
-        return session.intoBase();
-    }
-
-    var session = try legacy_api.attachWebDriver(allocator, endpoint);
-    return session.intoBase();
+) !BrowserInstallList {
+    return .{
+        .allocator = allocator,
+        .items = try runtime.discover(allocator, prefs, opts),
+    };
 }
 
 pub fn discoverWebViews(
     allocator: std.mem.Allocator,
     prefs: WebViewPreference,
-) ![]WebViewRuntime {
-    return runtime.discoverWebViews(allocator, prefs);
-}
-
-pub fn freeWebViewRuntimes(
-    allocator: std.mem.Allocator,
-    runtimes: []WebViewRuntime,
-) void {
-    runtime.freeWebViewRuntimes(allocator, runtimes);
-}
-
-/// Deprecated shim: prefer `modern.attachWebView` or `legacy.attachWebView`.
-pub fn attachWebView(allocator: std.mem.Allocator, opts: WebViewAttachOptions) !Session {
-    if (support_tier_catalog.webViewTier(opts.kind) == .modern) {
-        var session = try modern_api.attachWebView(allocator, opts);
-        return session.intoBase();
-    }
-
-    var session = try legacy_api.attachWebView(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `modern.launchWebViewHost` or `legacy.launchWebViewHost`.
-pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: WebViewLaunchOptions) !Session {
-    if (support_tier_catalog.webViewTier(opts.kind) == .modern) {
-        var session = try modern_api.launchWebViewHost(allocator, opts);
-        return session.intoBase();
-    }
-
-    var session = try legacy_api.launchWebViewHost(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `modern.attachAndroidWebView`.
-pub fn attachAndroidWebView(
-    allocator: std.mem.Allocator,
-    opts: AndroidWebViewAttachOptions,
-) !Session {
-    var session = try modern_api.attachAndroidWebView(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `legacy.attachIosWebView`.
-pub fn attachIosWebView(
-    allocator: std.mem.Allocator,
-    opts: IosWebViewAttachOptions,
-) !Session {
-    var session = try legacy_api.attachIosWebView(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `legacy.attachWebKitGtkWebView`.
-pub fn attachWebKitGtkWebView(
-    allocator: std.mem.Allocator,
-    opts: WebKitGtkWebViewAttachOptions,
-) !Session {
-    var session = try legacy_api.attachWebKitGtkWebView(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `legacy.launchWebKitGtkWebView`.
-pub fn launchWebKitGtkWebView(
-    allocator: std.mem.Allocator,
-    opts: WebKitGtkWebViewLaunchOptions,
-) !Session {
-    var session = try legacy_api.launchWebKitGtkWebView(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `modern.attachElectronWebView`.
-pub fn attachElectronWebView(
-    allocator: std.mem.Allocator,
-    opts: ElectronWebViewAttachOptions,
-) !Session {
-    var session = try modern_api.attachElectronWebView(allocator, opts);
-    return session.intoBase();
-}
-
-/// Deprecated shim: prefer `modern.launchElectronWebView`.
-pub fn launchElectronWebView(
-    allocator: std.mem.Allocator,
-    opts: ElectronWebViewLaunchOptions,
-) !Session {
-    var session = try modern_api.launchElectronWebView(allocator, opts);
-    return session.intoBase();
-}
-
-pub fn freeInstalls(allocator: std.mem.Allocator, installs: []BrowserInstall) void {
-    runtime.freeInstalls(allocator, installs);
+) !WebViewRuntimeList {
+    return .{
+        .allocator = allocator,
+        .items = try runtime.discoverWebViews(allocator, prefs),
+    };
 }
 
 pub fn bufferedPrint() !void {
@@ -189,7 +92,7 @@ pub fn bufferedPrint() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("browser_driver ready. Use discover()/launch() API.\n", .{});
+    try stdout.print("browser_driver ready. Use modern/legacy namespaced APIs.\n", .{});
     try stdout.flush();
 }
 
@@ -203,24 +106,17 @@ test "engine mapping" {
     try std.testing.expect(engineFor(.safari) == .webkit);
 }
 
-test "attach via root API" {
-    const allocator = std.testing.allocator;
-    var s = try attach(allocator, "cdp://127.0.0.1:9222");
-    defer s.deinit();
-    try std.testing.expect(s.capabilities().dom);
-}
-
 test "discoverWebViews root API" {
     const allocator = std.testing.allocator;
-    const runtimes = try discoverWebViews(allocator, .{
+    var runtimes = try discoverWebViews(allocator, .{
         .kinds = &.{.android_webview},
         .include_path_env = false,
         .include_known_paths = false,
         .include_mobile_bridges = false,
     });
-    defer freeWebViewRuntimes(allocator, runtimes);
+    defer runtimes.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), runtimes.len);
+    try std.testing.expectEqual(@as(usize, 0), runtimes.items.len);
 }
 
 test "platform matrix contracts" {

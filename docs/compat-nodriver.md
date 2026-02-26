@@ -3,6 +3,9 @@
 The compatibility facade is available at:
 - `src/compat/nodriver_facade.zig`
 
+Note:
+- Root launch/attach shims were removed; this facade remains available as a dedicated compatibility layer.
+
 ## Purpose
 Provide a migration-friendly API shape over the idiomatic Zig core runtime.
 

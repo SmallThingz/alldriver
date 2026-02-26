@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../../types.zig");
 const util = @import("../util.zig");
+const string_util = @import("../../util/strings.zig");
 
 const Candidate = struct {
     runtime: types.WebViewRuntime,
@@ -256,8 +257,8 @@ fn appendPathEnv(
                 .score = switch (kind) {
                     .webkitgtk => blk: {
                         const base = std.fs.path.basename(found);
-                        if (containsIgnoreCase(base, "webkitwebdriver")) break :blk 130;
-                        if (containsIgnoreCase(base, "minibrowser")) break :blk 110;
+                        if (string_util.containsIgnoreCase(base, "webkitwebdriver")) break :blk 130;
+                        if (string_util.containsIgnoreCase(base, "minibrowser")) break :blk 110;
                         break :blk 95;
                     },
                     else => 100,
@@ -401,27 +402,16 @@ fn inferKindFromPath(path: []const u8, allowed: []const types.WebViewKind) types
     const base = std.fs.path.basename(path);
     for (allowed) |kind| {
         switch (kind) {
-            .webview2 => if (containsIgnoreCase(base, "webview2")) return .webview2,
-            .wkwebview => if (containsIgnoreCase(base, "webkit") or containsIgnoreCase(base, "safari")) return .wkwebview,
-            .webkitgtk => if (containsIgnoreCase(base, "webkitwebdriver") or containsIgnoreCase(base, "webkit2gtk") or containsIgnoreCase(base, "minibrowser")) return .webkitgtk,
-            .electron => if (containsIgnoreCase(base, "electron")) return .electron,
-            .android_webview => if (containsIgnoreCase(base, "adb") or containsIgnoreCase(base, "shizuku") or containsIgnoreCase(base, "rish")) return .android_webview,
-            .ios_wkwebview => if (containsIgnoreCase(base, "ios_webkit_debug_proxy") or containsIgnoreCase(base, "tidevice")) return .ios_wkwebview,
+            .webview2 => if (string_util.containsIgnoreCase(base, "webview2")) return .webview2,
+            .wkwebview => if (string_util.containsIgnoreCase(base, "webkit") or string_util.containsIgnoreCase(base, "safari")) return .wkwebview,
+            .webkitgtk => if (string_util.containsIgnoreCase(base, "webkitwebdriver") or string_util.containsIgnoreCase(base, "webkit2gtk") or string_util.containsIgnoreCase(base, "minibrowser")) return .webkitgtk,
+            .electron => if (string_util.containsIgnoreCase(base, "electron")) return .electron,
+            .android_webview => if (string_util.containsIgnoreCase(base, "adb") or string_util.containsIgnoreCase(base, "shizuku") or string_util.containsIgnoreCase(base, "rish")) return .android_webview,
+            .ios_wkwebview => if (string_util.containsIgnoreCase(base, "ios_webkit_debug_proxy") or string_util.containsIgnoreCase(base, "tidevice")) return .ios_wkwebview,
         }
     }
 
     return if (allowed.len > 0) allowed[0] else .webview2;
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (haystack.len < needle.len) return false;
-
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
-    }
-    return false;
 }
 
 fn findInPath(allocator: std.mem.Allocator, exe_name: []const u8) ![]u8 {

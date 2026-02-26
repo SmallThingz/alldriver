@@ -5,6 +5,11 @@
 - `Session.capabilities` field moved to `Session.capabilities()` method.
 - Capability checks should use `Session.supports(feature)`.
 - Async operations are exposed via `AsyncResult(T)` handles and `*Async` methods.
+- Discovery ownership changed:
+  - `discover(...) -> BrowserInstallList`
+  - `discoverWebViews(...) -> WebViewRuntimeList`
+  - Call `.deinit()` on returned lists.
+- Root compatibility launch/attach/webview shims were removed.
 
 ## Namespace Split
 - New public namespaces:
@@ -23,10 +28,9 @@
   - `addInterceptRule`, `removeInterceptRule`, `clearInterceptRules`
   - `onRequest`, `onResponse`
 
-## Root Shim Mapping (Migration Cycle)
-| Previous root call | Preferred replacement |
+## Removed Root Calls and Replacements
+| Removed root call | Replacement |
 |---|---|
-| `discover(...)` | `modern.discover(...)` or `legacy.discover(...)` |
 | `launch(...)` | `modern.launch(...)` for Chromium/Gecko, `legacy.launch(...)` for WebDriver-only targets |
 | `attach(endpoint)` | `modern.attach(endpoint)` for CDP/BiDi endpoints, `legacy.attachWebDriver(endpoint)` for WebDriver endpoints |
 | `attachWebView(...)` | `modern.attachWebView(...)` for `webview2/electron/android_webview`, `legacy.attachWebView(...)` for `wkwebview/webkitgtk/ios_wkwebview` |
@@ -36,13 +40,10 @@
 | `attachElectronWebView(...)` | `modern.attachElectronWebView(...)` |
 | `attachWebKitGtkWebView(...)` | `legacy.attachWebKitGtkWebView(...)` |
 
-Deprecation timeline:
-1. Current cycle: root shims remain supported for compatibility.
-2. Next major cycle: root shims become deprecated-only and may be removed after migration window completion.
-
 ## Upgrade Pattern
 1. Replace direct field access (`session.capabilities.*`) with method calls.
-2. Move new code to `modern`/`legacy` namespace calls instead of root shims.
+2. Move all launch/attach code to `modern`/`legacy` namespace calls.
 3. Migrate webview attach code to dedicated helper APIs where possible.
 4. Move any ad-hoc interception logic to `NetworkRule` + `InterceptAction`.
 5. For non-blocking workflows, switch from custom threads to `*Async` session methods and `.await()`.
+6. Replace raw discovery slices + `free*` helpers with list `.deinit()` ownership.

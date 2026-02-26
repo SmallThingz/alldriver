@@ -8,22 +8,22 @@ pub fn main() !void {
 
     const explicit = std.posix.getenv("BROWSER_DRIVER_EXPLICIT_PATH");
 
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox },
         .explicit_path = explicit,
         .allow_managed_download = true,
         .managed_cache_dir = "/home/a/.cache/browser_driver",
     }, .{});
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    if (installs.len == 0) {
+    if (installs.items.len == 0) {
         std.debug.print("no install candidates\n", .{});
         return;
     }
 
     // Persistent profile launch.
-    var persistent = try driver.launch(allocator, .{
-        .install = installs[0],
+    var persistent = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .persistent,
         .profile_dir = "/tmp/browser-driver-profile",
         .headless = true,
@@ -31,18 +31,20 @@ pub fn main() !void {
     });
     defer persistent.deinit();
 
-    try persistent.navigate("https://example.com");
-    try persistent.waitFor(.dom_ready, 10_000);
+    var persistent_page = persistent.page();
+    try persistent_page.navigate("https://example.com");
+    try persistent.base.waitFor(.dom_ready, 10_000);
 
     // Ephemeral launch (isolated disposable profile that is deleted on deinit).
-    var ephemeral = try driver.launch(allocator, .{
-        .install = installs[0],
+    var ephemeral = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
         .args = &.{},
     });
     defer ephemeral.deinit();
 
-    try ephemeral.navigate("https://example.com?mode=ephemeral");
-    try ephemeral.waitFor(.dom_ready, 10_000);
+    var ephemeral_page = ephemeral.page();
+    try ephemeral_page.navigate("https://example.com?mode=ephemeral");
+    try ephemeral.base.waitFor(.dom_ready, 10_000);
 }

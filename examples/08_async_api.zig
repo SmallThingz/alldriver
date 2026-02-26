@@ -6,16 +6,16 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .firefox },
         .allow_managed_download = false,
     }, .{});
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    if (installs.len == 0) return error.NoBrowserFound;
+    if (installs.items.len == 0) return error.NoBrowserFound;
 
-    var session = try driver.launch(allocator, .{
-        .install = installs[0],
+    var session = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });

@@ -7,6 +7,7 @@
 - API guarantees are split by namespace:
   - `modern`: CDP/BiDi (`cdp_ws`, `bidi_ws`).
   - `legacy`: WebDriver-only flows (`webdriver_http`).
+- Launch/attach contracts are namespace-only; root compatibility shims are removed.
 
 ## Tier 1
 | API Class | Engine | Browsers | Platforms | Adversarial Gate Coverage |

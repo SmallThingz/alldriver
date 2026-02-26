@@ -6,29 +6,31 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const runtimes = try driver.discoverWebViews(allocator, .{
+    var runtimes = try driver.discoverWebViews(allocator, .{
         .kinds = &.{ .webview2, .wkwebview, .webkitgtk },
         .include_path_env = true,
         .include_known_paths = true,
         .include_mobile_bridges = false,
     });
-    defer driver.freeWebViewRuntimes(allocator, runtimes);
+    defer runtimes.deinit();
 
-    std.debug.print("discovered {d} desktop webview runtime(s)\n", .{runtimes.len});
-    if (runtimes.len == 0) return;
+    std.debug.print("discovered {d} desktop webview runtime(s)\n", .{runtimes.items.len});
+    if (runtimes.items.len == 0) return;
 
-    const first = runtimes[0];
+    const first = runtimes.items[0];
     const endpoint = switch (first.kind) {
         .webview2 => "cdp://127.0.0.1:9222/devtools/page/1",
         .wkwebview, .webkitgtk => "webdriver://127.0.0.1:4444/session/1",
         else => return,
     };
 
-    var session = try driver.attachWebView(allocator, .{
-        .kind = first.kind,
-        .endpoint = endpoint,
-    });
-    defer session.deinit();
-
-    std.debug.print("attached webview mode={s} transport={s}\n", .{ @tagName(session.mode), @tagName(session.transport) });
+    if (driver.support_tier.webViewTier(first.kind) == .modern) {
+        var session = try driver.modern.attachWebView(allocator, .{ .kind = first.kind, .endpoint = endpoint });
+        defer session.deinit();
+        std.debug.print("attached webview mode={s} transport={s}\n", .{ @tagName(session.base.mode), @tagName(session.base.transport) });
+    } else {
+        var session = try driver.legacy.attachWebView(allocator, .{ .kind = first.kind, .endpoint = endpoint });
+        defer session.deinit();
+        std.debug.print("attached webview mode={s} transport={s}\n", .{ @tagName(session.base.mode), @tagName(session.base.transport) });
+    }
 }

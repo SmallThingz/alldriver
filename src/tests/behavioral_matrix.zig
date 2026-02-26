@@ -22,12 +22,14 @@ fn bridgeRequirement() BridgeRequirement {
     return .both;
 }
 
-fn fetchExampleAndAssert(session: *driver.Session, allocator: std.mem.Allocator) !void {
-    try session.navigate(example_url);
-    try session.waitFor(.dom_ready, 15_000);
-    session.waitFor(.network_idle, 10_000) catch {};
+fn fetchExampleAndAssert(session: anytype, allocator: std.mem.Allocator) !void {
+    const base = &session.base;
 
-    const probe = try session.evaluate(
+    try base.navigate(example_url);
+    try base.waitFor(.dom_ready, 15_000);
+    base.waitFor(.network_idle, 10_000) catch {};
+
+    const probe = try base.evaluate(
         "(function(){return [location.hostname, location.href, document.title, document.body ? document.body.innerText : ''].join('\\n');})();",
     );
     defer allocator.free(probe);
@@ -40,13 +42,11 @@ fn fetchExampleAndAssert(session: *driver.Session, allocator: std.mem.Allocator)
     const has_data_gate = std.mem.indexOf(u8, probe, "data:text/html") != null and
         (std.mem.indexOf(u8, probe, "gate") != null or std.mem.indexOf(u8, probe, "GATE") != null);
 
-    if (session.transport == .webdriver_http and
+    if (base.transport == .webdriver_http and
         (std.mem.indexOf(u8, probe, "{\"value\":null}") != null or
             std.mem.indexOf(u8, probe, "\"value\":null") != null or
             std.mem.indexOf(u8, probe, "null") != null))
     {
-        // Some WebDriver stacks return null for execute-script value extraction even after
-        // successful navigation; dom_ready wait + navigate success is treated as pass.
         return;
     }
 
@@ -123,7 +123,7 @@ test "behavioral browser smoke matrix (opt-in)" {
     var webview_fetched_any: bool = false;
 
     for (behavioralBrowserKinds()) |kind| {
-        const installs = try driver.discover(allocator, .{
+        var installs = try driver.discover(allocator, .{
             .kinds = &.{kind},
             .allow_managed_download = false,
         }, .{
@@ -131,51 +131,75 @@ test "behavioral browser smoke matrix (opt-in)" {
             .include_os_probes = true,
             .include_known_paths = true,
         });
-        defer driver.freeInstalls(allocator, installs);
+        defer installs.deinit();
 
-        if (installs.len == 0) {
+        if (installs.items.len == 0) {
             if (strict) return error.MissingBrowserInstall;
             continue;
         }
         discovered_any = true;
 
-        var session = driver.launch(allocator, .{
-            .install = installs[0],
-            .profile_mode = .ephemeral,
-            .headless = true,
-            .ignore_tls_errors = behavioralIgnoreTls(),
-            .args = &.{},
-        }) catch |err| {
-            if (strict) return err;
-            continue;
-        };
-        defer session.deinit();
+        const install = installs.items[0];
+        const tier = driver.support_tier.browserTier(install.kind);
 
-        fetchExampleAndAssert(&session, allocator) catch |err| {
-            if (strict) return err;
-            std.debug.print("behavioral fetch failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
-            continue;
-        };
-        fetched_any = true;
-
-        if (session.transport == .cdp_ws and session.endpoint != null) {
-            cdp_candidate_any = true;
-            var webview_session = driver.attachWebView(allocator, .{
-                .kind = .android_webview,
-                .endpoint = session.endpoint.?,
+        if (tier == .modern) {
+            var session = driver.modern.launch(allocator, .{
+                .install = install,
+                .profile_mode = .ephemeral,
+                .headless = true,
+                .ignore_tls_errors = behavioralIgnoreTls(),
+                .args = &.{},
             }) catch |err| {
                 if (strict) return err;
-                std.debug.print("behavioral webview attach failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
                 continue;
             };
-            defer webview_session.deinit();
+            defer session.deinit();
 
-            fetchExampleAndAssert(&webview_session, allocator) catch |err| {
+            fetchExampleAndAssert(&session, allocator) catch |err| {
                 if (strict) return err;
-                std.debug.print("behavioral webview fetch failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
+                std.debug.print("behavioral fetch failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
                 continue;
             };
-            webview_fetched_any = true;
+            fetched_any = true;
+
+            if (session.base.transport == .cdp_ws and session.base.endpoint != null) {
+                cdp_candidate_any = true;
+                var webview_session = driver.modern.attachWebView(allocator, .{
+                    .kind = .android_webview,
+                    .endpoint = session.base.endpoint.?,
+                }) catch |err| {
+                    if (strict) return err;
+                    std.debug.print("behavioral webview attach failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
+                    continue;
+                };
+                defer webview_session.deinit();
+
+                fetchExampleAndAssert(&webview_session, allocator) catch |err| {
+                    if (strict) return err;
+                    std.debug.print("behavioral webview fetch failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
+                    continue;
+                };
+                webview_fetched_any = true;
+            }
+        } else {
+            var session = driver.legacy.launch(allocator, .{
+                .install = install,
+                .profile_mode = .ephemeral,
+                .headless = true,
+                .ignore_tls_errors = behavioralIgnoreTls(),
+                .args = &.{},
+            }) catch |err| {
+                if (strict) return err;
+                continue;
+            };
+            defer session.deinit();
+
+            fetchExampleAndAssert(&session, allocator) catch |err| {
+                if (strict) return err;
+                std.debug.print("behavioral fetch failed for {s}: {s}\n", .{ @tagName(kind), @errorName(err) });
+                continue;
+            };
+            fetched_any = true;
         }
     }
 
@@ -190,19 +214,19 @@ test "behavioral webview bridge discovery smoke (opt-in)" {
     const strict = helpers.envEnabled("WEBVIEW_BRIDGE_BEHAVIORAL_STRICT");
     const allocator = std.testing.allocator;
 
-    const runtimes = try driver.discoverWebViews(allocator, .{
+    var runtimes = try driver.discoverWebViews(allocator, .{
         .kinds = &.{ .android_webview, .ios_wkwebview },
         .include_path_env = true,
         .include_known_paths = true,
         .include_mobile_bridges = true,
     });
-    defer driver.freeWebViewRuntimes(allocator, runtimes);
+    defer runtimes.deinit();
 
     if (!strict) return;
 
     var has_android = false;
     var has_ios = false;
-    for (runtimes) |runtime| {
+    for (runtimes.items) |runtime| {
         switch (runtime.kind) {
             .android_webview => has_android = true,
             .ios_wkwebview => has_ios = true,
@@ -228,25 +252,25 @@ test "behavioral electron webview smoke (opt-in)" {
     const strict = helpers.envEnabled("ELECTRON_BEHAVIORAL_STRICT");
     const allocator = std.testing.allocator;
 
-    const runtimes = try driver.discoverWebViews(allocator, .{
+    var runtimes = try driver.discoverWebViews(allocator, .{
         .kinds = &.{.electron},
         .include_path_env = true,
         .include_known_paths = true,
         .include_mobile_bridges = false,
     });
-    defer driver.freeWebViewRuntimes(allocator, runtimes);
+    defer runtimes.deinit();
 
-    if (runtimes.len == 0) {
+    if (runtimes.items.len == 0) {
         if (strict) return error.NoElectronRuntimeFound;
         return;
     }
 
-    const executable_path = runtimes[0].runtime_path orelse {
+    const executable_path = runtimes.items[0].runtime_path orelse {
         if (strict) return error.ElectronRuntimePathMissing;
         return;
     };
 
-    var session = driver.launchElectronWebView(allocator, .{
+    var session = driver.modern.launchElectronWebView(allocator, .{
         .executable_path = executable_path,
         .profile_mode = .ephemeral,
         .headless = true,
@@ -270,17 +294,17 @@ test "behavioral webkitgtk webview smoke (opt-in)" {
     const strict = helpers.envEnabled("WEBKITGTK_BEHAVIORAL_STRICT");
     const allocator = std.testing.allocator;
 
-    const runtimes = try driver.discoverWebViews(allocator, .{
+    var runtimes = try driver.discoverWebViews(allocator, .{
         .kinds = &.{.webkitgtk},
         .include_path_env = true,
         .include_known_paths = true,
         .include_mobile_bridges = false,
     });
-    defer driver.freeWebViewRuntimes(allocator, runtimes);
+    defer runtimes.deinit();
 
     var webdriver_path: ?[]const u8 = null;
     var minibrowser_path: ?[]const u8 = null;
-    for (runtimes) |runtime| {
+    for (runtimes.items) |runtime| {
         const path = runtime.runtime_path orelse continue;
         const base = std.fs.path.basename(path);
         if (helpers.containsIgnoreCase(base, "webkitwebdriver")) webdriver_path = path;
@@ -292,7 +316,7 @@ test "behavioral webkitgtk webview smoke (opt-in)" {
         return;
     }
 
-    var session = driver.launchWebKitGtkWebView(allocator, .{
+    var session = driver.legacy.launchWebKitGtkWebView(allocator, .{
         .driver_executable_path = webdriver_path.?,
         .profile_mode = .ephemeral,
         .ignore_tls_errors = behavioralIgnoreTls(),
@@ -312,7 +336,7 @@ test "behavioral webkitgtk webview smoke (opt-in)" {
     const mini = minibrowser_path orelse {
         return error.NoWebKitGtkMiniBrowserRuntimeFound;
     };
-    var mini_targeted = driver.launchWebKitGtkWebView(allocator, .{
+    var mini_targeted = driver.legacy.launchWebKitGtkWebView(allocator, .{
         .driver_executable_path = webdriver_path.?,
         .profile_mode = .ephemeral,
         .browser_target = .minibrowser,

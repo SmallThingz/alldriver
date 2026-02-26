@@ -1,14 +1,8 @@
 const std = @import("std");
+const string_util = @import("../util/strings.zig");
 
 pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (haystack.len < needle.len) return false;
-
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
-    }
-    return false;
+    return string_util.containsIgnoreCase(haystack, needle);
 }
 
 pub fn envEnabled(name: []const u8) bool {

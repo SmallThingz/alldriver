@@ -3,7 +3,7 @@ const core_session = @import("../core/session.zig");
 const types = @import("../types.zig");
 const artifacts = @import("../core/artifacts.zig");
 const async_mod = @import("../core/async.zig");
-const support_tier = @import("../catalog/support_tier.zig");
+const session_common = @import("../tier/session_common.zig");
 
 const page_mod = @import("page.zig");
 const runtime_client_mod = @import("runtime_client.zig");
@@ -18,31 +18,23 @@ pub const ModernSession = struct {
     base: core_session.Session,
 
     pub fn fromBase(base: core_session.Session) !ModernSession {
-        if (support_tier.transportTier(base.transport) != .modern) {
-            var tmp = base;
-            tmp.deinit();
-            return error.UnsupportedProtocol;
-        }
-        return .{ .base = base };
+        return .{ .base = try session_common.fromBase(base, .modern) };
     }
 
     pub fn deinit(self: *ModernSession) void {
-        self.base.deinit();
-        self.* = undefined;
+        session_common.deinit(&self.base);
     }
 
     pub fn intoBase(self: *ModernSession) core_session.Session {
-        const moved = self.base;
-        self.* = undefined;
-        return moved;
+        return session_common.intoBase(&self.base);
     }
 
     pub fn capabilities(self: *const ModernSession) types.CapabilitySet {
-        return self.base.capabilities();
+        return session_common.capabilities(&self.base);
     }
 
     pub fn supports(self: *const ModernSession, feature: types.CapabilityFeature) bool {
-        return self.base.supports(feature);
+        return session_common.supports(&self.base, feature);
     }
 
     pub fn page(self: *ModernSession) page_mod.PageClient {
@@ -75,26 +67,6 @@ pub const ModernSession = struct {
 
     pub fn targets(self: *ModernSession) targets_mod.TargetsClient {
         return .{ .session = self };
-    }
-
-    pub fn navigate(self: *ModernSession, url: []const u8) !void {
-        var client = self.page();
-        try client.navigate(url);
-    }
-
-    pub fn click(self: *ModernSession, selector: []const u8) !void {
-        var client = self.input();
-        try client.click(selector);
-    }
-
-    pub fn typeText(self: *ModernSession, selector: []const u8, text: []const u8) !void {
-        var client = self.input();
-        try client.typeText(selector, text);
-    }
-
-    pub fn evaluate(self: *ModernSession, script: []const u8) ![]u8 {
-        var client = self.runtime();
-        return client.evaluate(script);
     }
 
     pub fn screenshot(

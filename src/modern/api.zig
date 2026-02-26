@@ -11,7 +11,7 @@ pub fn discover(
     allocator: std.mem.Allocator,
     prefs: types.BrowserPreference,
     opts: types.DiscoveryOptions,
-) ![]ModernInstall {
+) !types.BrowserInstallList {
     return runtime.discover(allocator, prefs, opts);
 }
 
@@ -26,12 +26,8 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !ModernSession
 pub fn discoverWebViews(
     allocator: std.mem.Allocator,
     prefs: types.WebViewPreference,
-) ![]ModernWebViewRuntime {
+) !types.WebViewRuntimeList {
     return runtime.discoverWebViews(allocator, prefs);
-}
-
-pub fn freeWebViewRuntimes(allocator: std.mem.Allocator, runtimes: []ModernWebViewRuntime) void {
-    runtime.freeWebViewRuntimes(allocator, runtimes);
 }
 
 pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOptions) !ModernSession {

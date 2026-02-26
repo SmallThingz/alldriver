@@ -6,32 +6,33 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox },
         .allow_managed_download = false,
     }, .{});
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    if (installs.len == 0) return error.NoBrowserFound;
+    if (installs.items.len == 0) return error.NoBrowserFound;
 
-    var session = try driver.launch(allocator, .{
-        .install = installs[0],
+    var session = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });
     defer session.deinit();
 
-    try session.navigate("https://example.com");
-    try session.waitFor(.dom_ready, 10_000);
+    var page = session.page();
+    try page.navigate("https://example.com");
+    try session.base.waitFor(.dom_ready, 10_000);
 
-    const png = try session.screenshot(allocator, .png);
+    const png = try page.screenshot(allocator, .png);
     defer allocator.free(png);
     try std.fs.cwd().writeFile(.{ .sub_path = "example-screenshot.png", .data = png });
 
     if (session.supports(.tracing)) {
-        try session.startTracing();
-        try session.navigate("https://example.com/?traced=1");
-        const trace = try session.stopTracing(allocator);
+        try session.base.startTracing();
+        try page.navigate("https://example.com/?traced=1");
+        const trace = try session.base.stopTracing(allocator);
         defer allocator.free(trace);
         try std.fs.cwd().writeFile(.{ .sub_path = "example-trace.json", .data = trace });
     }

@@ -6,25 +6,26 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .firefox },
         .allow_managed_download = false,
     }, .{});
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    if (installs.len == 0) return error.NoBrowserFound;
+    if (installs.items.len == 0) return error.NoBrowserFound;
 
-    var session = try driver.launch(allocator, .{
-        .install = installs[0],
+    var session = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });
     defer session.deinit();
 
-    try session.navigate("https://example.com");
-    try session.waitFor(.dom_ready, 10_000);
+    var page = session.page();
+    try page.navigate("https://example.com");
+    try session.base.waitFor(.dom_ready, 10_000);
 
-    try session.setCookie(.{
+    try session.base.setCookie(.{
         .name = "session_id",
         .value = "abc123",
         .domain = "example.com",
@@ -37,7 +38,8 @@ pub fn main() !void {
         "localStorage.setItem('token','hello'); " ++
         "JSON.stringify({cookie: document.cookie, token: localStorage.getItem('token')});";
 
-    const payload = try session.evaluate(local_storage_script);
+    var runtime = session.runtime();
+    const payload = try runtime.evaluate(local_storage_script);
     defer allocator.free(payload);
     std.debug.print("storage payload: {s}\n", .{payload});
 }

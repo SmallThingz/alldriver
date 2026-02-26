@@ -14,16 +14,16 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox },
         .allow_managed_download = false,
     }, .{});
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    if (installs.len == 0) return error.NoBrowserFound;
+    if (installs.items.len == 0) return error.NoBrowserFound;
 
-    var session = try driver.launch(allocator, .{
-        .install = installs[0],
+    var session = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });
@@ -34,18 +34,20 @@ pub fn main() !void {
         return;
     }
 
-    session.onRequest(onRequest);
-    session.onResponse(onResponse);
+    var network = session.network();
+    network.onRequest(onRequest);
+    network.onResponse(onResponse);
 
-    try session.enableNetworkInterception();
-    try session.addInterceptRule(.{
+    try network.enable();
+    try network.addRule(.{
         .id = "block-trackers",
         .url_pattern = "*://*/tracker/*",
         .action = .{ .block = {} },
     });
 
-    try session.navigate("https://example.com");
-    try session.waitFor(.dom_ready, 10_000);
+    var page = session.page();
+    try page.navigate("https://example.com");
+    try session.base.waitFor(.dom_ready, 10_000);
 
-    _ = try session.removeInterceptRule("block-trackers");
+    _ = try network.removeRule("block-trackers");
 }

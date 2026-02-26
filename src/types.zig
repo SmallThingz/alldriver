@@ -1,8 +1,13 @@
+const std = @import("std");
 const catalog = @import("catalog/browser_kind.zig");
 
 pub const BrowserKind = catalog.BrowserKind;
 pub const EngineKind = catalog.EngineKind;
 pub const Platform = catalog.Platform;
+pub const ApiTier = enum {
+    modern,
+    legacy,
+};
 pub const WebViewPlatform = enum {
     windows,
     macos,
@@ -55,6 +60,39 @@ pub const BrowserInstall = struct {
     path: []const u8,
     version: ?[]const u8 = null,
     source: BrowserInstallSource,
+};
+
+pub const BrowserInstallList = struct {
+    allocator: std.mem.Allocator,
+    items: []BrowserInstall,
+    owned_len: usize = 0,
+
+    pub fn deinit(self: *BrowserInstallList) void {
+        for (self.items) |install| {
+            self.allocator.free(install.path);
+            if (install.version) |version| self.allocator.free(version);
+        }
+        const owned_len = if (self.owned_len == 0) self.items.len else self.owned_len;
+        self.allocator.free(self.items.ptr[0..owned_len]);
+        self.* = undefined;
+    }
+
+    pub fn retainByTier(self: *BrowserInstallList, tier: ApiTier) void {
+        if (self.owned_len == 0) self.owned_len = self.items.len;
+        var write_index: usize = 0;
+        var read_index: usize = 0;
+        while (read_index < self.items.len) : (read_index += 1) {
+            const install = self.items[read_index];
+            if (browserTierForKind(install.kind) != tier) {
+                self.allocator.free(install.path);
+                if (install.version) |version| self.allocator.free(version);
+                continue;
+            }
+            if (write_index != read_index) self.items[write_index] = install;
+            write_index += 1;
+        }
+        self.items = self.items[0..write_index];
+    }
 };
 
 pub const LaunchOptions = struct {
@@ -159,6 +197,41 @@ pub const WebViewRuntime = struct {
     version: ?[]const u8 = null,
 };
 
+pub const WebViewRuntimeList = struct {
+    allocator: std.mem.Allocator,
+    items: []WebViewRuntime,
+    owned_len: usize = 0,
+
+    pub fn deinit(self: *WebViewRuntimeList) void {
+        for (self.items) |runtime| {
+            if (runtime.runtime_path) |path| self.allocator.free(path);
+            if (runtime.bridge_tool_path) |path| self.allocator.free(path);
+            if (runtime.version) |version| self.allocator.free(version);
+        }
+        const owned_len = if (self.owned_len == 0) self.items.len else self.owned_len;
+        self.allocator.free(self.items.ptr[0..owned_len]);
+        self.* = undefined;
+    }
+
+    pub fn retainByTier(self: *WebViewRuntimeList, tier: ApiTier) void {
+        if (self.owned_len == 0) self.owned_len = self.items.len;
+        var write_index: usize = 0;
+        var read_index: usize = 0;
+        while (read_index < self.items.len) : (read_index += 1) {
+            const runtime = self.items[read_index];
+            if (webViewTierForKind(runtime.kind) != tier) {
+                if (runtime.runtime_path) |path| self.allocator.free(path);
+                if (runtime.bridge_tool_path) |path| self.allocator.free(path);
+                if (runtime.version) |version| self.allocator.free(version);
+                continue;
+            }
+            if (write_index != read_index) self.items[write_index] = runtime;
+            write_index += 1;
+        }
+        self.items = self.items[0..write_index];
+    }
+};
+
 pub const WebViewAttachOptions = struct {
     kind: WebViewKind,
     endpoint: []const u8,
@@ -253,3 +326,17 @@ pub const LaunchError = error{
     SpawnFailed,
     PersistentProfileDirRequired,
 };
+
+fn browserTierForKind(kind: BrowserKind) ApiTier {
+    return switch (catalog.engineFor(kind)) {
+        .chromium, .gecko => .modern,
+        .webkit, .unknown => .legacy,
+    };
+}
+
+fn webViewTierForKind(kind: WebViewKind) ApiTier {
+    return switch (kind) {
+        .webview2, .electron, .android_webview => .modern,
+        .wkwebview, .webkitgtk, .ios_wkwebview => .legacy,
+    };
+}

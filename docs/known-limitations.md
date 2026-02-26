@@ -5,9 +5,9 @@
 - Unsupported protocol operations return typed capability/protocol errors instead of silent no-op behavior.
 - `modern` exposes CDP/BiDi-first domain APIs, but some operations remain adapter-specific (for example, handle lifecycle operations can return typed unsupported errors).
 
-## Namespace Migration Window
-- Root compatibility shims (`launch`, `attach`, and root webview helpers) are maintained for one migration cycle.
-- New integrations should use `modern.*` or `legacy.*` explicitly; shim removal can happen in the next major cycle.
+## Namespaced Launch/Attach APIs
+- Launch/attach flows are namespace-only (`modern.*`, `legacy.*`).
+- Root discovery remains available, but session creation and webview attach/launch helpers are no longer exported from root.
 
 ## Mobile Bridge Scope
 - Android/iOS support is bridge-smoke scoped for v1 release gates.

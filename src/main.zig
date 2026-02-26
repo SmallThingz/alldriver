@@ -6,16 +6,16 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
-    const installs = try browser_driver.discover(gpa, .{
+    var installs = try browser_driver.discover(gpa, .{
         .kinds = &.{ .chrome, .edge, .safari, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf, .epic, .arc, .vivaldi, .sigmaos, .sidekick, .shift, .operagx, .lightpanda, .palemoon },
         .allow_managed_download = false,
     }, .{});
-    defer browser_driver.freeInstalls(gpa, installs);
+    defer installs.deinit();
 
     try browser_driver.bufferedPrint();
 
-    std.debug.print("Discovered {d} browser installs\n", .{installs.len});
-    for (installs) |install| {
+    std.debug.print("Discovered {d} browser installs\n", .{installs.items.len});
+    for (installs.items) |install| {
         std.debug.print("- {s} [{s}] at {s} ({s})\n", .{ @tagName(install.kind), @tagName(install.engine), install.path, @tagName(install.source) });
     }
 }

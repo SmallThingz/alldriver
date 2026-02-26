@@ -26,28 +26,24 @@ test "legacy session accepts webdriver transport" {
     try std.testing.expect(legacy.base.transport == .webdriver_http);
 }
 
-test "root attach shim routes cdp and webdriver" {
-    const allocator = std.testing.allocator;
-
-    var modern = try driver.attach(allocator, "cdp://127.0.0.1:9222");
-    defer modern.deinit();
-    try std.testing.expect(modern.transport == .cdp_ws);
-
-    var legacy = try driver.attach(allocator, "webdriver://127.0.0.1:4444/session/1");
-    defer legacy.deinit();
-    try std.testing.expect(legacy.transport == .webdriver_http);
-
-    var secure_modern = try driver.attach(allocator, "wss://127.0.0.1/devtools/browser/abc");
-    defer secure_modern.deinit();
-    try std.testing.expect(secure_modern.transport == .cdp_ws);
-
-    var bidi = try driver.attach(allocator, "bidi://127.0.0.1/session/1");
-    defer bidi.deinit();
-    try std.testing.expect(bidi.transport == .bidi_ws);
-}
-
 test "modern and legacy attach endpoints enforce protocol split" {
     const allocator = std.testing.allocator;
+
+    var modern = try driver.modern.attach(allocator, "cdp://127.0.0.1:9222");
+    defer modern.deinit();
+    try std.testing.expect(modern.base.transport == .cdp_ws);
+
+    var secure_modern = try driver.modern.attach(allocator, "wss://127.0.0.1/devtools/browser/abc");
+    defer secure_modern.deinit();
+    try std.testing.expect(secure_modern.base.transport == .cdp_ws);
+
+    var bidi = try driver.modern.attach(allocator, "bidi://127.0.0.1/session/1");
+    defer bidi.deinit();
+    try std.testing.expect(bidi.base.transport == .bidi_ws);
+
+    var legacy = try driver.legacy.attachWebDriver(allocator, "webdriver://127.0.0.1:4444/session/1");
+    defer legacy.deinit();
+    try std.testing.expect(legacy.base.transport == .webdriver_http);
 
     try std.testing.expectError(
         error.UnsupportedProtocol,
@@ -60,30 +56,24 @@ test "modern and legacy attach endpoints enforce protocol split" {
     );
 }
 
-test "root webview shim routes modern and legacy transports" {
+test "modern and legacy webview APIs enforce kind split" {
     const allocator = std.testing.allocator;
 
-    var modern_webview = try driver.attachWebView(allocator, .{
+    var modern_webview = try driver.modern.attachWebView(allocator, .{
         .kind = .electron,
         .endpoint = "cdp://127.0.0.1:9222/devtools/page/1",
     });
     defer modern_webview.deinit();
-    try std.testing.expectEqual(driver.support_tier.ApiTier.modern, driver.support_tier.webViewTier(.electron));
-    try std.testing.expect(modern_webview.transport == .cdp_ws);
-    try std.testing.expect(modern_webview.mode == .webview);
+    try std.testing.expect(modern_webview.base.transport == .cdp_ws);
+    try std.testing.expect(modern_webview.base.mode == .webview);
 
-    var legacy_webview = try driver.attachWebView(allocator, .{
+    var legacy_webview = try driver.legacy.attachWebView(allocator, .{
         .kind = .wkwebview,
         .endpoint = "webdriver://127.0.0.1:4444/session/1",
     });
     defer legacy_webview.deinit();
-    try std.testing.expectEqual(driver.support_tier.ApiTier.legacy, driver.support_tier.webViewTier(.wkwebview));
-    try std.testing.expect(legacy_webview.transport == .webdriver_http);
-    try std.testing.expect(legacy_webview.mode == .webview);
-}
-
-test "modern and legacy webview APIs enforce kind split" {
-    const allocator = std.testing.allocator;
+    try std.testing.expect(legacy_webview.base.transport == .webdriver_http);
+    try std.testing.expect(legacy_webview.base.mode == .webview);
 
     try std.testing.expectError(
         error.UnsupportedWebViewKind,
@@ -105,7 +95,7 @@ test "modern and legacy webview APIs enforce kind split" {
 test "discover split filters incompatible browser kinds" {
     const allocator = std.testing.allocator;
 
-    const modern_from_legacy = try driver.modern.discover(allocator, .{
+    var modern_from_legacy = try driver.modern.discover(allocator, .{
         .kinds = &.{.safari},
         .allow_managed_download = false,
     }, .{
@@ -113,10 +103,10 @@ test "discover split filters incompatible browser kinds" {
         .include_os_probes = true,
         .include_known_paths = true,
     });
-    defer driver.freeInstalls(allocator, modern_from_legacy);
-    try std.testing.expectEqual(@as(usize, 0), modern_from_legacy.len);
+    defer modern_from_legacy.deinit();
+    try std.testing.expectEqual(@as(usize, 0), modern_from_legacy.items.len);
 
-    const legacy_from_modern = try driver.legacy.discover(allocator, .{
+    var legacy_from_modern = try driver.legacy.discover(allocator, .{
         .kinds = &.{.chrome},
         .allow_managed_download = false,
     }, .{
@@ -124,30 +114,36 @@ test "discover split filters incompatible browser kinds" {
         .include_os_probes = true,
         .include_known_paths = true,
     });
-    defer driver.freeInstalls(allocator, legacy_from_modern);
-    try std.testing.expectEqual(@as(usize, 0), legacy_from_modern.len);
+    defer legacy_from_modern.deinit();
+    try std.testing.expectEqual(@as(usize, 0), legacy_from_modern.items.len);
 }
 
 test "discover split filters incompatible webview kinds" {
     const allocator = std.testing.allocator;
 
-    const modern_from_legacy = try driver.modern.discoverWebViews(allocator, .{
+    var modern_from_legacy = try driver.modern.discoverWebViews(allocator, .{
         .kinds = &.{.wkwebview},
         .include_path_env = true,
         .include_known_paths = true,
         .include_mobile_bridges = true,
     });
-    defer driver.modern.freeWebViewRuntimes(allocator, modern_from_legacy);
-    try std.testing.expectEqual(@as(usize, 0), modern_from_legacy.len);
+    defer modern_from_legacy.deinit();
+    try std.testing.expectEqual(@as(usize, 0), modern_from_legacy.items.len);
 
-    const legacy_from_modern = try driver.legacy.discoverWebViews(allocator, .{
+    var legacy_from_modern = try driver.legacy.discoverWebViews(allocator, .{
         .kinds = &.{.electron},
         .include_path_env = true,
         .include_known_paths = true,
         .include_mobile_bridges = true,
     });
-    defer driver.legacy.freeWebViewRuntimes(allocator, legacy_from_modern);
-    try std.testing.expectEqual(@as(usize, 0), legacy_from_modern.len);
+    defer legacy_from_modern.deinit();
+    try std.testing.expectEqual(@as(usize, 0), legacy_from_modern.items.len);
+}
+
+test "root API no longer exports compatibility launch/attach shims" {
+    const source = @embedFile("../root.zig");
+    try std.testing.expect(std.mem.indexOf(u8, source, "pub fn launch(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "pub fn attach(") == null);
 }
 
 test "modern executor source does not reference webdriver transport branch" {

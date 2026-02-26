@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox, .safari, .brave },
         .allow_managed_download = false,
     }, .{
@@ -14,10 +14,10 @@ pub fn main() !void {
         .include_os_probes = true,
         .include_known_paths = true,
     });
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    std.debug.print("found {d} install(s)\n", .{installs.len});
-    for (installs, 0..) |install, i| {
+    std.debug.print("found {d} install(s)\n", .{installs.items.len});
+    for (installs.items, 0..) |install, i| {
         std.debug.print(
             "#{d} kind={s} engine={s} source={s} path={s}\n",
             .{ i, @tagName(install.kind), @tagName(install.engine), @tagName(install.source), install.path },

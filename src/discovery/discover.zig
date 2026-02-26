@@ -9,6 +9,7 @@ const linux_sources = @import("linux_sources.zig");
 const cache_manager = @import("../provision/cache_manager.zig");
 const extensions = @import("../extensions/api.zig");
 const util = @import("util.zig");
+const string_util = @import("../util/strings.zig");
 const config = @import("browser_driver_config");
 
 const Candidate = struct {
@@ -431,27 +432,15 @@ fn inferKindFromPath(path: []const u8, preferred_kinds: []const types.BrowserKin
         }
     }
 
-    if (containsIgnoreCase(base, "firefox")) return .firefox;
-    if (containsIgnoreCase(base, "safari")) return .safari;
-    if (containsIgnoreCase(base, "edge") or containsIgnoreCase(base, "msedge")) return .edge;
-    if (containsIgnoreCase(base, "vivaldi")) return .vivaldi;
-    if (containsIgnoreCase(base, "brave")) return .brave;
-    if (containsIgnoreCase(base, "lightpanda") and hasKind(preferred_kinds, .lightpanda)) return .lightpanda;
-    if (containsIgnoreCase(base, "palemoon")) return .palemoon;
+    if (string_util.containsIgnoreCase(base, "firefox")) return .firefox;
+    if (string_util.containsIgnoreCase(base, "safari")) return .safari;
+    if (string_util.containsIgnoreCase(base, "edge") or string_util.containsIgnoreCase(base, "msedge")) return .edge;
+    if (string_util.containsIgnoreCase(base, "vivaldi")) return .vivaldi;
+    if (string_util.containsIgnoreCase(base, "brave")) return .brave;
+    if (string_util.containsIgnoreCase(base, "lightpanda") and hasKind(preferred_kinds, .lightpanda)) return .lightpanda;
+    if (string_util.containsIgnoreCase(base, "palemoon")) return .palemoon;
 
     return if (preferred_kinds.len > 0) preferred_kinds[0] else .chrome;
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (haystack.len < needle.len) return false;
-
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
-    }
-
-    return false;
 }
 
 test "sort prioritizes higher score then path" {

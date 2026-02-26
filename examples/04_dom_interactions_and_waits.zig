@@ -6,31 +6,34 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .firefox, .edge },
         .allow_managed_download = false,
     }, .{});
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    if (installs.len == 0) return error.NoBrowserFound;
+    if (installs.items.len == 0) return error.NoBrowserFound;
 
-    var session = try driver.launch(allocator, .{
-        .install = installs[0],
+    var session = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });
     defer session.deinit();
 
-    const page = "data:text/html,<html><body><input id='name'/><button id='go' onclick=\"document.title=document.getElementById('name').value\">Go</button></body></html>";
+    const page_data = "data:text/html,<html><body><input id='name'/><button id='go' onclick=\"document.title=document.getElementById('name').value\">Go</button></body></html>";
 
-    try session.navigate(page);
-    try session.waitFor(.dom_ready, 10_000);
-    try session.waitForSelector("#name", 10_000);
+    var page = session.page();
+    try page.navigate(page_data);
+    try session.base.waitFor(.dom_ready, 10_000);
+    try session.base.waitForSelector("#name", 10_000);
 
-    try session.typeText("#name", "zig-driver");
-    try session.click("#go");
+    var input = session.input();
+    try input.typeText("#name", "zig-driver");
+    try input.click("#go");
 
-    const title = try session.evaluate("document.title");
+    var runtime = session.runtime();
+    const title = try runtime.evaluate("document.title");
     defer allocator.free(title);
     std.debug.print("document.title payload: {s}\n", .{title});
 }

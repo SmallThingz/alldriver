@@ -10,6 +10,7 @@ const bidi = @import("protocol/bidi/adapter.zig");
 const http = @import("transport/http_client.zig");
 const extensions = @import("extensions/api.zig");
 const webview_discovery = @import("discovery/webview/discover.zig");
+const string_util = @import("util/strings.zig");
 
 pub const Session = session_mod.Session;
 const webdriver_startup_timeout_ms: i64 = 8_000;
@@ -381,6 +382,12 @@ pub fn launchWebKitGtkWebView(allocator: std.mem.Allocator, opts: types.WebKitGt
     var launch_env = try std.process.getEnvMap(allocator);
     defer launch_env.deinit();
     try applyProfileSandboxEnv(allocator, &launch_env, builtin.os.tag, effective_profile_dir);
+    if (opts.ignore_tls_errors) {
+        try launch_env.put("WEBKIT_IGNORE_TLS_ERRORS", "1");
+    }
+    if (builtin.os.tag == .linux) {
+        try launch_env.put("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    }
 
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
@@ -603,7 +610,7 @@ fn buildWebKitGtkSessionCreatePlan(
         if (resolved_browser.path == null) break :blk false;
         const path = resolved_browser.path orelse break :blk false;
         const base = std.fs.path.basename(path);
-        break :blk containsIgnoreCase(base, "minibrowser");
+        break :blk string_util.containsIgnoreCase(base, "minibrowser");
     };
     const auto_uses_default_capabilities = opts.browser_target == .auto and
         opts.browser_args.len == 0 and
@@ -617,14 +624,15 @@ fn buildWebKitGtkSessionCreatePlan(
         if (browser_binary_for_capabilities == null) break :blk false;
         const path = browser_binary_for_capabilities orelse break :blk false;
         const base = std.fs.path.basename(path);
-        break :blk containsIgnoreCase(base, "minibrowser") and !hasArgValue(opts.browser_args, "--automation");
+        break :blk string_util.containsIgnoreCase(base, "minibrowser") and !hasArgValue(opts.browser_args, "--automation");
     };
+
     const needs_minibrowser_ignore_tls = blk: {
         if (browser_binary_for_capabilities == null) break :blk false;
         if (!opts.ignore_tls_errors) break :blk false;
         const path = browser_binary_for_capabilities orelse break :blk false;
         const base = std.fs.path.basename(path);
-        break :blk containsIgnoreCase(base, "minibrowser") and !hasArgValue(opts.browser_args, "--ignore-tls-errors");
+        break :blk string_util.containsIgnoreCase(base, "minibrowser") and !hasArgValue(opts.browser_args, "--ignore-tls-errors");
     };
 
     const primary_body = if (auto_uses_default_capabilities)
@@ -783,7 +791,7 @@ fn discoverMiniBrowserPath(allocator: std.mem.Allocator) !?[]u8 {
     for (runtimes) |runtime| {
         const path = runtime.runtime_path orelse continue;
         const base = std.fs.path.basename(path);
-        if (!containsIgnoreCase(base, "minibrowser")) continue;
+        if (!string_util.containsIgnoreCase(base, "minibrowser")) continue;
         if (!isExecutablePath(path)) continue;
         return @as(?[]u8, try allocator.dupe(u8, path));
     }
@@ -915,7 +923,7 @@ fn discoverWebKitGtkDriverPath(allocator: std.mem.Allocator) ![]u8 {
     for (runtimes) |runtime| {
         const path = runtime.runtime_path orelse continue;
         const base = std.fs.path.basename(path);
-        if (!containsIgnoreCase(base, "webkitwebdriver")) continue;
+        if (!string_util.containsIgnoreCase(base, "webkitwebdriver")) continue;
         if (!isExecutablePath(path)) continue;
         return allocator.dupe(u8, path);
     }
@@ -931,17 +939,6 @@ fn isExecutablePath(path: []const u8) bool {
 
     std.posix.access(path, std.posix.X_OK) catch return false;
     return true;
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (haystack.len < needle.len) return false;
-
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
-    }
-    return false;
 }
 
 fn hasArgValue(args: []const []const u8, value: []const u8) bool {

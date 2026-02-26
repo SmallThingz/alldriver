@@ -3,10 +3,7 @@ const browser_kind = @import("browser_kind.zig");
 const types = @import("../types.zig");
 const common = @import("../protocol/common.zig");
 
-pub const ApiTier = enum {
-    modern,
-    legacy,
-};
+pub const ApiTier = types.ApiTier;
 
 pub fn engineTier(engine: types.EngineKind) ApiTier {
     return switch (engine) {

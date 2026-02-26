@@ -18,26 +18,30 @@
 
 ## WebView Support
 - Discover runtimes and bridge tools with `discoverWebViews(...)`.
-- Attach to an existing webview debug endpoint with `attachWebView(...)`.
-- Launch a host app and manage it as a session with `launchWebViewHost(...)`.
+- Attach to an existing webview debug endpoint with:
+  - `modern.attachWebView(...)`
+  - `legacy.attachWebView(...)`
+- Launch a host app and manage it as a session with:
+  - `modern.launchWebViewHost(...)`
+  - `legacy.launchWebViewHost(...)`
 - Electron-specific APIs:
-  - `attachElectronWebView(...)`
-  - `launchElectronWebView(...)`
+  - `modern.attachElectronWebView(...)`
+  - `modern.launchElectronWebView(...)`
 - WebKitGTK-specific APIs:
-  - `attachWebKitGtkWebView(...)`
-  - `launchWebKitGtkWebView(...)`
+  - `legacy.attachWebKitGtkWebView(...)`
+  - `legacy.launchWebKitGtkWebView(...)`
 - Mobile helper attach APIs:
-  - `attachAndroidWebView(...)`
-  - `attachIosWebView(...)`
+  - `modern.attachAndroidWebView(...)`
+  - `legacy.attachIosWebView(...)`
 - Android bridge modes:
   - `AndroidWebViewAttachOptions.bridge_kind = .adb` (default)
   - `AndroidWebViewAttachOptions.bridge_kind = .shizuku`
   - `AndroidWebViewAttachOptions.bridge_kind = .direct` (existing forwarded endpoint)
-  - `attachAndroidWebView(...)` can synthesize a root CDP endpoint (`cdp://host:port/`) when `pid`/`socket_name` are omitted.
+  - `modern.attachAndroidWebView(...)` can synthesize a root CDP endpoint (`cdp://host:port/`) when `pid`/`socket_name` are omitted.
 
 ### Android Shizuku Example
 ```zig
-var session = try driver.attachAndroidWebView(allocator, .{
+var session = try driver.modern.attachAndroidWebView(allocator, .{
     .device_id = "emulator-5554",
     .bridge_kind = .shizuku,
     .host = "127.0.0.1",
@@ -55,7 +59,11 @@ It does not guarantee bypass of bot-detection systems and does not ship explicit
 ## API Namespaces (`modern` + `legacy`)
 - `modern` is CDP/BiDi-first and only allows `.cdp_ws` / `.bidi_ws` session transports.
 - `legacy` contains WebDriver-only browser/webview paths.
-- Root-level entrypoints (`discover`, `launch`, `attach`, webview helpers) remain as compatibility shims for one migration cycle and route to `modern` or `legacy` based on discovered support.
+- Root compatibility shims were removed in this cycle; launch/attach flows are namespaced only.
+- Discovery returns owned list wrappers:
+  - `discover(...) -> BrowserInstallList`
+  - `discoverWebViews(...) -> WebViewRuntimeList`
+  - Call `.deinit()` on these list objects.
 
 Modern targets:
 - Browser engines: Chromium and Gecko.
@@ -93,7 +101,7 @@ try legacy.navigate("https://example.com");
 - VM/QEMU workflows: `qemu-system-x86_64`, `qemu-img`, `curl`, `python3`, `ssh-keygen`.
 - Optional VM image checksum verification: `sha256sum`.
 
-If you only call core APIs (`discover`, `launch`, `attach`), you typically only need runtime binaries for your target browser/driver. Tooling binaries are only required for matrix/release/VM commands.
+If you only call core APIs (`discover`, `modern.*`, `legacy.*`), you typically only need runtime binaries for your target browser/driver. Tooling binaries are only required for matrix/release/VM commands.
 
 ## Quick Start
 ```zig
@@ -101,23 +109,37 @@ const std = @import("std");
 const driver = @import("browser_driver");
 
 pub fn run(allocator: std.mem.Allocator) !void {
-    const installs = try driver.discover(allocator, .{
+    var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox, .safari },
         .allow_managed_download = false,
     }, .{});
-    defer driver.freeInstalls(allocator, installs);
+    defer installs.deinit();
 
-    if (installs.len == 0) return error.NoBrowserFound;
+    if (installs.items.len == 0) return error.NoBrowserFound;
 
-    var session = try driver.launch(allocator, .{
-        .install = installs[0],
-        .profile_mode = .ephemeral,
-        .headless = false,
-    });
-    defer session.deinit();
+    const install = installs.items[0];
+    if (driver.support_tier.browserTier(install.kind) == .modern) {
+        var session = try driver.modern.launch(allocator, .{
+            .install = install,
+            .profile_mode = .ephemeral,
+            .headless = false,
+        });
+        defer session.deinit();
 
-    try session.navigate("https://example.com");
-    try session.waitFor(.dom_ready, 30_000);
+        var page = session.page();
+        try page.navigate("https://example.com");
+        try session.base.waitFor(.dom_ready, 30_000);
+    } else {
+        var session = try driver.legacy.launch(allocator, .{
+            .install = install,
+            .profile_mode = .ephemeral,
+            .headless = false,
+        });
+        defer session.deinit();
+
+        try session.navigate("https://example.com");
+        try session.base.waitFor(.dom_ready, 30_000);
+    }
 }
 ```
 
@@ -183,6 +205,7 @@ Use `-Dinclude_lightpanda_browser=true` to enable bundled Lightpanda support fro
   - `zig build tools -- adversarial-detection-gate --out artifacts/reports/adversarial-detection.txt`
   - Default objective is adversarial: `OVERALL: PASS` means no detection signals were found across discovered browser + webview targets.
   - Detected automation signals or discovered target launch/probe failures cause gate failure.
+  - Discovered targets must prove real navigation away from `about:blank`; non-committed navigation fails the gate.
   - Endpoint/transport/profile-isolation markers are reported for diagnostics but are not treated as standalone detection.
   - Optional mode for internal validation: add `--expect-detected 1`.
   - Optional zero-discovery skip behavior: add `--allow-missing-browser 1`.

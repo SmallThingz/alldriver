@@ -1,36 +1,28 @@
 const core_session = @import("../core/session.zig");
 const types = @import("../types.zig");
-const support_tier = @import("../catalog/support_tier.zig");
+const session_common = @import("../tier/session_common.zig");
 
 pub const LegacySession = struct {
     base: core_session.Session,
 
     pub fn fromBase(base: core_session.Session) !LegacySession {
-        if (support_tier.transportTier(base.transport) != .legacy) {
-            var tmp = base;
-            tmp.deinit();
-            return error.UnsupportedProtocol;
-        }
-        return .{ .base = base };
+        return .{ .base = try session_common.fromBase(base, .legacy) };
     }
 
     pub fn deinit(self: *LegacySession) void {
-        self.base.deinit();
-        self.* = undefined;
+        session_common.deinit(&self.base);
     }
 
     pub fn intoBase(self: *LegacySession) core_session.Session {
-        const moved = self.base;
-        self.* = undefined;
-        return moved;
+        return session_common.intoBase(&self.base);
     }
 
     pub fn capabilities(self: *const LegacySession) types.CapabilitySet {
-        return self.base.capabilities();
+        return session_common.capabilities(&self.base);
     }
 
     pub fn supports(self: *const LegacySession, feature: types.CapabilityFeature) bool {
-        return self.base.supports(feature);
+        return session_common.supports(&self.base, feature);
     }
 
     pub fn navigate(self: *LegacySession, url: []const u8) !void {
