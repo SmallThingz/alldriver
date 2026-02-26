@@ -323,7 +323,19 @@ fn parseFlags(allocator: Allocator, args: []const []const u8) !std.StringHashMap
         if (!std.mem.startsWith(u8, a, "--")) {
             return ToolError.InvalidArgs;
         }
-        const key = a[2..];
+        const raw_key = a[2..];
+        if (raw_key.len == 0) return ToolError.InvalidArgs;
+
+        if (std.mem.indexOfScalar(u8, raw_key, '=')) |eq| {
+            const key = raw_key[0..eq];
+            const value = raw_key[eq + 1 ..];
+            if (key.len == 0) return ToolError.InvalidArgs;
+            try map.put(try allocator.dupe(u8, key), try allocator.dupe(u8, value));
+            i += 1;
+            continue;
+        }
+
+        const key = raw_key;
         if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "--")) {
             try map.put(try allocator.dupe(u8, key), try allocator.dupe(u8, args[i + 1]));
             i += 2;
@@ -3297,6 +3309,16 @@ test "parseFlags parses valued and boolean flags" {
     try std.testing.expect(std.mem.eql(u8, flags.get("platform").?, "linux"));
     try std.testing.expect(std.mem.eql(u8, flags.get("strict-ga").?, "1"));
     try std.testing.expect(std.mem.eql(u8, flags.get("out").?, "/tmp/out"));
+}
+
+test "parseFlags parses --key=value syntax" {
+    const allocator = std.testing.allocator;
+    var flags = try parseFlags(allocator, &.{ "--allow-missing-browser=1", "--out=/tmp/out", "--strict-ga=0" });
+    defer freeStringMap(allocator, &flags);
+
+    try std.testing.expect(std.mem.eql(u8, flags.get("allow-missing-browser").?, "1"));
+    try std.testing.expect(std.mem.eql(u8, flags.get("out").?, "/tmp/out"));
+    try std.testing.expect(std.mem.eql(u8, flags.get("strict-ga").?, "0"));
 }
 
 test "strictGaEnabled honors env default and explicit override" {
