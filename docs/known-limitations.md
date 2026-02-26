@@ -5,6 +5,12 @@
 - Unsupported protocol operations return typed capability/protocol errors instead of silent no-op behavior.
 - `modern` exposes CDP/BiDi-first domain APIs, but some operations remain adapter-specific (for example, handle lifecycle operations can return typed unsupported errors).
 
+## Scraper-Oriented Scope Boundaries
+- No Cloudflare-specific solver API is provided in core.
+- Browser/session pooling is not part of the current transport/session architecture.
+- HAR-like full network export is deferred until persistent event-stream capture is promoted to first-class runtime storage.
+- Domain profile templates are intentionally out-of-core policy and should be implemented in application code.
+
 ## Namespaced Launch/Attach APIs
 - Launch/attach flows are namespace-only (`modern.*`, `legacy.*`).
 - Root discovery remains available, but session creation and webview attach/launch helpers are no longer exported from root.
@@ -13,6 +19,10 @@
 - Android/iOS support is bridge-smoke scoped for v1 release gates.
 - Full mobile app lifecycle orchestration is outside current GA scope.
 - Adversarial gate coverage for mobile webviews depends on bridge tooling/runtime presence on the host and reports missing targets as explicit skips.
+
+## Session Cache Scope
+- Built-in cache persistence is optimized for HTTP session reuse (`cookies + user_agent`) and optional payload masks.
+- Cache does not currently include browser process snapshots or profile filesystem state.
 
 ## Strict TLS Default
 - TLS validation is strict by default across launch paths.

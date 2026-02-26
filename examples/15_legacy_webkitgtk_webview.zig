@@ -46,7 +46,7 @@ pub fn main() !void {
     defer session.deinit();
 
     try session.navigate("data:text/html,<html><body><h1 id='t'>webkitgtk</h1></body></html>");
-    try session.base.waitFor(.dom_ready, 20_000);
+    _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 20_000 });
 
     const title = try session.evaluate("document.getElementById('t').textContent");
     defer allocator.free(title);

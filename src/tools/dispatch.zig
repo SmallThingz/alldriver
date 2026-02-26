@@ -1517,7 +1517,7 @@ fn probeSessionForSignals(
 
 fn navigateAndWaitForProbe(session: *driver.Session) !void {
     try session.navigate(adversarial_probe_url);
-    try session.waitFor(.dom_ready, 5_000);
+    _ = try session.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 5_000 });
 }
 
 fn isNavigationCommitted(href_payload: []const u8) bool {

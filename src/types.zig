@@ -1,9 +1,11 @@
 const std = @import("std");
 const catalog = @import("catalog/browser_kind.zig");
+const cancel_mod = @import("core/cancel.zig");
 
 pub const BrowserKind = catalog.BrowserKind;
 pub const EngineKind = catalog.EngineKind;
 pub const Platform = catalog.Platform;
+pub const CancelToken = cancel_mod.CancelToken;
 pub const ApiTier = enum {
     modern,
     legacy,
@@ -103,7 +105,35 @@ pub const LaunchOptions = struct {
     ignore_tls_errors: bool = false,
     legacy_automation_markers: bool = false,
     gecko_stealth_prefs: bool = false,
+    timeout_policy: ?TimeoutPolicy = null,
     args: []const []const u8 = &.{},
+};
+
+pub const TimeoutPhase = enum {
+    launch,
+    attach,
+    navigate,
+    wait,
+    storage,
+    network,
+    overall,
+};
+
+pub const TimeoutPolicy = struct {
+    launch_ms: u32 = 15_000,
+    attach_ms: u32 = 10_000,
+    navigate_ms: u32 = 30_000,
+    wait_ms: u32 = 30_000,
+    network_ms: u32 = 15_000,
+    overall_ms: ?u32 = null,
+};
+
+pub const Diagnostic = struct {
+    phase: TimeoutPhase,
+    code: []const u8,
+    message: []const u8,
+    transport: ?[]const u8 = null,
+    elapsed_ms: ?u32 = null,
 };
 
 pub const CapabilitySet = struct {
@@ -134,6 +164,133 @@ pub const InterceptActionKind = enum {
 pub const Header = struct {
     name: []const u8,
     value: []const u8,
+};
+
+pub const StorageValue = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const CookieSameSite = enum {
+    unspecified,
+    lax,
+    strict,
+    none,
+};
+
+pub const Cookie = struct {
+    name: []const u8,
+    value: []const u8,
+    domain: []const u8,
+    path: []const u8 = "/",
+    secure: bool = true,
+    http_only: bool = true,
+    expires_unix_seconds: ?i64 = null,
+    same_site: CookieSameSite = .unspecified,
+};
+
+pub const CookieQuery = struct {
+    name: ?[]const u8 = null,
+    domain: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    secure_only: bool = false,
+    include_expired: bool = false,
+    include_http_only: bool = true,
+};
+
+pub const CookieHeaderOptions = struct {
+    sort_by_path_len_desc: bool = true,
+    include_http_only: bool = true,
+};
+
+pub const StorageArea = enum {
+    local,
+    session,
+    either,
+};
+
+pub const StorageKeyQuery = struct {
+    key: []const u8,
+    area: StorageArea = .either,
+};
+
+pub const WaitTarget = union(enum) {
+    dom_ready: void,
+    network_idle: void,
+    selector_visible: []const u8,
+    url_contains: []const u8,
+    cookie_present: CookieQuery,
+    storage_key_present: StorageKeyQuery,
+    js_truthy: []const u8,
+};
+
+pub const WaitTargetTag = std.meta.Tag(WaitTarget);
+
+pub const WaitOptions = struct {
+    timeout_ms: ?u32 = null,
+    poll_interval_ms: u32 = 100,
+    cancel_token: ?*CancelToken = null,
+};
+
+pub const WaitResult = struct {
+    matched: bool,
+    elapsed_ms: u32,
+    target: WaitTargetTag,
+};
+
+pub const LifecycleEventKind = enum {
+    navigation_started,
+    navigation_completed,
+    challenge_detected,
+    challenge_solved,
+    cookie_updated,
+};
+
+pub const LifecycleEvent = union(LifecycleEventKind) {
+    navigation_started: struct { url: []const u8 },
+    navigation_completed: struct { url: []const u8 },
+    challenge_detected: struct { url: []const u8, signal: []const u8 },
+    challenge_solved: struct { url: []const u8 },
+    cookie_updated: struct { domain: []const u8, name: []const u8 },
+};
+
+pub const EventFilter = struct {
+    domain: ?[]const u8 = null,
+    kinds: []const LifecycleEventKind = &.{},
+};
+
+pub const SessionCachePayloadMask = struct {
+    cookies: bool = true,
+    user_agent: bool = true,
+    local_storage: bool = false,
+    session_storage: bool = false,
+    current_url: bool = false,
+    extra_headers: bool = false,
+};
+
+pub const SessionCachePreset = enum {
+    minimal,
+    http_session,
+    rich_state,
+};
+
+pub const SessionCacheOptions = struct {
+    preset: ?SessionCachePreset = null,
+    include: ?SessionCachePayloadMask = null,
+};
+
+pub const SessionCacheEntry = struct {
+    domain: []const u8,
+    profile_key: []const u8,
+    user_agent: []const u8,
+    cookies: []Cookie = &.{},
+    local_storage: []StorageValue = &.{},
+    session_storage: []StorageValue = &.{},
+    current_url: ?[]const u8 = null,
+    extra_headers: []Header = &.{},
+    captured_at_ms: u64,
+    expires_at_ms: ?u64,
+    schema_version: u32,
 };
 
 pub const InterceptAction = union(InterceptActionKind) {

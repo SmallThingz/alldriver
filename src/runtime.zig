@@ -49,10 +49,6 @@ pub fn discoverWebViews(
     return webview_discovery.discover(allocator, prefs);
 }
 
-fn freeWebViewRuntimesOwned(allocator: std.mem.Allocator, runtimes: []types.WebViewRuntime) void {
-    webview_discovery.freeRuntimes(allocator, runtimes);
-}
-
 pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session {
     const adapter_kind = common.preferredAdapterForEngine(opts.install.engine);
     const transport = common.transportForAdapter(adapter_kind);
@@ -145,6 +141,7 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         .current_url = null,
         .browsing_context_id = null,
         .request_id = 0,
+        .timeout_policy = opts.timeout_policy orelse .{},
         .child = child,
         .owned_argv = final_args,
         .ephemeral_profile_dir = ephemeral_profile_dir,
@@ -778,7 +775,7 @@ fn discoverMiniBrowserPath(allocator: std.mem.Allocator) !?[]u8 {
         .include_known_paths = true,
         .include_mobile_bridges = false,
     }) catch return null;
-    defer freeWebViewRuntimesOwned(allocator, runtimes);
+    defer webview_discovery.freeRuntimes(allocator, runtimes);
 
     for (runtimes) |runtime| {
         const path = runtime.runtime_path orelse continue;
@@ -910,7 +907,7 @@ fn discoverWebKitGtkDriverPath(allocator: std.mem.Allocator) ![]u8 {
         .include_known_paths = true,
         .include_mobile_bridges = false,
     });
-    defer freeWebViewRuntimesOwned(allocator, runtimes);
+    defer webview_discovery.freeRuntimes(allocator, runtimes);
 
     for (runtimes) |runtime| {
         const path = runtime.runtime_path orelse continue;

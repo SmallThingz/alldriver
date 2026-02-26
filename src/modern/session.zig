@@ -37,6 +37,34 @@ pub const ModernSession = struct {
         return session_common.supports(&self.base, feature);
     }
 
+    pub fn waitFor(self: *ModernSession, target: types.WaitTarget, opts: types.WaitOptions) !types.WaitResult {
+        return self.base.waitFor(target, opts);
+    }
+
+    pub fn onEvent(
+        self: *ModernSession,
+        filter: types.EventFilter,
+        callback: *const fn (types.LifecycleEvent) void,
+    ) !u64 {
+        return self.base.onEvent(filter, callback);
+    }
+
+    pub fn offEvent(self: *ModernSession, id: u64) bool {
+        return self.base.offEvent(id);
+    }
+
+    pub fn setTimeoutPolicy(self: *ModernSession, policy: types.TimeoutPolicy) void {
+        self.base.setTimeoutPolicy(policy);
+    }
+
+    pub fn timeoutPolicy(self: *const ModernSession) types.TimeoutPolicy {
+        return self.base.timeoutPolicy();
+    }
+
+    pub fn lastDiagnostic(self: *const ModernSession) ?types.Diagnostic {
+        return self.base.lastDiagnostic();
+    }
+
     pub fn page(self: *ModernSession) page_mod.PageClient {
         return .{ .session = self };
     }
@@ -100,10 +128,10 @@ pub const ModernSession = struct {
 
     pub fn waitForAsync(
         self: *ModernSession,
-        condition: @import("../core/actions.zig").WaitCondition,
-        timeout_ms: u32,
-    ) !*async_mod.AsyncResult(void) {
-        return self.base.waitForAsync(condition, timeout_ms);
+        target: types.WaitTarget,
+        opts: types.WaitOptions,
+    ) !*async_mod.AsyncResult(types.WaitResult) {
+        return self.base.waitForAsync(target, opts);
     }
 
     pub fn screenshotAsync(

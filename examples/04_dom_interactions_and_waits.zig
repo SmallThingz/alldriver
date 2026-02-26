@@ -25,8 +25,8 @@ pub fn main() !void {
 
     var page = session.page();
     try page.navigate(page_data);
-    try session.base.waitFor(.dom_ready, 10_000);
-    try session.base.waitForSelector("#name", 10_000);
+    _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
+    _ = try session.base.waitFor(.{ .selector_visible = "#name" }, .{ .timeout_ms = 10_000 });
 
     var input = session.input();
     try input.typeText("#name", "zig-driver");

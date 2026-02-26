@@ -11,6 +11,10 @@
   - Call `.deinit()` on returned lists.
 - Root compatibility launch/attach/webview shims were removed.
 - `nodriver` compatibility facade was removed.
+- Wait API signature changed:
+  - removed `waitFor(condition, timeout_ms)`
+  - removed selector-specific `waitForSelector(...)` compatibility helper
+  - use `waitFor(target, WaitOptions)` and `waitForAsync(target, WaitOptions)`
 
 ## Namespace Split
 - New public namespaces:
@@ -28,6 +32,21 @@
 - Network interception APIs on `Session`:
   - `addInterceptRule`, `removeInterceptRule`, `clearInterceptRules`
   - `onRequest`, `onResponse`
+- Wait/cancel primitives:
+  - `WaitTarget`, `WaitOptions`, `WaitResult`
+  - `CancelToken`
+- Lifecycle/challenge hooks:
+  - `onEvent(filter, callback)`, `offEvent(id)`
+  - `LifecycleEvent` kinds:
+    `navigation_started`, `navigation_completed`, `challenge_detected`, `challenge_solved`, `cookie_updated`
+- Timeout/diagnostics:
+  - `setTimeoutPolicy`, `timeoutPolicy`, `lastDiagnostic`
+- Typed cookie helpers:
+  - `queryCookies`
+  - `buildCookieHeaderForUrl`
+- Built-in session cache:
+  - `SessionCacheStore.open/load/save/saveWithOptions/invalidate/cleanupExpired`
+  - payload controls via `SessionCachePreset` and `SessionCachePayloadMask`
 
 ## Removed Root Calls and Replacements
 | Removed root call | Replacement |
@@ -49,3 +68,7 @@
 4. Move any ad-hoc interception logic to `NetworkRule` + `InterceptAction`.
 5. For non-blocking workflows, switch from custom threads to `*Async` session methods and `.await()`.
 6. Replace raw discovery slices + `free*` helpers with list `.deinit()` ownership.
+7. Replace old wait calls:
+   - before: `try session.waitFor(.dom_ready, 30_000);`
+   - after: `_ = try session.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });`
+8. If you persist scraper sessions, move custom JSON caches to `SessionCacheStore`.

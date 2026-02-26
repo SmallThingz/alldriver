@@ -27,7 +27,7 @@ pub fn main() !void {
 
     var page = session.page();
     try page.navigate("https://example.com");
-    try session.base.waitFor(.dom_ready, 15_000);
+    _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 15_000 });
 
     var runtime = session.runtime();
     const title_json = try runtime.evaluate("document.title");

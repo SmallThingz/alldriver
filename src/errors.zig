@@ -7,6 +7,7 @@ pub const ProtocolError = error{
     ProtocolCommandFailed,
     SessionNotReady,
     UnsupportedProtocol,
+    ResponseIdMismatch,
 };
 
 pub const TransportError = error{
@@ -25,6 +26,18 @@ pub const CapabilityError = error{
 
 pub const TimeoutError = error{
     Timeout,
+    DeadlineExceeded,
+};
+
+pub const WaitError = error{
+    Timeout,
+    Canceled,
+    UnsupportedCapability,
+    NavigationNotCommitted,
+};
+
+pub const CancellationError = error{
+    Canceled,
 };
 
 pub const DiscoveryError = error{
@@ -37,12 +50,20 @@ pub const LaunchError = error{
     UnsupportedEngine,
     OutOfMemory,
     PersistentProfileDirRequired,
+    Timeout,
 };
 
 pub const WebViewError = error{
     BridgeUnavailable,
     InvalidEndpoint,
     UnsupportedWebViewKind,
+};
+
+pub const SessionCacheError = error{
+    InvalidState,
+    IncompatibleSchema,
+    CorruptEntry,
+    IoFailed,
 };
 
 pub const UnsupportedCapabilityInfo = struct {

@@ -46,7 +46,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
         var page = s.page();
         try page.navigate("https://example.com");
-        try s.base.waitFor(.dom_ready, 30_000);
+        _ = try s.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
     } else {
         var s = try driver.legacy.launch(allocator, .{
             .install = install,
@@ -56,7 +56,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         defer s.deinit();
 
         try s.navigate("https://example.com");
-        try s.base.waitFor(.dom_ready, 30_000);
+        _ = try s.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
     }
 }
 ```
@@ -75,6 +75,30 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 ### Modern domains
 - `page()`, `runtime()`, `network()`, `input()`, `log()`, `storage()`, `contexts()`, `targets()`
+
+### Wait / events / cache primitives
+- `Session.waitFor(target, opts)` and `Session.waitForAsync(target, opts)` support:
+  `dom_ready`, `network_idle`, `selector_visible`, `url_contains`, `cookie_present`, `storage_key_present`, `js_truthy`.
+- Compatibility wait helpers were removed; use `waitFor(.{ .selector_visible = "..." }, ...)` instead of legacy selector-specific helpers.
+- `CancelToken` enables cooperative cancellation for sync/async waits.
+- Lifecycle hooks:
+  `onEvent(filter, callback)` / `offEvent(id)` with event kinds:
+  `navigation_started`, `navigation_completed`, `challenge_detected`, `challenge_solved`, `cookie_updated`.
+- Timeout/diagnostics:
+  `setTimeoutPolicy`, `timeoutPolicy`, `lastDiagnostic` with phase-tagged diagnostics.
+- Typed cookie helpers:
+  `queryCookies` and `buildCookieHeaderForUrl`.
+- Built-in session cache:
+  `SessionCacheStore.open/load/save/saveWithOptions/invalidate/cleanupExpired`.
+
+### Session cache payload options (v1)
+- Default recommended payload: `cookies + user_agent` (`preset = .http_session`).
+- Presets:
+  - `.minimal`: cookies only
+  - `.http_session`: cookies + user agent
+  - `.rich_state`: cookies + user agent + storage + URL + extra headers
+- Any combination is supported with `SessionCacheOptions.include` (`SessionCachePayloadMask`).
+  The `include` mask allows enabling/disabling each payload component explicitly.
 
 ## Browser / WebView Coverage
 

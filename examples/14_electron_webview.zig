@@ -33,7 +33,7 @@ pub fn main() !void {
 
     var page = session.page();
     try page.navigate("https://example.com");
-    try session.base.waitFor(.dom_ready, 30_000);
+    _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
 
     var runtime = session.runtime();
     const title_payload = try runtime.evaluate("document.title");

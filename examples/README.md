@@ -15,7 +15,7 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 - `01_discover.zig`: discover installed browsers and print scored candidates.
 - `02_launch_and_navigate.zig`: launch a browser and navigate/wait/evaluate.
 - `03_attach_existing_endpoint.zig`: attach to an existing CDP/WebDriver/BiDi endpoint.
-- `04_dom_interactions_and_waits.zig`: DOM interaction flow with waits.
+- `04_dom_interactions_and_waits.zig`: DOM interaction flow using target-based waits (`dom_ready`, `selector_visible`).
 - `05_network_interception.zig`: register request/response observers and interception rules.
 - `06_cookies_and_storage.zig`: cookie write plus localStorage read/write via JS.
 - `07_screenshots_and_tracing.zig`: capture screenshots and tracing artifacts.
@@ -27,6 +27,11 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 - `13_capability_aware_flow.zig`: capability-checked flow with graceful fallbacks.
 - `14_electron_webview.zig`: discover and launch Electron as a dedicated webview driver.
 - `15_legacy_webkitgtk_webview.zig`: launch WebKitGTK through `WebKitWebDriver` and probe MiniBrowser when present.
+- `16_wait_targets.zig`: use `waitFor` targets for URL, selector, cookie, storage key, and JS truthy checks.
+- `17_event_hooks.zig`: subscribe to lifecycle/challenge/cookie events and handle callback flow.
+- `18_cookie_header_export.zig`: query cookies with typed filters and build canonical `Cookie` headers for URLs.
+- `19_session_cache.zig`: persist/load session state with payload presets and custom payload masks.
+- `20_timeout_and_cancel.zig`: apply timeout policies and cooperative cancellation for waits.
 
 ## Notes
 

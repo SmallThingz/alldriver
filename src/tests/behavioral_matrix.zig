@@ -26,8 +26,12 @@ fn fetchExampleAndAssert(session: anytype, allocator: std.mem.Allocator) !void {
     const base = &session.base;
 
     try base.navigate(example_url);
-    try base.waitFor(.dom_ready, 15_000);
-    base.waitFor(.network_idle, 10_000) catch {};
+    _ = try base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 15_000 });
+    if (base.waitFor(.{ .network_idle = {} }, .{ .timeout_ms = 10_000 })) |_| {
+        // best-effort network-idle wait for stability across engines
+    } else |_| {
+        // ignore in behavioral smoke paths where network-idle is adapter dependent
+    }
 
     const probe = try base.evaluate(
         "(function(){return [location.hostname, location.href, document.title, document.body ? document.body.innerText : ''].join('\\n');})();",

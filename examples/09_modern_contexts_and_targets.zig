@@ -31,7 +31,7 @@ pub fn main() !void {
 
     var page = session.page();
     try page.navigate("data:text/html,<html><body>contexts-targets</body></html>");
-    try session.base.waitFor(.dom_ready, 10_000);
+    _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
 
     var contexts = session.contexts();
     const existing = try contexts.list(allocator);

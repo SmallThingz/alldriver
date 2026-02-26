@@ -33,16 +33,6 @@ pub fn evaluate(session: *Session, script: []const u8) ![]u8 {
     return executor.evaluate(session, script);
 }
 
-pub fn waitForDomReady(session: *Session, timeout_ms: u32) !void {
-    try assertModern(session);
-    try executor.waitForDomReady(session, timeout_ms);
-}
-
-pub fn waitForSelector(session: *Session, selector: []const u8, timeout_ms: u32) !void {
-    try assertModern(session);
-    try executor.waitForSelector(session, selector, timeout_ms);
-}
-
 pub fn screenshot(session: *Session) ![]u8 {
     try assertModern(session);
     return executor.screenshot(session);

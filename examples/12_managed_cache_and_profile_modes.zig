@@ -33,7 +33,7 @@ pub fn main() !void {
 
     var persistent_page = persistent.page();
     try persistent_page.navigate("https://example.com");
-    try persistent.base.waitFor(.dom_ready, 10_000);
+    _ = try persistent.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
 
     // Ephemeral launch (isolated disposable profile that is deleted on deinit).
     var ephemeral = try driver.modern.launch(allocator, .{
@@ -46,5 +46,5 @@ pub fn main() !void {
 
     var ephemeral_page = ephemeral.page();
     try ephemeral_page.navigate("https://example.com?mode=ephemeral");
-    try ephemeral.base.waitFor(.dom_ready, 10_000);
+    _ = try ephemeral.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
 }

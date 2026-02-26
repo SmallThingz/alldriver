@@ -25,7 +25,7 @@ pub fn main() !void {
 
         var page = session.page();
         try page.navigate("https://example.com");
-        try session.base.waitFor(.dom_ready, 10_000);
+        _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
 
         if (session.supports(.network_intercept)) {
             var network = session.network();
@@ -52,7 +52,7 @@ pub fn main() !void {
         defer session.deinit();
 
         try session.navigate("https://example.com");
-        try session.base.waitFor(.dom_ready, 10_000);
+        _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
 
         if (session.supports(.network_intercept)) {
             try session.base.enableNetworkInterception();

@@ -23,7 +23,7 @@ pub fn main() !void {
 
     var page = session.page();
     try page.navigate("https://example.com");
-    try session.base.waitFor(.dom_ready, 10_000);
+    _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
 
     const png = try page.screenshot(allocator, .png);
     defer allocator.free(png);

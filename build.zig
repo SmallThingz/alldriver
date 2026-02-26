@@ -184,6 +184,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "example-13-capability-aware-flow", .path = "examples/13_capability_aware_flow.zig" },
         .{ .name = "example-14-electron-webview", .path = "examples/14_electron_webview.zig" },
         .{ .name = "example-15-legacy-webkitgtk-webview", .path = "examples/15_legacy_webkitgtk_webview.zig" },
+        .{ .name = "example-16-wait-targets", .path = "examples/16_wait_targets.zig" },
+        .{ .name = "example-17-event-hooks", .path = "examples/17_event_hooks.zig" },
+        .{ .name = "example-18-cookie-header-export", .path = "examples/18_cookie_header_export.zig" },
+        .{ .name = "example-19-session-cache", .path = "examples/19_session_cache.zig" },
+        .{ .name = "example-20-timeout-and-cancel", .path = "examples/20_timeout_and_cancel.zig" },
     };
     const examples_step = b.step("examples", "Build all library usage examples");
     inline for (example_specs) |spec| {

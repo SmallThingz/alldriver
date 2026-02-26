@@ -2,9 +2,12 @@ const std = @import("std");
 const types = @import("../types.zig");
 const common = @import("../protocol/common.zig");
 const actions = @import("actions.zig");
+const wait_mod = @import("wait.zig");
 const network = @import("network.zig");
 const storage = @import("storage.zig");
 const artifacts = @import("artifacts.zig");
+const events = @import("events.zig");
+const cancel = @import("cancel.zig");
 const async_mod = @import("async.zig");
 
 pub const Session = struct {
@@ -20,6 +23,8 @@ pub const Session = struct {
     browsing_context_id: ?[]u8 = null,
     request_id: u64 = 0,
     request_id_lock: std.Thread.Mutex = .{},
+    timeout_policy: types.TimeoutPolicy = .{},
+    last_diagnostic_value: ?types.Diagnostic = null,
 
     child: ?std.process.Child = null,
     owned_argv: ?[]const []const u8 = null,
@@ -28,6 +33,9 @@ pub const Session = struct {
     rules: std.ArrayList(types.NetworkRule) = .empty,
     on_request: ?*const fn (types.RequestEvent) void = null,
     on_response: ?*const fn (types.ResponseEvent) void = null,
+    event_subscriptions: std.ArrayList(events.EventSubscription) = .empty,
+    next_event_subscription_id: u64 = 1,
+    challenge_active: bool = false,
 
     pub fn deinit(self: *Session) void {
         if (self.child) |*child| {
@@ -54,6 +62,11 @@ pub const Session = struct {
             freeInterceptAction(self.allocator, rule.action);
         }
         self.rules.deinit(self.allocator);
+
+        events.clear(self);
+        self.event_subscriptions.deinit(self.allocator);
+
+        self.clearDiagnostic();
 
         self.allocator.free(self.install.path);
         if (self.install.version) |version| self.allocator.free(version);
@@ -84,7 +97,21 @@ pub const Session = struct {
     }
 
     pub fn navigate(self: *Session, url: []const u8) !void {
-        try actions.navigate(self, url);
+        events.emit(self, .{ .navigation_started = .{ .url = url } });
+        const started = std.time.milliTimestamp();
+        actions.navigate(self, url) catch |err| {
+            self.recordDiagnostic(.{
+                .phase = .navigate,
+                .code = @errorName(err),
+                .message = "navigation failed",
+                .transport = @tagName(self.transport),
+                .elapsed_ms = elapsedSince(started),
+            });
+            return err;
+        };
+        self.clearDiagnostic();
+        const final_url = self.current_url orelse url;
+        events.emit(self, .{ .navigation_completed = .{ .url = final_url } });
     }
 
     pub fn reload(self: *Session) !void {
@@ -100,15 +127,21 @@ pub const Session = struct {
     }
 
     pub fn evaluate(self: *Session, script: []const u8) ![]u8 {
-        return actions.evaluate(self, script);
+        const started = std.time.milliTimestamp();
+        return actions.evaluate(self, script) catch |err| {
+            self.recordDiagnostic(.{
+                .phase = .storage,
+                .code = @errorName(err),
+                .message = "script evaluation failed",
+                .transport = @tagName(self.transport),
+                .elapsed_ms = elapsedSince(started),
+            });
+            return err;
+        };
     }
 
-    pub fn waitFor(self: *Session, condition: actions.WaitCondition, timeout_ms: u32) !void {
-        try actions.waitFor(self, condition, timeout_ms);
-    }
-
-    pub fn waitForSelector(self: *Session, selector: []const u8, timeout_ms: u32) !void {
-        try actions.waitForSelector(self, selector, timeout_ms);
+    pub fn waitFor(self: *Session, target: types.WaitTarget, opts: types.WaitOptions) !types.WaitResult {
+        return wait_mod.waitFor(self, target, opts);
     }
 
     pub fn enableNetworkInterception(self: *Session) !void {
@@ -133,6 +166,55 @@ pub const Session = struct {
 
     pub fn onResponse(self: *Session, callback: *const fn (types.ResponseEvent) void) void {
         network.onResponse(self, callback);
+    }
+
+    pub fn onEvent(
+        self: *Session,
+        filter: types.EventFilter,
+        callback: *const fn (types.LifecycleEvent) void,
+    ) !u64 {
+        return events.register(self, filter, callback);
+    }
+
+    pub fn offEvent(self: *Session, id: u64) bool {
+        return events.unregister(self, id);
+    }
+
+    pub fn setTimeoutPolicy(self: *Session, policy: types.TimeoutPolicy) void {
+        self.timeout_policy = policy;
+    }
+
+    pub fn timeoutPolicy(self: *const Session) types.TimeoutPolicy {
+        return self.timeout_policy;
+    }
+
+    pub fn lastDiagnostic(self: *const Session) ?types.Diagnostic {
+        return self.last_diagnostic_value;
+    }
+
+    pub fn recordDiagnostic(self: *Session, diag: types.Diagnostic) void {
+        self.clearDiagnostic();
+        const code = self.allocator.dupe(u8, diag.code) catch return;
+        errdefer self.allocator.free(code);
+        const message = self.allocator.dupe(u8, diag.message) catch return;
+        errdefer self.allocator.free(message);
+        const transport = if (diag.transport) |t| self.allocator.dupe(u8, t) catch null else null;
+        self.last_diagnostic_value = .{
+            .phase = diag.phase,
+            .code = code,
+            .message = message,
+            .transport = transport,
+            .elapsed_ms = diag.elapsed_ms,
+        };
+    }
+
+    pub fn clearDiagnostic(self: *Session) void {
+        if (self.last_diagnostic_value) |diag| {
+            self.allocator.free(diag.code);
+            self.allocator.free(diag.message);
+            if (diag.transport) |transport| self.allocator.free(transport);
+            self.last_diagnostic_value = null;
+        }
     }
 
     pub fn setCookie(self: *Session, cookie: storage.Cookie) !void {
@@ -252,27 +334,58 @@ pub const Session = struct {
         return async_mod.AsyncResult([]u8).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 
-    pub fn waitForAsync(self: *Session, condition: actions.WaitCondition, timeout_ms: u32) !*async_mod.AsyncResult(void) {
+    pub fn waitForAsync(
+        self: *Session,
+        target: types.WaitTarget,
+        opts: types.WaitOptions,
+    ) !*async_mod.AsyncResult(types.WaitResult) {
         const Ctx = struct {
             session: *Session,
-            condition: actions.WaitCondition,
-            timeout_ms: u32,
+            target: types.WaitTarget,
+            opts: types.WaitOptions,
+            owned_cancel_token: ?*cancel.CancelToken = null,
         };
         const ctx = try self.allocator.create(Ctx);
-        ctx.* = .{ .session = self, .condition = condition, .timeout_ms = timeout_ms };
+        ctx.* = .{
+            .session = self,
+            .target = try cloneWaitTarget(self.allocator, target),
+            .opts = opts,
+            .owned_cancel_token = null,
+        };
+        if (ctx.opts.cancel_token == null) {
+            const token = try self.allocator.create(cancel.CancelToken);
+            token.* = cancel.CancelToken.init();
+            ctx.owned_cancel_token = token;
+            ctx.opts.cancel_token = token;
+        }
 
         const Runner = struct {
-            fn run(_: std.mem.Allocator, p: *anyopaque) anyerror!void {
+            fn run(_: std.mem.Allocator, p: *anyopaque) anyerror!types.WaitResult {
                 const c: *Ctx = @ptrCast(@alignCast(p));
-                try c.session.waitFor(c.condition, c.timeout_ms);
+                return c.session.waitFor(c.target, c.opts);
             }
             fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
                 const c: *Ctx = @ptrCast(@alignCast(p));
+                freeWaitTarget(a, c.target);
+                if (c.owned_cancel_token) |token| a.destroy(token);
                 a.destroy(c);
             }
         };
 
-        return async_mod.AsyncResult(void).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
+        const Canceler = struct {
+            fn call(_: std.mem.Allocator, p: *anyopaque) void {
+                const c: *Ctx = @ptrCast(@alignCast(p));
+                if (c.opts.cancel_token) |token| token.cancel();
+            }
+        };
+
+        return async_mod.AsyncResult(types.WaitResult).spawnWithCancel(
+            self.allocator,
+            ctx,
+            Runner.run,
+            Runner.destroy,
+            Canceler.call,
+        );
     }
 
     pub fn screenshotAsync(self: *Session, format: artifacts.ScreenshotFormat) !*async_mod.AsyncResult([]u8) {
@@ -357,6 +470,49 @@ fn freeInterceptAction(allocator: std.mem.Allocator, action: types.InterceptActi
             allocator.free(m.remove_header_names);
         },
     }
+}
+
+fn cloneWaitTarget(allocator: std.mem.Allocator, target: types.WaitTarget) !types.WaitTarget {
+    return switch (target) {
+        .dom_ready => .{ .dom_ready = {} },
+        .network_idle => .{ .network_idle = {} },
+        .selector_visible => |selector| .{ .selector_visible = try allocator.dupe(u8, selector) },
+        .url_contains => |needle| .{ .url_contains = try allocator.dupe(u8, needle) },
+        .cookie_present => |query| .{ .cookie_present = .{
+            .name = if (query.name) |name| try allocator.dupe(u8, name) else null,
+            .domain = if (query.domain) |domain| try allocator.dupe(u8, domain) else null,
+            .path = if (query.path) |path| try allocator.dupe(u8, path) else null,
+            .secure_only = query.secure_only,
+            .include_expired = query.include_expired,
+            .include_http_only = query.include_http_only,
+        } },
+        .storage_key_present => |query| .{ .storage_key_present = .{
+            .key = try allocator.dupe(u8, query.key),
+            .area = query.area,
+        } },
+        .js_truthy => |script| .{ .js_truthy = try allocator.dupe(u8, script) },
+    };
+}
+
+fn freeWaitTarget(allocator: std.mem.Allocator, target: types.WaitTarget) void {
+    switch (target) {
+        .dom_ready, .network_idle => {},
+        .selector_visible => |selector| allocator.free(selector),
+        .url_contains => |needle| allocator.free(needle),
+        .cookie_present => |query| {
+            if (query.name) |name| allocator.free(name);
+            if (query.domain) |domain| allocator.free(domain);
+            if (query.path) |path| allocator.free(path);
+        },
+        .storage_key_present => |query| allocator.free(query.key),
+        .js_truthy => |script| allocator.free(script),
+    }
+}
+
+fn elapsedSince(start_ms: i64) u32 {
+    const delta = std.time.milliTimestamp() - start_ms;
+    if (delta <= 0) return 0;
+    return @intCast(delta);
 }
 
 pub fn nextSessionId() u64 {

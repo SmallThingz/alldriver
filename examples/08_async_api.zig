@@ -25,9 +25,9 @@ pub fn main() !void {
     defer nav_op.deinit();
     try nav_op.await(15_000);
 
-    var wait_op = try session.waitForAsync(.dom_ready, 15_000);
+    var wait_op = try session.waitForAsync(.{ .dom_ready = {} }, .{ .timeout_ms = 15_000 });
     defer wait_op.deinit();
-    try wait_op.await(15_000);
+    _ = try wait_op.await(15_000);
 
     var eval_op = try session.evaluateAsync("document.title");
     defer eval_op.deinit();

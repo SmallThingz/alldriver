@@ -1,0 +1,71 @@
+const std = @import("std");
+const driver = @import("alldriver");
+
+fn printEvent(event: driver.LifecycleEvent) void {
+    switch (event) {
+        .navigation_started => |e| std.debug.print("event navigation_started url={s}\n", .{e.url}),
+        .navigation_completed => |e| std.debug.print("event navigation_completed url={s}\n", .{e.url}),
+        .challenge_detected => |e| std.debug.print("event challenge_detected url={s} signal={s}\n", .{ e.url, e.signal }),
+        .challenge_solved => |e| std.debug.print("event challenge_solved url={s}\n", .{e.url}),
+        .cookie_updated => |e| std.debug.print("event cookie_updated domain={s} name={s}\n", .{ e.domain, e.name }),
+    }
+}
+
+pub fn main() !void {
+    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_state.deinit();
+    const allocator = gpa_state.allocator();
+
+    var installs = try driver.discover(allocator, .{
+        .kinds = &.{ .chrome, .edge, .firefox },
+        .allow_managed_download = false,
+    }, .{});
+    defer installs.deinit();
+
+    if (installs.items.len == 0) {
+        std.debug.print("no browser install found\n", .{});
+        return;
+    }
+
+    var session = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
+        .profile_mode = .ephemeral,
+        .headless = true,
+        .ignore_tls_errors = true,
+    });
+    defer session.deinit();
+
+    const sub_id = try session.base.onEvent(.{
+        .kinds = &.{ .navigation_started, .navigation_completed, .challenge_detected, .challenge_solved, .cookie_updated },
+    }, printEvent);
+    defer _ = session.base.offEvent(sub_id);
+
+    var page = session.page();
+    try page.navigate("https://example.com");
+    _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 15_000 });
+
+    var storage = session.storage();
+    try storage.setCookie(.{
+        .name = "event_cookie",
+        .value = "ok",
+        .domain = "example.com",
+        .path = "/",
+        .secure = true,
+    });
+
+    var runtime = session.runtime();
+    const set_challenge = try runtime.evaluate("document.title='Just a moment...'; window.__event_ready__=true; true;");
+    defer allocator.free(set_challenge);
+
+    _ = session.base.waitFor(.{ .js_truthy = "window.__never_true__===true" }, .{ .timeout_ms = 300 }) catch .{
+        .matched = false,
+        .elapsed_ms = 0,
+        .target = .js_truthy,
+    };
+
+    const clear_challenge = try runtime.evaluate("document.title='events complete'; true;");
+    defer allocator.free(clear_challenge);
+    _ = try session.base.waitFor(.{ .js_truthy = "window.__event_ready__===true" }, .{ .timeout_ms = 2_000 });
+
+    std.debug.print("event hook demo completed\n", .{});
+}

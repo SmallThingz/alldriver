@@ -3,6 +3,8 @@ const session_mod = @import("session.zig");
 const core_storage = @import("../core/storage.zig");
 
 pub const Cookie = core_storage.Cookie;
+pub const CookieQuery = core_storage.CookieQuery;
+pub const CookieHeaderOptions = core_storage.CookieHeaderOptions;
 
 pub const StorageClient = struct {
     session: *session_mod.ModernSession,
@@ -18,6 +20,19 @@ pub const StorageClient = struct {
     pub fn freeCookies(self: *StorageClient, allocator: std.mem.Allocator, cookies: []Cookie) void {
         _ = self;
         core_storage.freeCookies(allocator, cookies);
+    }
+
+    pub fn queryCookies(self: *StorageClient, allocator: std.mem.Allocator, query: CookieQuery) ![]Cookie {
+        return core_storage.queryCookies(&self.session.base, allocator, query);
+    }
+
+    pub fn buildCookieHeaderForUrl(
+        self: *StorageClient,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        opts: CookieHeaderOptions,
+    ) ![]u8 {
+        return core_storage.buildCookieHeaderForUrl(&self.session.base, allocator, url, opts);
     }
 
     pub fn setLocalStorage(self: *StorageClient, key: []const u8, value: []const u8) !void {

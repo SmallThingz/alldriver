@@ -5,6 +5,7 @@ pub fn AsyncResult(comptime T: type) type {
         const Self = @This();
         const Runner = *const fn (allocator: std.mem.Allocator, ctx: *anyopaque) anyerror!T;
         const Destroyer = *const fn (allocator: std.mem.Allocator, ctx: *anyopaque) void;
+        const Canceler = *const fn (allocator: std.mem.Allocator, ctx: *anyopaque) void;
 
         allocator: std.mem.Allocator,
         mutex: std.Thread.Mutex = .{},
@@ -13,6 +14,7 @@ pub fn AsyncResult(comptime T: type) type {
 
         runner: Runner,
         destroyer: Destroyer,
+        canceler: ?Canceler = null,
         ctx: *anyopaque,
 
         state: union(enum) {
@@ -29,11 +31,22 @@ pub fn AsyncResult(comptime T: type) type {
             runner: Runner,
             destroyer: Destroyer,
         ) !*Self {
+            return spawnWithCancel(allocator, ctx, runner, destroyer, null);
+        }
+
+        pub fn spawnWithCancel(
+            allocator: std.mem.Allocator,
+            ctx: *anyopaque,
+            runner: Runner,
+            destroyer: Destroyer,
+            canceler: ?Canceler,
+        ) !*Self {
             const self = try allocator.create(Self);
             self.* = .{
                 .allocator = allocator,
                 .runner = runner,
                 .destroyer = destroyer,
+                .canceler = canceler,
                 .ctx = ctx,
             };
 
@@ -78,6 +91,9 @@ pub fn AsyncResult(comptime T: type) type {
             self.mutex.lock();
             defer self.mutex.unlock();
             if (self.state == .pending) {
+                if (self.canceler) |canceler| {
+                    canceler(self.allocator, self.ctx);
+                }
                 self.state = .canceled;
                 self.cond.broadcast();
             }
