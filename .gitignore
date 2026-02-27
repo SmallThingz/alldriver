@@ -2,6 +2,7 @@
 .zig-global-cache
 zig-out
 artifacts/
+tmp/
 
 # Example artifacts.
 example-screenshot.png
