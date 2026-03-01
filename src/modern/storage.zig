@@ -1,6 +1,7 @@
 const std = @import("std");
 const session_mod = @import("session.zig");
 const core_storage = @import("../core/storage.zig");
+const json_util = @import("../util/json.zig");
 
 pub const Cookie = core_storage.Cookie;
 pub const CookieQuery = core_storage.CookieQuery;
@@ -44,9 +45,9 @@ pub const StorageClient = struct {
     }
 
     pub fn setSessionStorage(self: *StorageClient, key: []const u8, value: []const u8) !void {
-        const k = try escapeJsonString(self.session.base.allocator, key);
+        const k = try json_util.escapeJsonString(self.session.base.allocator, key);
         defer self.session.base.allocator.free(k);
-        const v = try escapeJsonString(self.session.base.allocator, value);
+        const v = try json_util.escapeJsonString(self.session.base.allocator, value);
         defer self.session.base.allocator.free(v);
         const script = try std.fmt.allocPrint(
             self.session.base.allocator,
@@ -68,7 +69,7 @@ pub const StorageClient = struct {
 };
 
 fn evalStorageLookup(session: *session_mod.ModernSession, storage_name: []const u8, key: []const u8) ![]u8 {
-    const escaped = try escapeJsonString(session.base.allocator, key);
+    const escaped = try json_util.escapeJsonString(session.base.allocator, key);
     defer session.base.allocator.free(escaped);
     const script = try std.fmt.allocPrint(
         session.base.allocator,
@@ -77,21 +78,4 @@ fn evalStorageLookup(session: *session_mod.ModernSession, storage_name: []const 
     );
     defer session.base.allocator.free(script);
     return session.base.evaluate(script);
-}
-
-fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-
-    for (input) |c| {
-        switch (c) {
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, c),
-        }
-    }
-    return out.toOwnedSlice(allocator);
 }

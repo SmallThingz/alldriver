@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const driver = @import("../root.zig");
 const helpers = @import("helpers.zig");
+const strings = @import("../util/strings.zig");
 
 const example_url = "data:text/html,<html><head><title>gate</title></head><body>gate</body></html>";
 const flatmates_url = "https://flatmates.com.au/";
@@ -605,10 +606,10 @@ test "adversarial flatmates load beyond 429 facade (opt-in)" {
     );
     defer allocator.free(payload);
 
-    try std.testing.expect(helpers.containsIgnoreCase(payload, "flatmates"));
-    try std.testing.expect(!helpers.containsIgnoreCase(payload, "429"));
-    try std.testing.expect(!helpers.containsIgnoreCase(payload, "too many requests"));
-    try std.testing.expect(!helpers.containsIgnoreCase(payload, "just a moment"));
+    try std.testing.expect(strings.containsIgnoreCase(payload, "flatmates"));
+    try std.testing.expect(!strings.containsIgnoreCase(payload, "429"));
+    try std.testing.expect(!strings.containsIgnoreCase(payload, "too many requests"));
+    try std.testing.expect(!strings.containsIgnoreCase(payload, "just a moment"));
 }
 
 fn pickFlatmatesInstall(installs: []const driver.BrowserInstall) ?driver.BrowserInstall {

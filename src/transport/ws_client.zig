@@ -1,4 +1,5 @@
 const std = @import("std");
+const io_util = @import("../util/io.zig");
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -93,7 +94,7 @@ pub const Client = struct {
 
         while (true) {
             var first2: [2]u8 = undefined;
-            try readExact(&self.stream, &first2);
+            try io_util.readExact(&self.stream, &first2);
 
             const fin = (first2[0] & 0x80) != 0;
             const opcode = first2[0] & 0x0f;
@@ -102,11 +103,11 @@ pub const Client = struct {
 
             if (len == 126) {
                 var ext: [2]u8 = undefined;
-                try readExact(&self.stream, &ext);
+                try io_util.readExact(&self.stream, &ext);
                 len = (@as(usize, ext[0]) << 8) | @as(usize, ext[1]);
             } else if (len == 127) {
                 var ext: [8]u8 = undefined;
-                try readExact(&self.stream, &ext);
+                try io_util.readExact(&self.stream, &ext);
                 len = 0;
                 for (ext) |b| {
                     len = (len << 8) | @as(usize, b);
@@ -115,12 +116,12 @@ pub const Client = struct {
 
             var mask: [4]u8 = .{ 0, 0, 0, 0 };
             if (masked) {
-                try readExact(&self.stream, &mask);
+                try io_util.readExact(&self.stream, &mask);
             }
 
             var payload = try allocator.alloc(u8, len);
             defer allocator.free(payload);
-            try readExact(&self.stream, payload);
+            try io_util.readExact(&self.stream, payload);
 
             if (masked) {
                 for (payload, 0..) |b, i| {
@@ -225,15 +226,6 @@ fn readHttpHeaders(allocator: std.mem.Allocator, stream: *std.net.Stream) ![]u8 
         if (out.items.len >= 4 and std.mem.endsWith(u8, out.items, "\r\n\r\n")) {
             return out.toOwnedSlice(allocator);
         }
-    }
-}
-
-fn readExact(stream: *std.net.Stream, buf: []u8) !void {
-    var read: usize = 0;
-    while (read < buf.len) {
-        const n = try stream.read(buf[read..]);
-        if (n == 0) return error.ConnectionClosed;
-        read += n;
     }
 }
 

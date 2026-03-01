@@ -1,4 +1,5 @@
 const std = @import("std");
+const io_util = @import("../util/io.zig");
 
 pub const HttpMethod = enum {
     GET,
@@ -157,15 +158,10 @@ fn readFixedBody(
     max_body_bytes: usize,
 ) ![]u8 {
     if (content_length > max_body_bytes) return error.BodyTooLarge;
-    var body = try allocator.alloc(u8, content_length);
+    const body = try allocator.alloc(u8, content_length);
     errdefer allocator.free(body);
 
-    var read_total: usize = 0;
-    while (read_total < content_length) {
-        const n = try stream.read(body[read_total..]);
-        if (n == 0) return error.ConnectionClosed;
-        read_total += n;
-    }
+    try io_util.readExact(stream, body);
 
     return body;
 }
@@ -196,10 +192,10 @@ fn readChunkedBody(allocator: std.mem.Allocator, stream: *std.net.Stream, max_bo
         if (out.items.len + size > max_body_bytes) return error.BodyTooLarge;
         const offset = out.items.len;
         try out.resize(allocator, offset + size);
-        try readExact(stream, out.items[offset .. offset + size]);
+        try io_util.readExact(stream, out.items[offset .. offset + size]);
 
         var crlf: [2]u8 = undefined;
-        try readExact(stream, &crlf);
+        try io_util.readExact(stream, &crlf);
         if (!(crlf[0] == '\r' and crlf[1] == '\n')) return error.InvalidResponse;
     }
 
@@ -238,15 +234,6 @@ fn readHttpLine(allocator: std.mem.Allocator, stream: *std.net.Stream, max_line_
         }
         if (out.items.len >= max_line_bytes) return error.HeaderTooLarge;
         try out.append(allocator, byte[0]);
-    }
-}
-
-fn readExact(stream: *std.net.Stream, buf: []u8) !void {
-    var read_total: usize = 0;
-    while (read_total < buf.len) {
-        const n = try stream.read(buf[read_total..]);
-        if (n == 0) return error.ConnectionClosed;
-        read_total += n;
     }
 }
 

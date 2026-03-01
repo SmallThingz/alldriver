@@ -1,6 +1,7 @@
 const std = @import("std");
 const session_mod = @import("session.zig");
 const executor = @import("../protocol/executor.zig");
+const types = @import("../types.zig");
 
 pub const TargetInfo = struct {
     id: []const u8,
@@ -53,26 +54,24 @@ pub const TargetsClient = struct {
         };
         defer self.session.base.allocator.free(attached_session_id);
 
-        const detach_payload = try executor.cdpDetachFromTarget(&self.session.base, attached_session_id);
-        defer self.session.base.allocator.free(detach_payload);
         const detached_current_target = blk: {
             if (self.session.base.cdp_target_id) |current| {
                 break :blk std.mem.eql(u8, current, target_id);
             }
             break :blk false;
         };
-        if (self.session.base.cdp_target_id) |current| {
-            if (std.mem.eql(u8, current, target_id)) {
-                self.session.base.allocator.free(current);
-                self.session.base.cdp_target_id = null;
-            }
-        }
-        if (detached_current_target) {
-            if (self.session.base.cdp_attached_session_id) |attached| {
-                self.session.base.allocator.free(attached);
-                self.session.base.cdp_attached_session_id = null;
-            }
-        }
+
+        const detach_payload = executor.cdpDetachFromTarget(&self.session.base, attached_session_id) catch |err| switch (err) {
+            error.ProtocolCommandFailed => {
+                const diag = self.session.base.lastDiagnostic();
+                if (!isStaleDetachSessionDiagnostic(diag)) return err;
+                clearDetachedState(self, target_id, attached_session_id, detached_current_target);
+                return;
+            },
+            else => return err,
+        };
+        defer self.session.base.allocator.free(detach_payload);
+        clearDetachedState(self, target_id, attached_session_id, detached_current_target);
     }
 
     fn synthesizeTargetList(self: *TargetsClient, allocator: std.mem.Allocator) ![]TargetInfo {
@@ -101,6 +100,33 @@ pub const TargetsClient = struct {
         return self.session.base.cdp_target_id.?;
     }
 };
+
+fn clearDetachedState(
+    self: *TargetsClient,
+    target_id: []const u8,
+    attached_session_id: []const u8,
+    detached_current_target: bool,
+) void {
+    if (self.session.base.cdp_target_id) |current| {
+        if (std.mem.eql(u8, current, target_id)) {
+            self.session.base.allocator.free(current);
+            self.session.base.cdp_target_id = null;
+        }
+    }
+    if (self.session.base.cdp_attached_session_id) |attached| {
+        if (detached_current_target or std.mem.eql(u8, attached, attached_session_id)) {
+            self.session.base.allocator.free(attached);
+            self.session.base.cdp_attached_session_id = null;
+        }
+    }
+}
+
+fn isStaleDetachSessionDiagnostic(diag: ?types.Diagnostic) bool {
+    const value = diag orelse return false;
+    if (!std.mem.eql(u8, value.code, "rpc_-32602")) return false;
+    if (std.mem.indexOf(u8, value.message, "Target.detachFromTarget failed") == null) return false;
+    return std.mem.indexOf(u8, value.message, "No session with given id") != null;
+}
 
 fn parseTargetList(allocator: std.mem.Allocator, payload: []const u8) ![]TargetInfo {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
@@ -187,4 +213,21 @@ test "parse created target id from Target.createTarget payload" {
     const target_id = try parseCreatedTargetId(allocator, "{\"id\":9,\"result\":{\"targetId\":\"target-9\"}}");
     defer allocator.free(target_id);
     try std.testing.expectEqualStrings("target-9", target_id);
+}
+
+test "stale detach diagnostic matcher only accepts stale session errors" {
+    try std.testing.expect(isStaleDetachSessionDiagnostic(.{
+        .phase = .overall,
+        .code = "rpc_-32602",
+        .message = "Target.detachFromTarget failed: No session with given id; payload={}",
+        .transport = "cdp_ws",
+        .elapsed_ms = null,
+    }));
+    try std.testing.expect(!isStaleDetachSessionDiagnostic(.{
+        .phase = .overall,
+        .code = "rpc_-32000",
+        .message = "Target.detachFromTarget failed: target closed",
+        .transport = "cdp_ws",
+        .elapsed_ms = null,
+    }));
 }

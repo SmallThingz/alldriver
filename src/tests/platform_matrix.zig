@@ -8,7 +8,7 @@ const windows_registry = @import("../discovery/windows_registry.zig");
 const macos_apps = @import("../discovery/macos_apps.zig");
 const linux_sources = @import("../discovery/linux_sources.zig");
 const webview_discovery = @import("../discovery/webview/discover.zig");
-const helpers = @import("helpers.zig");
+const strings = @import("../util/strings.zig");
 
 fn probeCount(hints: path_table.BrowserPathHints) usize {
     return hints.executable_names.len + hints.known_paths.len + hints.mac_bundle_ids.len + hints.windows_registry_hints.len + hints.linux_package_hints.len;
@@ -105,7 +105,7 @@ test "browser hints do not include standalone driver binaries" {
             if (hints.confidence_weight == 0 and probeCount(hints) == 0) continue;
             for (hints.executable_names) |entry| {
                 for (forbidden) |name| {
-                    try std.testing.expect(!helpers.containsIgnoreCase(entry, name));
+                    try std.testing.expect(!strings.containsIgnoreCase(entry, name));
                 }
             }
         }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("../types.zig");
-const runtime = @import("runtime.zig");
+const core_runtime = @import("../runtime.zig");
+const tier_runtime = @import("../tier/runtime_common.zig");
 const session_mod = @import("session.zig");
 const lightpanda = @import("../provision/lightpanda.zig");
 const async_mod = @import("../core/async.zig");
@@ -42,25 +43,26 @@ pub fn discover(
     prefs: types.BrowserPreference,
     opts: types.DiscoveryOptions,
 ) !types.BrowserInstallList {
-    return runtime.discover(allocator, prefs, opts);
+    return tier_runtime.discoverBrowsersByTier(allocator, prefs, opts, .modern);
 }
 
 pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !ModernSession {
-    return runtime.launch(allocator, opts);
+    const base = try tier_runtime.launchByTier(allocator, opts, .modern);
+    return ModernSession.fromBase(base);
 }
 
 pub fn launchAuto(allocator: std.mem.Allocator, opts: AutoLaunchOptions) !ModernSession {
-    var installs = try runtime.discover(allocator, .{
+    var installs = try tier_runtime.discoverBrowsersByTier(allocator, .{
         .kinds = opts.kinds,
         .explicit_path = opts.explicit_path,
         .allow_managed_download = opts.allow_managed_download,
         .managed_cache_dir = opts.managed_cache_dir,
-    }, opts.discovery);
+    }, opts.discovery, .modern);
     defer installs.deinit();
 
     if (installs.items.len == 0) return error.NoBrowserFound;
 
-    return runtime.launch(allocator, .{
+    const base = try tier_runtime.launchByTier(allocator, .{
         .install = installs.items[0],
         .profile_mode = opts.profile_mode,
         .profile_dir = opts.profile_dir,
@@ -70,7 +72,8 @@ pub fn launchAuto(allocator: std.mem.Allocator, opts: AutoLaunchOptions) !Modern
         .gecko_stealth_prefs = opts.gecko_stealth_prefs,
         .timeout_policy = opts.timeout_policy,
         .args = opts.args,
-    });
+    }, .modern);
+    return ModernSession.fromBase(base);
 }
 
 pub fn launchAsync(
@@ -87,7 +90,8 @@ pub fn launchAsync(
     const Runner = struct {
         fn run(a: std.mem.Allocator, p: *anyopaque) anyerror!ModernSession {
             const c: *Ctx = @ptrCast(@alignCast(p));
-            return runtime.launch(a, c.opts);
+            const base = try tier_runtime.launchByTier(a, c.opts, .modern);
+            return ModernSession.fromBase(base);
         }
 
         fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
@@ -128,43 +132,49 @@ pub fn launchAutoAsync(
 }
 
 pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !ModernSession {
-    return runtime.attach(allocator, endpoint);
+    const base = try tier_runtime.attachByTier(allocator, endpoint, .modern);
+    return ModernSession.fromBase(base);
 }
 
 pub fn discoverWebViews(
     allocator: std.mem.Allocator,
     prefs: types.WebViewPreference,
 ) !types.WebViewRuntimeList {
-    return runtime.discoverWebViews(allocator, prefs);
+    return tier_runtime.discoverWebViewsByTier(allocator, prefs, .modern);
 }
 
 pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOptions) !ModernSession {
-    return runtime.attachWebView(allocator, opts);
+    const base = try tier_runtime.attachWebViewByTier(allocator, opts, .modern);
+    return ModernSession.fromBase(base);
 }
 
 pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunchOptions) !ModernSession {
-    return runtime.launchWebViewHost(allocator, opts);
+    const base = try tier_runtime.launchWebViewHostByTier(allocator, opts, .modern);
+    return ModernSession.fromBase(base);
 }
 
 pub fn attachAndroidWebView(
     allocator: std.mem.Allocator,
     opts: types.AndroidWebViewAttachOptions,
 ) !ModernSession {
-    return runtime.attachAndroidWebView(allocator, opts);
+    const base = try core_runtime.attachAndroidWebView(allocator, opts);
+    return ModernSession.fromBase(base);
 }
 
 pub fn attachElectronWebView(
     allocator: std.mem.Allocator,
     opts: types.ElectronWebViewAttachOptions,
 ) !ModernSession {
-    return runtime.attachElectronWebView(allocator, opts);
+    const base = try core_runtime.attachElectronWebView(allocator, opts);
+    return ModernSession.fromBase(base);
 }
 
 pub fn launchElectronWebView(
     allocator: std.mem.Allocator,
     opts: types.ElectronWebViewLaunchOptions,
 ) !ModernSession {
-    return runtime.launchElectronWebView(allocator, opts);
+    const base = try core_runtime.launchElectronWebView(allocator, opts);
+    return ModernSession.fromBase(base);
 }
 
 pub fn launchElectronWebViewAsync(
@@ -181,7 +191,8 @@ pub fn launchElectronWebViewAsync(
     const Runner = struct {
         fn run(a: std.mem.Allocator, p: *anyopaque) anyerror!ModernSession {
             const c: *Ctx = @ptrCast(@alignCast(p));
-            return runtime.launchElectronWebView(a, c.opts);
+            const base = try core_runtime.launchElectronWebView(a, c.opts);
+            return ModernSession.fromBase(base);
         }
 
         fn destroy(a: std.mem.Allocator, p: *anyopaque) void {

@@ -3,6 +3,7 @@ const Session = @import("session.zig").Session;
 const types = @import("../types.zig");
 const events = @import("events.zig");
 const executor = @import("../protocol/executor.zig");
+const json_util = @import("../util/json.zig");
 
 pub const Cookie = types.Cookie;
 pub const CookieQuery = types.CookieQuery;
@@ -23,11 +24,11 @@ pub fn setCookie(session: *Session, cookie: Cookie) !void {
 }
 
 fn setCookieViaDocument(session: *Session, cookie: Cookie) !void {
-    const name = try escapeJsonString(session.allocator, cookie.name);
+    const name = try json_util.escapeJsonString(session.allocator, cookie.name);
     defer session.allocator.free(name);
-    const value = try escapeJsonString(session.allocator, cookie.value);
+    const value = try json_util.escapeJsonString(session.allocator, cookie.value);
     defer session.allocator.free(value);
-    const path = try escapeJsonString(session.allocator, cookie.path);
+    const path = try json_util.escapeJsonString(session.allocator, cookie.path);
     defer session.allocator.free(path);
 
     const script = try std.fmt.allocPrint(
@@ -141,9 +142,9 @@ pub fn buildCookieHeaderForUrl(
 pub fn setLocalStorage(session: *Session, key: []const u8, value: []const u8) !void {
     if (!session.supports(.dom)) return error.UnsupportedCapability;
 
-    const k = try escapeJsonString(session.allocator, key);
+    const k = try json_util.escapeJsonString(session.allocator, key);
     defer session.allocator.free(k);
-    const v = try escapeJsonString(session.allocator, value);
+    const v = try json_util.escapeJsonString(session.allocator, value);
     defer session.allocator.free(v);
 
     const script = try std.fmt.allocPrint(
@@ -380,24 +381,6 @@ fn pathMatches(cookie_path: []const u8, request_path: []const u8) bool {
     if (request_path.len == cookie_path.len) return true;
     if (cookie_path[cookie_path.len - 1] == '/') return true;
     return request_path[cookie_path.len] == '/';
-}
-
-fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-
-    for (input) |c| {
-        switch (c) {
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, c),
-        }
-    }
-
-    return out.toOwnedSlice(allocator);
 }
 
 test "parse cookies from cdp payload" {

@@ -2,6 +2,7 @@ const std = @import("std");
 const Session = @import("session.zig").Session;
 const types = @import("../types.zig");
 const executor = @import("../protocol/executor.zig");
+const json_util = @import("../util/json.zig");
 
 pub const NetworkRule = types.NetworkRule;
 pub const InterceptAction = types.InterceptAction;
@@ -81,7 +82,7 @@ pub fn emitDebugEvent(session: *Session, event_json: []const u8) void {
 }
 
 pub fn serializeBlockRule(allocator: std.mem.Allocator, glob: []const u8) ![]u8 {
-    const escaped = try escapeJsonString(allocator, glob);
+    const escaped = try json_util.escapeJsonString(allocator, glob);
     defer allocator.free(escaped);
     return std.fmt.allocPrint(allocator, "{{\"action\":\"block\",\"urlPattern\":\"{s}\"}}", .{escaped});
 }
@@ -192,24 +193,6 @@ fn freeRule(allocator: std.mem.Allocator, rule: NetworkRule) void {
             allocator.free(m.remove_header_names);
         },
     }
-}
-
-fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-
-    for (input) |c| {
-        switch (c) {
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, c),
-        }
-    }
-
-    return out.toOwnedSlice(allocator);
 }
 
 fn syncRemoteRules(session: *Session) !void {

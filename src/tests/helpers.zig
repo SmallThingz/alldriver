@@ -1,9 +1,4 @@
 const std = @import("std");
-const string_util = @import("../util/strings.zig");
-
-pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    return string_util.containsIgnoreCase(haystack, needle);
-}
 
 pub fn envEnabled(name: []const u8) bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;

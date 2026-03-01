@@ -11,6 +11,7 @@ Modern browser automation for Zig with a CDP/BiDi-first API, deterministic disco
 
 - CDP/BiDi-first modern API (`driver.modern.*`) with typed domain clients.
 - Auto-launch and auto-attach flows that wait for real protocol readiness.
+- Common utility paths are centralized (`driver.path`, `driver.strings`, `driver.json`, `driver.io`) to keep behavior consistent across modules.
 - Deterministic browser discovery (PATH + known paths + OS probes + managed cache).
 - Typed waits, cancellation tokens, lifecycle events, timeout policies, diagnostics.
 - Typed cookie query/export helpers and built-in session cache.

@@ -5,6 +5,7 @@ const cdp = @import("cdp/adapter.zig");
 const ws = @import("../transport/ws_client.zig");
 const http = @import("../transport/http_client.zig");
 const json_rpc = @import("../transport/json_rpc.zig");
+const json_util = @import("../util/json.zig");
 
 const Session = @import("../core/session.zig").Session;
 
@@ -36,7 +37,7 @@ pub fn initializeSession(session: *Session) !void {
 pub fn navigate(session: *Session, url: []const u8) !void {
     switch (session.transport) {
         .cdp_ws => {
-            const escaped = try escapeJsonString(session.allocator, url);
+            const escaped = try json_util.escapeJsonString(session.allocator, url);
             defer session.allocator.free(escaped);
             const params = try std.fmt.allocPrint(session.allocator, "{{\"url\":\"{s}\"}}", .{escaped});
             defer session.allocator.free(params);
@@ -51,7 +52,7 @@ pub fn navigate(session: *Session, url: []const u8) !void {
         },
         .bidi_ws => {
             const context_id = session.browsing_context_id orelse return error.SessionNotReady;
-            const url_e = try escapeJsonString(session.allocator, url);
+            const url_e = try json_util.escapeJsonString(session.allocator, url);
             defer session.allocator.free(url_e);
             const params = try std.fmt.allocPrint(
                 session.allocator,
@@ -143,7 +144,7 @@ pub fn reload(session: *Session) !void {
 }
 
 fn navigateViaRuntime(session: *Session, url: []const u8) !void {
-    const escaped_url = try escapeJsonString(session.allocator, url);
+    const escaped_url = try json_util.escapeJsonString(session.allocator, url);
     defer session.allocator.free(escaped_url);
     const script = try std.fmt.allocPrint(
         session.allocator,
@@ -156,7 +157,7 @@ fn navigateViaRuntime(session: *Session, url: []const u8) !void {
 }
 
 pub fn click(session: *Session, selector: []const u8) !void {
-    const sel = try escapeJsonString(session.allocator, selector);
+    const sel = try json_util.escapeJsonString(session.allocator, selector);
     defer session.allocator.free(sel);
     const expr = try std.fmt.allocPrint(
         session.allocator,
@@ -169,9 +170,9 @@ pub fn click(session: *Session, selector: []const u8) !void {
 }
 
 pub fn typeText(session: *Session, selector: []const u8, text: []const u8) !void {
-    const sel = try escapeJsonString(session.allocator, selector);
+    const sel = try json_util.escapeJsonString(session.allocator, selector);
     defer session.allocator.free(sel);
-    const txt = try escapeJsonString(session.allocator, text);
+    const txt = try json_util.escapeJsonString(session.allocator, text);
     defer session.allocator.free(txt);
     const expr = try std.fmt.allocPrint(
         session.allocator,
@@ -202,7 +203,7 @@ pub fn waitForDomReady(session: *Session, timeout_ms: u32) !void {
 }
 
 pub fn waitForSelector(session: *Session, selector: []const u8, timeout_ms: u32) !void {
-    const escaped = try escapeJsonString(session.allocator, selector);
+    const escaped = try json_util.escapeJsonString(session.allocator, selector);
     defer session.allocator.free(escaped);
     const expr = try std.fmt.allocPrint(
         session.allocator,
@@ -223,20 +224,20 @@ pub fn waitForSelector(session: *Session, selector: []const u8, timeout_ms: u32)
 
 pub fn setCookie(session: *Session, cookie: types.Header, domain: []const u8, path: []const u8) !void {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const n = try escapeJsonString(session.allocator, cookie.name);
+    const n = try json_util.escapeJsonString(session.allocator, cookie.name);
     defer session.allocator.free(n);
-    const v = try escapeJsonString(session.allocator, cookie.value);
+    const v = try json_util.escapeJsonString(session.allocator, cookie.value);
     defer session.allocator.free(v);
-    const d = try escapeJsonString(session.allocator, domain);
+    const d = try json_util.escapeJsonString(session.allocator, domain);
     defer session.allocator.free(d);
-    const p = try escapeJsonString(session.allocator, path);
+    const p = try json_util.escapeJsonString(session.allocator, path);
     defer session.allocator.free(p);
     const cookie_url = if (domain.len > 0)
         try std.fmt.allocPrint(session.allocator, "http://{s}{s}", .{ domain, path })
     else
         try session.allocator.dupe(u8, "about:blank");
     defer session.allocator.free(cookie_url);
-    const u = try escapeJsonString(session.allocator, cookie_url);
+    const u = try json_util.escapeJsonString(session.allocator, cookie_url);
     defer session.allocator.free(u);
 
     const params = try std.fmt.allocPrint(
@@ -266,7 +267,7 @@ pub fn getCookies(session: *Session) ![]u8 {
     defer if (current_url) |url| session.allocator.free(url);
 
     if (current_url) |url| {
-        const escaped = try escapeJsonString(session.allocator, url);
+        const escaped = try json_util.escapeJsonString(session.allocator, url);
         defer session.allocator.free(escaped);
         const params = try std.fmt.allocPrint(session.allocator, "{{\"urls\":[\"{s}\"]}}", .{escaped});
         defer session.allocator.free(params);
@@ -311,7 +312,7 @@ fn prepareCdpScreenshotRetry(session: *Session) !void {
 fn screenshotViaRuntimeCanvas(session: *Session) ![]u8 {
     const expression =
         "(function(){" ++ "const w=Math.max(window.innerWidth||0,document.documentElement.clientWidth||0,1);" ++ "const h=Math.max(window.innerHeight||0,document.documentElement.clientHeight||0,1);" ++ "const c=document.createElement('canvas'); c.width=w; c.height=h;" ++ "const ctx=c.getContext('2d'); if(!ctx) return '';" ++ "ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,w,h);" ++ "ctx.fillStyle='#111111'; ctx.font='16px sans-serif';" ++ "ctx.fillText(document.title||location.href||'about:blank',12,28);" ++ "return c.toDataURL('image/png').split(',')[1] || '';" ++ "})()";
-    const escaped = try escapeJsonString(session.allocator, expression);
+    const escaped = try json_util.escapeJsonString(session.allocator, expression);
     defer session.allocator.free(escaped);
     const params = try std.fmt.allocPrint(
         session.allocator,
@@ -375,7 +376,7 @@ pub fn stopTracing(session: *Session) ![]u8 {
 pub fn releaseHandle(session: *Session, handle_id: []const u8) !void {
     switch (session.transport) {
         .cdp_ws => {
-            const handle = try escapeJsonString(session.allocator, handle_id);
+            const handle = try json_util.escapeJsonString(session.allocator, handle_id);
             defer session.allocator.free(handle);
             const params = try std.fmt.allocPrint(
                 session.allocator,
@@ -388,7 +389,7 @@ pub fn releaseHandle(session: *Session, handle_id: []const u8) !void {
         },
         .bidi_ws => {
             const context_id = session.browsing_context_id orelse return error.SessionNotReady;
-            const handle = try escapeJsonString(session.allocator, handle_id);
+            const handle = try json_util.escapeJsonString(session.allocator, handle_id);
             defer session.allocator.free(handle);
             const params = try std.fmt.allocPrint(
                 session.allocator,
@@ -429,7 +430,7 @@ pub fn disableNetworkInterception(session: *Session) !void {
 }
 
 pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
-    const url_pattern = try escapeJsonString(session.allocator, rule.url_pattern);
+    const url_pattern = try json_util.escapeJsonString(session.allocator, rule.url_pattern);
     defer session.allocator.free(url_pattern);
 
     switch (session.transport) {
@@ -483,7 +484,7 @@ pub fn cdpGetTargets(session: *Session) ![]u8 {
 
 pub fn cdpCreateTarget(session: *Session, url: []const u8) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const escaped = try escapeJsonString(session.allocator, url);
+    const escaped = try json_util.escapeJsonString(session.allocator, url);
     defer session.allocator.free(escaped);
     const params = try std.fmt.allocPrint(session.allocator, "{{\"url\":\"{s}\"}}", .{escaped});
     defer session.allocator.free(params);
@@ -492,7 +493,7 @@ pub fn cdpCreateTarget(session: *Session, url: []const u8) ![]u8 {
 
 pub fn cdpAttachToTarget(session: *Session, target_id: []const u8, flatten: bool) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const escaped = try escapeJsonString(session.allocator, target_id);
+    const escaped = try json_util.escapeJsonString(session.allocator, target_id);
     defer session.allocator.free(escaped);
     const params = try std.fmt.allocPrint(
         session.allocator,
@@ -505,7 +506,7 @@ pub fn cdpAttachToTarget(session: *Session, target_id: []const u8, flatten: bool
 
 pub fn cdpDetachFromTarget(session: *Session, attached_session_id: []const u8) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const escaped = try escapeJsonString(session.allocator, attached_session_id);
+    const escaped = try json_util.escapeJsonString(session.allocator, attached_session_id);
     defer session.allocator.free(escaped);
     const params = try std.fmt.allocPrint(session.allocator, "{{\"sessionId\":\"{s}\"}}", .{escaped});
     defer session.allocator.free(params);
@@ -514,7 +515,7 @@ pub fn cdpDetachFromTarget(session: *Session, attached_session_id: []const u8) !
 
 pub fn cdpCloseTarget(session: *Session, target_id: []const u8) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const escaped = try escapeJsonString(session.allocator, target_id);
+    const escaped = try json_util.escapeJsonString(session.allocator, target_id);
     defer session.allocator.free(escaped);
     const params = try std.fmt.allocPrint(session.allocator, "{{\"targetId\":\"{s}\"}}", .{escaped});
     defer session.allocator.free(params);
@@ -676,7 +677,7 @@ fn encodeCdpRequest(
     routed_session_id: ?[]const u8,
 ) ![]u8 {
     if (routed_session_id) |session_id| {
-        const escaped_sid = try escapeJsonString(allocator, session_id);
+        const escaped_sid = try json_util.escapeJsonString(allocator, session_id);
         defer allocator.free(escaped_sid);
         if (params_json) |params| {
             return std.fmt.allocPrint(
@@ -765,7 +766,7 @@ fn createBlankTargetId(session: *Session, client: *ws.Client) ![]u8 {
 }
 
 fn attachToTargetAndGetSessionId(session: *Session, client: *ws.Client, target_id: []const u8) ![]u8 {
-    const escaped_target = try escapeJsonString(session.allocator, target_id);
+    const escaped_target = try json_util.escapeJsonString(session.allocator, target_id);
     defer session.allocator.free(escaped_target);
     const params = try std.fmt.allocPrint(
         session.allocator,
@@ -905,7 +906,7 @@ fn isNavigableCdpTargetType(target_type: []const u8) bool {
 }
 
 fn evalViaCdp(session: *Session, script: []const u8) ![]u8 {
-    const expression = try escapeJsonString(session.allocator, script);
+    const expression = try json_util.escapeJsonString(session.allocator, script);
     defer session.allocator.free(expression);
     const params = try std.fmt.allocPrint(
         session.allocator,
@@ -918,7 +919,7 @@ fn evalViaCdp(session: *Session, script: []const u8) ![]u8 {
 
 fn evalViaBidi(session: *Session, script: []const u8) ![]u8 {
     const context_id = session.browsing_context_id orelse return error.SessionNotReady;
-    const expression = try escapeJsonString(session.allocator, script);
+    const expression = try json_util.escapeJsonString(session.allocator, script);
     defer session.allocator.free(expression);
     const params = try std.fmt.allocPrint(
         session.allocator,
@@ -1019,30 +1020,6 @@ fn extractNavigableTargetIdFromTargetsPayload(allocator: std.mem.Allocator, payl
         }
     }
     return null;
-}
-
-fn escapeJsonString(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    for (raw) |c| {
-        switch (c) {
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, c),
-        }
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-test "escape json string" {
-    const allocator = std.testing.allocator;
-    const escaped = try escapeJsonString(allocator, "a\"b\\c\n");
-    defer allocator.free(escaped);
-    try std.testing.expect(std.mem.eql(u8, escaped, "a\\\"b\\\\c\\n"));
 }
 
 test "parseWsUrl supports ws endpoint" {

@@ -4,6 +4,7 @@ const driver = @import("alldriver");
 
 const Allocator = std.mem.Allocator;
 const containsIgnoreCase = driver.strings.containsIgnoreCase;
+const path_util = driver.path;
 
 const ToolError = error{
     InvalidArgs,
@@ -148,15 +149,6 @@ fn ensureDir(path: []const u8) !void {
 fn ensurePath(path: []const u8) !void {
     var dir = std.fs.cwd();
     try dir.makePath(path);
-}
-
-fn pathJoin(allocator: Allocator, parts: []const []const u8) ![]u8 {
-    return try std.fs.path.join(allocator, parts);
-}
-
-fn toAbsolutePath(allocator: Allocator, root: []const u8, maybe_rel: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(maybe_rel)) return allocator.dupe(u8, maybe_rel);
-    return try pathJoin(allocator, &.{ root, maybe_rel });
 }
 
 fn nowStamp(allocator: Allocator) ![]u8 {
@@ -358,7 +350,7 @@ fn parseFlags(allocator: Allocator, args: []const []const u8) !std.StringHashMap
 fn setDefaultZigGlobalCache(allocator: Allocator, root: []const u8) !std.process.EnvMap {
     var env = try std.process.getEnvMap(allocator);
     if (env.get("ZIG_GLOBAL_CACHE_DIR") == null) {
-        const cache = try pathJoin(allocator, &.{ root, ".zig-global-cache" });
+        const cache = try path_util.pathJoin(allocator, &.{ root, ".zig-global-cache" });
         try ensurePath(cache);
         try env.put("ZIG_GLOBAL_CACHE_DIR", cache);
     }
@@ -373,11 +365,11 @@ fn runStepWithLog(
     name: []const u8,
     argv: []const []const u8,
 ) !bool {
-    const logs_dir = try pathJoin(allocator, &.{ out_dir, "logs" });
+    const logs_dir = try path_util.pathJoin(allocator, &.{ out_dir, "logs" });
     defer allocator.free(logs_dir);
     try ensurePath(logs_dir);
 
-    const log_path = try pathJoin(allocator, &.{ logs_dir, try std.fmt.allocPrint(allocator, "{s}.log", .{name}) });
+    const log_path = try path_util.pathJoin(allocator, &.{ logs_dir, try std.fmt.allocPrint(allocator, "{s}.log", .{name}) });
     defer allocator.free(log_path);
 
     var log: std.ArrayList(u8) = .empty;
@@ -393,7 +385,7 @@ fn runStepWithLog(
     try writeFile(log_path, log.items);
 
     const status = if (res.ok) "PASS" else "FAIL";
-    const status_path = try pathJoin(allocator, &.{ logs_dir, try std.fmt.allocPrint(allocator, "{s}.status", .{name}) });
+    const status_path = try path_util.pathJoin(allocator, &.{ logs_dir, try std.fmt.allocPrint(allocator, "{s}.status", .{name}) });
     defer allocator.free(status_path);
     try writeFile(status_path, status);
 
@@ -411,7 +403,7 @@ fn listReports(allocator: Allocator, matrix_root: []const u8) !std.ArrayList([]u
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.eql(u8, std.fs.path.basename(entry.path), "matrix-report.txt")) {
-            const full = try pathJoin(allocator, &.{ matrix_root, entry.path });
+            const full = try path_util.pathJoin(allocator, &.{ matrix_root, entry.path });
             try reports.append(allocator, full);
         }
     }
@@ -495,10 +487,10 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
     var matrix_root_default: ?[]u8 = null;
     defer if (matrix_root_default) |p| allocator.free(p);
     const matrix_root_raw = flags.get("matrix-root") orelse blk: {
-        matrix_root_default = try pathJoin(allocator, &.{ root, "artifacts", "matrix" });
+        matrix_root_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" });
         break :blk matrix_root_default.?;
     };
-    const matrix_root = try toAbsolutePath(allocator, root, matrix_root_raw);
+    const matrix_root = try path_util.toAbsolutePath(allocator, root, matrix_root_raw);
     defer allocator.free(matrix_root);
     const strict_ga = std.mem.eql(u8, mapGetOr(&flags, "strict-ga", "0"), "1");
 
@@ -525,7 +517,7 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
     defer allocator.free(ts);
 
     if (out_file == null) {
-        out_file = try pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{ts}) });
+        out_file = try path_util.pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{ts}) });
     }
     const out = out_file.?;
 
@@ -1568,7 +1560,7 @@ fn scanForbiddenMarkers(allocator: Allocator, root: []const u8, max_hits: usize)
         const ext = std.fs.path.extension(entry.path);
         if (!(std.mem.eql(u8, ext, ".zig") or std.mem.eql(u8, ext, ".md") or std.mem.eql(u8, ext, ".txt"))) continue;
 
-        const abs = try pathJoin(allocator, &.{ root, entry.path });
+        const abs = try path_util.pathJoin(allocator, &.{ root, entry.path });
         defer allocator.free(abs);
         const data = blk: {
             var f = std.fs.openFileAbsolute(abs, .{}) catch continue;
@@ -1610,20 +1602,20 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
     const matrix_root_raw = flags.get("matrix-root") orelse blk: {
         const run_id = try std.fmt.allocPrint(allocator, "prod-gate-{s}", .{ts});
         defer allocator.free(run_id);
-        matrix_root_default = try pathJoin(allocator, &.{ root, "artifacts", "matrix", run_id });
+        matrix_root_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix", run_id });
         break :blk matrix_root_default.?;
     };
-    const matrix_root = try toAbsolutePath(allocator, root, matrix_root_raw);
+    const matrix_root = try path_util.toAbsolutePath(allocator, root, matrix_root_raw);
     defer allocator.free(matrix_root);
     try ensurePath(matrix_root);
 
     var out_default: ?[]u8 = null;
     defer if (out_default) |p| allocator.free(p);
     const out_raw = flags.get("out") orelse blk: {
-        out_default = try pathJoin(allocator, &.{ root, "artifacts", "reports", try std.fmt.allocPrint(allocator, "production-gate-{s}.txt", .{ts}) });
+        out_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "reports", try std.fmt.allocPrint(allocator, "production-gate-{s}.txt", .{ts}) });
         break :blk out_default.?;
     };
-    const out = try toAbsolutePath(allocator, root, out_raw);
+    const out = try path_util.toAbsolutePath(allocator, root, out_raw);
     defer allocator.free(out);
     if (std.fs.path.dirname(out)) |parent| try ensurePath(parent);
 
@@ -1675,7 +1667,7 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
 
     if (reports.items.len == 0 and !strict_ga) {
         const host = getHostPlatform();
-        const run_out = try pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host, ts }) });
+        const run_out = try path_util.pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host, ts }) });
         var ran = true;
         cmdMatrixRun(allocator, root, &.{ "--platform", host, "--allow-platform-mismatch", "--out", run_out }) catch {
             ran = false;
@@ -1716,7 +1708,7 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
         };
         var docs_ok = true;
         for (required_files) |rel| {
-            const p = try pathJoin(allocator, &.{ root, rel });
+            const p = try path_util.pathJoin(allocator, &.{ root, rel });
             defer allocator.free(p);
             if (std.fs.openFileAbsolute(p, .{}) catch null == null) {
                 docs_ok = false;
@@ -1841,14 +1833,14 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     var out_dir_default: ?[]u8 = null;
     defer if (out_dir_default) |p| allocator.free(p);
     const out_dir_raw = flags.get("out") orelse blk: {
-        out_dir_default = try pathJoin(allocator, &.{ root, "artifacts", "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ platform, ts }) });
+        out_dir_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ platform, ts }) });
         break :blk out_dir_default.?;
     };
-    const out_dir = try toAbsolutePath(allocator, root, out_dir_raw);
+    const out_dir = try path_util.toAbsolutePath(allocator, root, out_dir_raw);
     defer allocator.free(out_dir);
 
     try ensurePath(out_dir);
-    const logs_dir_init = try pathJoin(allocator, &.{ out_dir, "logs" });
+    const logs_dir_init = try path_util.pathJoin(allocator, &.{ out_dir, "logs" });
     defer allocator.free(logs_dir_init);
     try ensurePath(logs_dir_init);
 
@@ -1895,7 +1887,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         if (!(try runStepWithLog(allocator, root, &env, out_dir, "behavioral_matrix", &.{ "zig", "build", "tools", "--", "test-behavioral-matrix" }))) ok_all = false;
     }
 
-    const adversarial_report_path = try pathJoin(allocator, &.{ out_dir, "adversarial-detection.txt" });
+    const adversarial_report_path = try path_util.pathJoin(allocator, &.{ out_dir, "adversarial-detection.txt" });
     defer allocator.free(adversarial_report_path);
     if (strict_ga) {
         if (!(try runStepWithLog(
@@ -1927,7 +1919,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         ))) ok_all = false;
     }
 
-    const env_txt_path = try pathJoin(allocator, &.{ out_dir, "environment.txt" });
+    const env_txt_path = try path_util.pathJoin(allocator, &.{ out_dir, "environment.txt" });
     const head_commit = runCaptureTrimmed(allocator, &.{ "git", "rev-parse", "HEAD" }, root, null) catch try allocator.dupe(u8, "unknown");
     defer allocator.free(head_commit);
     const zig_ver = runCaptureTrimmed(allocator, &.{ "zig", "version" }, root, null) catch try allocator.dupe(u8, "unknown");
@@ -1978,7 +1970,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
 
     try writeFile(env_txt_path, env_txt.items);
 
-    const logs_dir = try pathJoin(allocator, &.{ out_dir, "logs" });
+    const logs_dir = try path_util.pathJoin(allocator, &.{ out_dir, "logs" });
     defer allocator.free(logs_dir);
 
     var overall = true;
@@ -1988,7 +1980,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     while (try it.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".status")) continue;
-        const status_path = try pathJoin(allocator, &.{ logs_dir, entry.name });
+        const status_path = try path_util.pathJoin(allocator, &.{ logs_dir, entry.name });
         defer allocator.free(status_path);
         const status_data = try readFileAlloc(allocator, status_path, 64);
         defer allocator.free(status_data);
@@ -1998,7 +1990,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         }
     }
 
-    const report = try pathJoin(allocator, &.{ out_dir, "matrix-report.txt" });
+    const report = try path_util.pathJoin(allocator, &.{ out_dir, "matrix-report.txt" });
     var rpt: std.ArrayList(u8) = .empty;
     defer rpt.deinit(allocator);
     try rpt.writer(allocator).print("Matrix Report\nplatform: {s}\ntimestamp_utc: {s}\ncommit: {s}\nprofile_mode: {s}\nstrict_ga: {d}\n\nChecks:\n", .{
@@ -2020,7 +2012,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     while (try it2.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".status")) continue;
-        const p = try pathJoin(allocator, &.{ logs_dir, entry.name });
+        const p = try path_util.pathJoin(allocator, &.{ logs_dir, entry.name });
         try status_paths.append(allocator, p);
     }
     std.mem.sort([]u8, status_paths.items, {}, struct {
@@ -2086,9 +2078,9 @@ fn copyTree(allocator: Allocator, src_root: []const u8, dst_root: []const u8) !v
     defer walker.deinit();
 
     while (try walker.next()) |entry| {
-        const src_path = try pathJoin(allocator, &.{ src_root, entry.path });
+        const src_path = try path_util.pathJoin(allocator, &.{ src_root, entry.path });
         defer allocator.free(src_path);
-        const dst_path = try pathJoin(allocator, &.{ dst_root, entry.path });
+        const dst_path = try path_util.pathJoin(allocator, &.{ dst_root, entry.path });
         defer allocator.free(dst_path);
 
         switch (entry.kind) {
@@ -2132,7 +2124,7 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
     const strict_ga_bundle = !std.mem.eql(u8, mapGetOr(&flags, "no-strict-ga", "0"), "1");
 
     var release_id = flags.get("release-id");
-    const matrix_root = mapGetOr(&flags, "matrix-root", try pathJoin(allocator, &.{ root, "artifacts", "matrix" }));
+    const matrix_root = mapGetOr(&flags, "matrix-root", try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" }));
 
     if (release_id == null) {
         const short = try runCaptureTrimmed(allocator, &.{ "git", "rev-parse", "--short", "HEAD" }, root, null);
@@ -2142,7 +2134,7 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         release_id = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ short, ts });
     }
 
-    const summary_path = try pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) });
+    const summary_path = try path_util.pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) });
     if (std.mem.eql(u8, mapGetOr(&flags, "no-strict-ga", "0"), "1")) {
         try cmdMatrixCollect(allocator, root, &.{ "--matrix-root", matrix_root, "--out", summary_path });
     } else {
@@ -2151,16 +2143,16 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
 
     try runInherit(allocator, &.{ "zig", "build", "-Doptimize=ReleaseSafe" }, root, &env);
 
-    const bundle_dir = try pathJoin(allocator, &.{ root, "artifacts", "release", release_id.? });
+    const bundle_dir = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release", release_id.? });
     try ensurePath(bundle_dir);
-    try ensurePath(try pathJoin(allocator, &.{ bundle_dir, "bin" }));
-    try ensurePath(try pathJoin(allocator, &.{ bundle_dir, "docs" }));
-    try ensurePath(try pathJoin(allocator, &.{ bundle_dir, "logs" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ bundle_dir, "bin" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ bundle_dir, "docs" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ bundle_dir, "logs" }));
 
-    const bin_unix = try pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver" });
-    const bin_win = try pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver.exe" });
-    const out_bin_unix = try pathJoin(allocator, &.{ bundle_dir, "bin", "alldriver" });
-    const out_bin_win = try pathJoin(allocator, &.{ bundle_dir, "bin", "alldriver.exe" });
+    const bin_unix = try path_util.pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver" });
+    const bin_win = try path_util.pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver.exe" });
+    const out_bin_unix = try path_util.pathJoin(allocator, &.{ bundle_dir, "bin", "alldriver" });
+    const out_bin_win = try path_util.pathJoin(allocator, &.{ bundle_dir, "bin", "alldriver.exe" });
     defer {
         allocator.free(bin_unix);
         allocator.free(bin_win);
@@ -2181,22 +2173,22 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
 
     const required_docs = [_][]const u8{ "DOCUMENTATION.md", "CONTRIBUTING.md", "SECURITY.md" };
     for (required_docs) |doc| {
-        const src_doc = try pathJoin(allocator, &.{ root, doc });
+        const src_doc = try path_util.pathJoin(allocator, &.{ root, doc });
         defer allocator.free(src_doc);
-        const dst_doc = try pathJoin(allocator, &.{ bundle_dir, "docs", doc });
+        const dst_doc = try path_util.pathJoin(allocator, &.{ bundle_dir, "docs", doc });
         defer allocator.free(dst_doc);
         try std.fs.copyFileAbsolute(src_doc, dst_doc, .{});
     }
 
-    const summary_dst = try pathJoin(allocator, &.{ bundle_dir, "logs", std.fs.path.basename(summary_path) });
+    const summary_dst = try path_util.pathJoin(allocator, &.{ bundle_dir, "logs", std.fs.path.basename(summary_path) });
     defer allocator.free(summary_dst);
     try std.fs.copyFileAbsolute(summary_path, summary_dst, .{});
 
-    const matrix_runs_dst = try pathJoin(allocator, &.{ bundle_dir, "logs", "matrix-runs" });
+    const matrix_runs_dst = try path_util.pathJoin(allocator, &.{ bundle_dir, "logs", "matrix-runs" });
     defer allocator.free(matrix_runs_dst);
     try copyTree(allocator, matrix_root, matrix_runs_dst);
 
-    const release_manifest = try pathJoin(allocator, &.{ bundle_dir, "release-manifest.txt" });
+    const release_manifest = try path_util.pathJoin(allocator, &.{ bundle_dir, "release-manifest.txt" });
     defer allocator.free(release_manifest);
     const commit = runCaptureTrimmed(allocator, &.{ "git", "rev-parse", "HEAD" }, root, null) catch try allocator.dupe(u8, "unknown");
     defer allocator.free(commit);
@@ -2229,12 +2221,12 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         }
     }.lessThan);
 
-    const sums_path = try pathJoin(allocator, &.{ bundle_dir, "SHA256SUMS" });
+    const sums_path = try path_util.pathJoin(allocator, &.{ bundle_dir, "SHA256SUMS" });
     defer allocator.free(sums_path);
     var sums: std.ArrayList(u8) = .empty;
     defer sums.deinit(allocator);
     for (files.items) |rel| {
-        const abs = try pathJoin(allocator, &.{ bundle_dir, rel });
+        const abs = try path_util.pathJoin(allocator, &.{ bundle_dir, rel });
         defer allocator.free(abs);
         const hash = try sha256FileHex(allocator, abs);
         defer allocator.free(hash);
@@ -2243,14 +2235,14 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
     try writeFile(sums_path, sums.items);
 
     if ((try commandExists(allocator, "gpg")) and env.get("RELEASE_GPG_KEY_ID") != null) {
-        const asc = try pathJoin(allocator, &.{ bundle_dir, "SHA256SUMS.asc" });
+        const asc = try path_util.pathJoin(allocator, &.{ bundle_dir, "SHA256SUMS.asc" });
         defer allocator.free(asc);
         try runInherit(allocator, &.{ "gpg", "--batch", "--yes", "--local-user", env.get("RELEASE_GPG_KEY_ID").?, "--armor", "--detach-sign", "--output", asc, sums_path }, root, null);
     }
 
-    const tarball = try pathJoin(allocator, &.{ root, "artifacts", "release", try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{release_id.?}) });
+    const tarball = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release", try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{release_id.?}) });
     defer allocator.free(tarball);
-    try runInherit(allocator, &.{ "tar", "-C", try pathJoin(allocator, &.{ root, "artifacts", "release" }), "-czf", tarball, release_id.? }, root, null);
+    try runInherit(allocator, &.{ "tar", "-C", try path_util.pathJoin(allocator, &.{ root, "artifacts", "release" }), "-czf", tarball, release_id.? }, root, null);
 
     std.debug.print("release bundle ready\nbundle_dir={s}\ntarball={s}\n", .{ bundle_dir, tarball });
 }
@@ -2266,7 +2258,7 @@ fn cmdMatrixRunRemote(allocator: Allocator, root: []const u8, args: []const []co
     const platform = flags.get("platform") orelse return ToolError.InvalidArgs;
     const repo_path = flags.get("repo-path") orelse return ToolError.InvalidArgs;
     const port = mapGetOr(&flags, "port", "22");
-    const matrix_root = mapGetOr(&flags, "matrix-root", try pathJoin(allocator, &.{ root, "artifacts", "matrix" }));
+    const matrix_root = mapGetOr(&flags, "matrix-root", try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" }));
     const strict_ga = !std.mem.eql(u8, mapGetOr(&flags, "no-strict-ga", "0"), "1");
 
     var run_id = flags.get("run-id");
@@ -2293,7 +2285,7 @@ fn cmdMatrixRunRemote(allocator: Allocator, root: []const u8, args: []const []co
     defer allocator.free(src);
     try runInherit(allocator, &.{ "scp", "-P", port, "-r", src, matrix_root }, root, null);
 
-    const local_dir = try pathJoin(allocator, &.{ matrix_root, run_id.? });
+    const local_dir = try path_util.pathJoin(allocator, &.{ matrix_root, run_id.? });
     std.debug.print("remote matrix run collected\nrun_id={s}\nlocal_dir={s}\n", .{ run_id.?, local_dir });
 }
 
@@ -2309,7 +2301,7 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
         std.debug.print("usage: matrix-ga --config <env file> [--release-id ID] [--matrix-root DIR]\n", .{});
         return ToolError.InvalidArgs;
     };
-    const config = try toAbsolutePath(allocator, root, config_raw);
+    const config = try path_util.toAbsolutePath(allocator, root, config_raw);
     defer allocator.free(config);
 
     const cfg_file = std.fs.openFileAbsolute(config, .{}) catch {
@@ -2323,7 +2315,7 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
 
     var release_id = flags.get("release-id");
     var matrix_root = flags.get("matrix-root");
-    if (matrix_root == null) matrix_root = try pathJoin(allocator, &.{ root, "artifacts", "matrix" });
+    if (matrix_root == null) matrix_root = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" });
     try ensurePath(matrix_root.?);
 
     if (release_id == null) {
@@ -2339,7 +2331,7 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
     if (std.mem.eql(u8, linux_mode, "local")) {
         const run_id = try std.fmt.allocPrint(allocator, "linux-{s}", .{release_id.?});
         defer allocator.free(run_id);
-        try cmdMatrixRun(allocator, root, &.{ "--platform", "linux", "--strict-ga", "--out", try pathJoin(allocator, &.{ matrix_root.?, run_id }) });
+        try cmdMatrixRun(allocator, root, &.{ "--platform", "linux", "--strict-ga", "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id }) });
     } else if (std.mem.eql(u8, linux_mode, "ssh")) {
         try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "LINUX_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "LINUX_SSH_PORT", "22"), "--platform", "linux", "--repo-path", mapGetRequired(&cfg, "LINUX_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", try std.fmt.allocPrint(allocator, "linux-{s}", .{release_id.?}), "--matrix-root", matrix_root.? });
     } else return ToolError.InvalidArgs;
@@ -2347,7 +2339,7 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
     if (std.mem.eql(u8, windows_mode, "local")) {
         const run_id = try std.fmt.allocPrint(allocator, "windows-{s}", .{release_id.?});
         defer allocator.free(run_id);
-        try cmdMatrixRun(allocator, root, &.{ "--platform", "windows", "--strict-ga", "--allow-platform-mismatch", "--out", try pathJoin(allocator, &.{ matrix_root.?, run_id }) });
+        try cmdMatrixRun(allocator, root, &.{ "--platform", "windows", "--strict-ga", "--allow-platform-mismatch", "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id }) });
     } else if (std.mem.eql(u8, windows_mode, "ssh")) {
         try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "WINDOWS_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "WINDOWS_SSH_PORT", "22"), "--platform", "windows", "--repo-path", mapGetRequired(&cfg, "WINDOWS_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", try std.fmt.allocPrint(allocator, "windows-{s}", .{release_id.?}), "--matrix-root", matrix_root.? });
     } else return ToolError.InvalidArgs;
@@ -2355,12 +2347,12 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
     if (std.mem.eql(u8, macos_mode, "local")) {
         const run_id = try std.fmt.allocPrint(allocator, "macos-{s}", .{release_id.?});
         defer allocator.free(run_id);
-        try cmdMatrixRun(allocator, root, &.{ "--platform", "macos", "--strict-ga", "--allow-platform-mismatch", "--out", try pathJoin(allocator, &.{ matrix_root.?, run_id }) });
+        try cmdMatrixRun(allocator, root, &.{ "--platform", "macos", "--strict-ga", "--allow-platform-mismatch", "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id }) });
     } else if (std.mem.eql(u8, macos_mode, "ssh")) {
         try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "MACOS_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "MACOS_SSH_PORT", "22"), "--platform", "macos", "--repo-path", mapGetRequired(&cfg, "MACOS_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", try std.fmt.allocPrint(allocator, "macos-{s}", .{release_id.?}), "--matrix-root", matrix_root.? });
     } else return ToolError.InvalidArgs;
 
-    try cmdMatrixCollect(allocator, root, &.{ "--strict-ga", "--matrix-root", matrix_root.?, "--out", try pathJoin(allocator, &.{ matrix_root.?, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) }) });
+    try cmdMatrixCollect(allocator, root, &.{ "--strict-ga", "--matrix-root", matrix_root.?, "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) }) });
     try cmdReleaseBundle(allocator, root, &.{ "--release-id", release_id.?, "--matrix-root", matrix_root.? });
 
     std.debug.print("GA matrix and bundle complete\nrelease_id={s}\n", .{release_id.?});
@@ -2394,7 +2386,7 @@ fn cmdVmCheckPrereqs(allocator: Allocator, _: []const u8, _: []const []const u8)
 }
 
 fn vmProjectDir(allocator: Allocator, vm_lab_dir: []const u8, project: []const u8) ![]u8 {
-    return try pathJoin(allocator, &.{ vm_lab_dir, "projects", project });
+    return try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project });
 }
 
 fn cmdVmInitLab(allocator: Allocator, _: []const u8, args: []const []const u8) !void {
@@ -2404,19 +2396,19 @@ fn cmdVmInitLab(allocator: Allocator, _: []const u8, args: []const []const u8) !
     const project = mapGetOr(&flags, "project", "alldriver");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
 
-    try ensurePath(try pathJoin(allocator, &.{ vm_lab_dir, "images" }));
-    try ensurePath(try pathJoin(allocator, &.{ vm_lab_dir, "projects" }));
-    try ensurePath(try pathJoin(allocator, &.{ vm_lab_dir, "hosts" }));
-    try ensurePath(try pathJoin(allocator, &.{ vm_lab_dir, "artifacts" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ vm_lab_dir, "images" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ vm_lab_dir, "hosts" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ vm_lab_dir, "artifacts" }));
 
     const project_dir = try vmProjectDir(allocator, vm_lab_dir, project);
     defer allocator.free(project_dir);
     try ensurePath(project_dir);
-    try ensurePath(try pathJoin(allocator, &.{ project_dir, "logs" }));
-    try ensurePath(try pathJoin(allocator, &.{ project_dir, "matrix" }));
-    try ensurePath(try pathJoin(allocator, &.{ project_dir, "release" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ project_dir, "logs" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ project_dir, "matrix" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ project_dir, "release" }));
 
-    const readme = try pathJoin(allocator, &.{ vm_lab_dir, "README.md" });
+    const readme = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "README.md" });
     defer allocator.free(readme);
     try writeFile(
         readme,
@@ -2437,8 +2429,8 @@ fn cmdVmRegisterHost(allocator: Allocator, _: []const u8, args: []const []const 
     const transport = mapGetOr(&flags, "transport", "ssh");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
 
-    try ensurePath(try pathJoin(allocator, &.{ vm_lab_dir, "hosts", host_name }));
-    const manifest = try pathJoin(allocator, &.{ vm_lab_dir, "hosts", host_name, "host.env" });
+    try ensurePath(try path_util.pathJoin(allocator, &.{ vm_lab_dir, "hosts", host_name }));
+    const manifest = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "hosts", host_name, "host.env" });
     defer allocator.free(manifest);
     const data = try std.fmt.allocPrint(
         allocator,
@@ -2477,20 +2469,20 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
 
     const project_dir = try vmProjectDir(allocator, vm_lab_dir, project);
     defer allocator.free(project_dir);
-    const vm_dir = try pathJoin(allocator, &.{ project_dir, vm_name });
+    const vm_dir = try path_util.pathJoin(allocator, &.{ project_dir, vm_name });
     defer allocator.free(vm_dir);
     try ensurePath(vm_dir);
-    try ensurePath(try pathJoin(allocator, &.{ vm_lab_dir, "images" }));
+    try ensurePath(try path_util.pathJoin(allocator, &.{ vm_lab_dir, "images" }));
 
-    const base_img = try pathJoin(allocator, &.{ vm_lab_dir, "images", "ubuntu-noble-amd64.qcow2" });
+    const base_img = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "images", "ubuntu-noble-amd64.qcow2" });
     defer allocator.free(base_img);
-    const overlay_img = try pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
+    const overlay_img = try path_util.pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
     defer allocator.free(overlay_img);
-    const cloud_init_dir = try pathJoin(allocator, &.{ vm_dir, "cloud-init" });
+    const cloud_init_dir = try path_util.pathJoin(allocator, &.{ vm_dir, "cloud-init" });
     defer allocator.free(cloud_init_dir);
-    const user_data = try pathJoin(allocator, &.{ cloud_init_dir, "user-data" });
+    const user_data = try path_util.pathJoin(allocator, &.{ cloud_init_dir, "user-data" });
     defer allocator.free(user_data);
-    const meta_data = try pathJoin(allocator, &.{ cloud_init_dir, "meta-data" });
+    const meta_data = try path_util.pathJoin(allocator, &.{ cloud_init_dir, "meta-data" });
     defer allocator.free(meta_data);
 
     if (std.fs.openFileAbsolute(base_img, .{}) catch null == null) {
@@ -2512,7 +2504,7 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
         try runInherit(allocator, &.{ "qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base_img, overlay_img, "80G" }, root, null);
     }
 
-    const ssh_key = try pathJoin(allocator, &.{ vm_dir, "id_ed25519" });
+    const ssh_key = try path_util.pathJoin(allocator, &.{ vm_dir, "id_ed25519" });
     defer allocator.free(ssh_key);
     if (std.fs.openFileAbsolute(ssh_key, .{}) catch null == null) {
         try runInherit(allocator, &.{ "ssh-keygen", "-t", "ed25519", "-N", "", "-f", ssh_key }, root, null);
@@ -2538,7 +2530,7 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
     defer allocator.free(meta_data_text);
     try writeFile(meta_data, meta_data_text);
 
-    const vm_env_path = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
+    const vm_env_path = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env_path);
     const vm_env = try std.fmt.allocPrint(
         allocator,
@@ -2599,9 +2591,9 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
     const vm_name = mapGetOr(&flags, "name", "linux-matrix");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
 
-    const vm_dir = try pathJoin(allocator, &.{ vm_lab_dir, "projects", project, vm_name });
+    const vm_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, vm_name });
     defer allocator.free(vm_dir);
-    const vm_env_path = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
+    const vm_env_path = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env_path);
     if (std.fs.openFileAbsolute(vm_env_path, .{}) catch null == null) {
         std.debug.print("vm metadata missing: {s}\ncreate vm first: vm-create-linux\n", .{vm_env_path});
@@ -2617,7 +2609,7 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
     }
 
     const disk_path = if (vm.vm_disk_image.len > 0) vm.vm_disk_image else blk: {
-        break :blk try pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
+        break :blk try path_util.pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
     };
     defer if (disk_path.ptr != vm.vm_disk_image.ptr) allocator.free(disk_path);
     if (std.fs.openFileAbsolute(disk_path, .{}) catch null == null) {
@@ -2626,7 +2618,7 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
     }
 
     const cloud_init_dir = if (vm.vm_cloud_init_dir.len > 0) vm.vm_cloud_init_dir else blk: {
-        break :blk try pathJoin(allocator, &.{ vm_dir, "cloud-init" });
+        break :blk try path_util.pathJoin(allocator, &.{ vm_dir, "cloud-init" });
     };
     defer if (cloud_init_dir.ptr != vm.vm_cloud_init_dir.ptr) allocator.free(cloud_init_dir);
     if (std.fs.openDirAbsolute(cloud_init_dir, .{}) catch null == null) {
@@ -2779,9 +2771,9 @@ fn cmdVmRunLinuxMatrix(allocator: Allocator, root: []const u8, args: []const []c
     const matrix_behavioral = mapGetOr(&flags, "behavioral", "1");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
 
-    const vm_dir = try pathJoin(allocator, &.{ vm_lab_dir, "projects", project, vm_name });
+    const vm_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, vm_name });
     defer allocator.free(vm_dir);
-    const vm_env_path = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
+    const vm_env_path = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env_path);
 
     if (std.fs.openFileAbsolute(vm_env_path, .{}) catch null == null) {
@@ -2820,7 +2812,7 @@ fn cmdVmRunLinuxMatrix(allocator: Allocator, root: []const u8, args: []const []c
 
     const ts = try nowStamp(allocator);
     defer allocator.free(ts);
-    const local_matrix_dir = try pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ vm_name, ts }) });
+    const local_matrix_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ vm_name, ts }) });
     try ensurePath(local_matrix_dir);
 
     try runInherit(
@@ -2849,7 +2841,7 @@ fn cmdVmRunRemoteMatrix(allocator: Allocator, root: []const u8, args: []const []
     const ssh_key = mapGetOr(&flags, "ssh-key", "");
     const vm_lab_dir = mapGetOr(&flags, "lab-dir", defaultVmLabDir());
 
-    const manifest = try pathJoin(allocator, &.{ vm_lab_dir, "hosts", host_name, "host.env" });
+    const manifest = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "hosts", host_name, "host.env" });
     defer allocator.free(manifest);
     if (std.fs.openFileAbsolute(manifest, .{}) catch null == null) {
         std.debug.print("host not registered: {s}\n", .{host_name});
@@ -2917,7 +2909,7 @@ fn cmdVmRunRemoteMatrix(allocator: Allocator, root: []const u8, args: []const []
 
     const ts = try nowStamp(allocator);
     defer allocator.free(ts);
-    const local_matrix_dir = try pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host_name, ts }) });
+    const local_matrix_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host_name, ts }) });
     try ensurePath(local_matrix_dir);
 
     try runInherit(
@@ -2951,14 +2943,14 @@ fn cmdVmGaCollectAndBundle(allocator: Allocator, root: []const u8, args: []const
         release_id = try std.fmt.allocPrint(allocator, "ga-{s}", .{ts});
     }
 
-    const project_matrix_root = try pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix" });
+    const project_matrix_root = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix" });
     defer allocator.free(project_matrix_root);
     if (std.fs.openDirAbsolute(project_matrix_root, .{}) catch null == null) {
         std.debug.print("matrix root missing: {s}\n", .{project_matrix_root});
         return ToolError.NotFound;
     }
 
-    const stage_matrix_root = try pathJoin(allocator, &.{ root, "artifacts", "matrix-ga", release_id.? });
+    const stage_matrix_root = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix-ga", release_id.? });
     try ensurePath(stage_matrix_root);
 
     const hosts = [_][]const u8{ linux_host, macos_host, windows_host };
@@ -2988,14 +2980,14 @@ fn cmdVmGaCollectAndBundle(allocator: Allocator, root: []const u8, args: []const
         }.lessThan);
         const latest = matches.items[matches.items.len - 1];
 
-        const src = try pathJoin(allocator, &.{ project_matrix_root, latest });
+        const src = try path_util.pathJoin(allocator, &.{ project_matrix_root, latest });
         defer allocator.free(src);
-        const dst = try pathJoin(allocator, &.{ stage_matrix_root, latest });
+        const dst = try path_util.pathJoin(allocator, &.{ stage_matrix_root, latest });
         defer allocator.free(dst);
         try copyTree(allocator, src, dst);
     }
 
-    const out = try pathJoin(allocator, &.{ stage_matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) });
+    const out = try path_util.pathJoin(allocator, &.{ stage_matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) });
     try cmdMatrixCollect(allocator, root, &.{ "--matrix-root", stage_matrix_root, "--out", out });
     try cmdReleaseBundle(allocator, root, &.{ "--release-id", release_id.?, "--matrix-root", stage_matrix_root });
 
@@ -3013,7 +3005,7 @@ fn cmdVmImageSources(allocator: Allocator, _: []const u8, args: []const []const 
     }
 
     const vm_lab_dir = defaultVmLabDir();
-    const out_dir = mapGetOr(&flags, "out-dir", try pathJoin(allocator, &.{ vm_lab_dir, "images" }));
+    const out_dir = mapGetOr(&flags, "out-dir", try path_util.pathJoin(allocator, &.{ vm_lab_dir, "images" }));
     const check = std.mem.eql(u8, mapGetOr(&flags, "check", "0"), "1");
     const download = std.mem.eql(u8, mapGetOr(&flags, "download-ubuntu", "0"), "1");
 
@@ -3052,7 +3044,7 @@ fn cmdVmImageSources(allocator: Allocator, _: []const u8, args: []const []const 
     if (download) {
         if (!(try commandExists(allocator, "curl"))) return ToolError.MissingDependency;
         try ensurePath(out_dir);
-        const out_file = try pathJoin(allocator, &.{ out_dir, try std.fmt.allocPrint(allocator, "noble-server-cloudimg-{s}.img", .{arch}) });
+        const out_file = try path_util.pathJoin(allocator, &.{ out_dir, try std.fmt.allocPrint(allocator, "noble-server-cloudimg-{s}.img", .{arch}) });
         defer allocator.free(out_file);
         const tmp = try std.fmt.allocPrint(allocator, "{s}.partial", .{out_file});
         defer allocator.free(tmp);
@@ -3091,9 +3083,9 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
 
     const ssh_port: []const u8 = flags.get("ssh-port") orelse if (std.mem.eql(u8, platform, "linux")) "2222" else if (std.mem.eql(u8, platform, "windows")) "2223" else "2224";
 
-    const vm_dir = try pathJoin(allocator, &.{ vm_root, "alldriver", platform, name });
+    const vm_dir = try path_util.pathJoin(allocator, &.{ vm_root, "alldriver", platform, name });
     try ensurePath(vm_dir);
-    const image_path = try pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
+    const image_path = try path_util.pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
     if (std.fs.openFileAbsolute(image_path, .{}) catch null == null) {
         try runInherit(allocator, &.{ "qemu-img", "create", "-f", "qcow2", image_path, try std.fmt.allocPrint(allocator, "{s}G", .{disk_gb}) }, root, null);
     }
@@ -3107,7 +3099,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
         return ToolError.NotFound;
     }
 
-    const vm_env = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
+    const vm_env = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     const vm_env_txt = try std.fmt.allocPrint(
         allocator,
         "VM_NAME=\"{s}\"\nVM_PLATFORM=\"{s}\"\nVM_DIR=\"{s}\"\nVM_IMAGE=\"{s}\"\nVM_ISO=\"{s}\"\nVM_MEMORY_MB=\"{s}\"\nVM_CPUS=\"{s}\"\nVM_SSH_PORT=\"{s}\"\nVM_HOST_SHARE_PATH=\"{s}\"\n",
@@ -3124,7 +3116,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
 
 fn cmdVmQemuList(allocator: Allocator, _: []const u8, _: []const []const u8) !void {
     const vm_root = envOrDefault("ALLDRIVER_VM_ROOT", "/tmp/codex-vms");
-    const base = try pathJoin(allocator, &.{ vm_root, "alldriver" });
+    const base = try path_util.pathJoin(allocator, &.{ vm_root, "alldriver" });
 
     if (std.fs.openDirAbsolute(base, .{}) catch null == null) {
         std.debug.print("no VMs registered under {s}\n", .{base});
@@ -3139,7 +3131,7 @@ fn cmdVmQemuList(allocator: Allocator, _: []const u8, _: []const []const u8) !vo
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.eql(u8, std.fs.path.basename(entry.path), "vm.env")) continue;
-        const env_path = try pathJoin(allocator, &.{ base, entry.path });
+        const env_path = try path_util.pathJoin(allocator, &.{ base, entry.path });
         defer allocator.free(env_path);
         var kv = try parseKvFile(allocator, env_path);
         defer freeStringMap(allocator, &kv);
@@ -3164,9 +3156,9 @@ fn cmdVmQemuStart(allocator: Allocator, root: []const u8, args: []const []const 
     const platform = flags.get("platform") orelse return ToolError.InvalidArgs;
     const foreground = std.mem.eql(u8, mapGetOr(&flags, "foreground", "0"), "1");
 
-    const vm_dir = try pathJoin(allocator, &.{ vm_root, "alldriver", platform, name });
+    const vm_dir = try path_util.pathJoin(allocator, &.{ vm_root, "alldriver", platform, name });
     defer allocator.free(vm_dir);
-    const vm_env = try pathJoin(allocator, &.{ vm_dir, "vm.env" });
+    const vm_env = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env);
     if (std.fs.openFileAbsolute(vm_env, .{}) catch null == null) {
         std.debug.print("vm env not found: {s}\n", .{vm_env});
@@ -3412,7 +3404,7 @@ test "forbidden marker scan detects source markers and ignores artifacts" {
     defer allocator.free(cwd_abs);
     const rel_root = try tmpAbsPath(allocator, tmp, "");
     defer allocator.free(rel_root);
-    const abs_root = try pathJoin(allocator, &.{ cwd_abs, rel_root });
+    const abs_root = try path_util.pathJoin(allocator, &.{ cwd_abs, rel_root });
     defer allocator.free(abs_root);
 
     var hits = try scanForbiddenMarkers(allocator, abs_root, 20);

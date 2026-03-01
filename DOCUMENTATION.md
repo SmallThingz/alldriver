@@ -158,10 +158,10 @@ Notes:
 - Tools: `zig build tools -- download-lightpanda [--cache-dir=...] [--tag=...] [--sha256=...]`
 - The downloader resolves release assets for the current runtime OS/arch and installs into managed cache so normal `discover()` picks it up.
 
-## Cleanup Notes
+## Runtime Notes
 
-- Deprecated launch compatibility option `legacy_automation_markers` was removed from launch/webview option types.
 - Browser launch waits for local debug endpoint readiness before returning a session, bounded by `TimeoutPolicy.launch_ms`.
+- `driver.modern.launch*` and `driver.modern.attach*` return only after protocol readiness checks complete.
 
 ## Compile-Time Extensions
 
