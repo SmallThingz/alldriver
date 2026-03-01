@@ -100,6 +100,7 @@ pub const LaunchOptions = struct {
     profile_dir: ?[]const u8 = null,
     headless: bool = false,
     ignore_tls_errors: bool = false,
+    include_lightpanda_browser: bool = true,
     gecko_stealth_prefs: bool = false,
     timeout_policy: ?TimeoutPolicy = null,
     args: []const []const u8 = &.{},

@@ -115,7 +115,7 @@ pub fn setLocalStorage(session: *Session, key: []const u8, value: []const u8) !v
 
     const script = try std.fmt.allocPrint(
         session.allocator,
-        "(function(){localStorage.setItem(\"{s}\",\"{s}\"); return true;})();",
+        "(function(){{localStorage.setItem(\"{s}\",\"{s}\"); return true;}})();",
         .{ k, v },
     );
     defer session.allocator.free(script);

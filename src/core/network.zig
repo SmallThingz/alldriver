@@ -49,7 +49,7 @@ pub fn clearInterceptRules(session: *Session) !void {
     }
 
     while (session.rules.items.len > 0) {
-        const rule = session.rules.pop();
+        const rule = session.rules.pop().?;
         freeRule(session.allocator, rule);
     }
 }

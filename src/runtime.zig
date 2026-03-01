@@ -62,6 +62,9 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     }
 
     try raw_args.append(allocator, opts.install.path);
+    if (shouldIncludeLightpandaBrowserSubcommand(opts)) {
+        try raw_args.append(allocator, "browser");
+    }
 
     const debug_port = try reserveLocalPort();
     try appendDefaultArgs(
@@ -382,6 +385,20 @@ fn hasTlsAliasArg(user_args: []const []const u8) bool {
     return false;
 }
 
+fn shouldIncludeLightpandaBrowserSubcommand(opts: types.LaunchOptions) bool {
+    if (opts.install.kind != .lightpanda) return false;
+    if (!opts.include_lightpanda_browser) return false;
+
+    for (opts.args) |arg| {
+        if (std.mem.eql(u8, arg, "browser")) return false;
+    }
+
+    const exe_name = std.fs.path.basename(opts.install.path);
+    if (std.ascii.eqlIgnoreCase(exe_name, "lightpanda-browser")) return false;
+    if (std.ascii.eqlIgnoreCase(exe_name, "lightpanda-browser.exe")) return false;
+    return true;
+}
+
 fn isTlsAliasArg(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--no-tls") or
         std.mem.eql(u8, arg, "--ignore-tls-errors") or
@@ -685,6 +702,49 @@ test "chromium tls ignore uses supported certificate flag" {
     try appendDefaultArgs(allocator, &args, &temps, opts, true, .cdp, 9222);
     try std.testing.expect(containsArg(args.items, "--ignore-certificate-errors"));
     try std.testing.expect(!containsArg(args.items, "--no-tls"));
+}
+
+test "lightpanda browser subcommand is enabled by default and can be disabled" {
+    const opts_default: types.LaunchOptions = .{
+        .install = .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .path = "/usr/bin/lightpanda",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .args = &.{},
+    };
+    try std.testing.expect(shouldIncludeLightpandaBrowserSubcommand(opts_default));
+
+    const opts_disabled: types.LaunchOptions = .{
+        .install = opts_default.install,
+        .profile_mode = .ephemeral,
+        .include_lightpanda_browser = false,
+        .args = &.{},
+    };
+    try std.testing.expect(!shouldIncludeLightpandaBrowserSubcommand(opts_disabled));
+
+    const opts_explicit: types.LaunchOptions = .{
+        .install = opts_default.install,
+        .profile_mode = .ephemeral,
+        .args = &.{"browser"},
+    };
+    try std.testing.expect(!shouldIncludeLightpandaBrowserSubcommand(opts_explicit));
+
+    const opts_browser_binary: types.LaunchOptions = .{
+        .install = .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .path = "/usr/bin/lightpanda-browser",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .args = &.{},
+    };
+    try std.testing.expect(!shouldIncludeLightpandaBrowserSubcommand(opts_browser_binary));
 }
 
 fn containsArg(args: []const []const u8, want: []const u8) bool {

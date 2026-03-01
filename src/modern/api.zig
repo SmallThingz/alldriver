@@ -160,6 +160,7 @@ fn cloneLaunchOptions(allocator: std.mem.Allocator, opts: types.LaunchOptions) !
         .profile_dir = profile_dir,
         .headless = opts.headless,
         .ignore_tls_errors = opts.ignore_tls_errors,
+        .include_lightpanda_browser = opts.include_lightpanda_browser,
         .gecko_stealth_prefs = opts.gecko_stealth_prefs,
         .timeout_policy = opts.timeout_policy,
         .args = args,
