@@ -1671,7 +1671,6 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
             "docs/support-matrix.md",
             "docs/path-discovery.md",
             "docs/extensions.md",
-            "docs/migration-v1.md",
             "docs/known-limitations.md",
             "docs/vm-matrix.md",
             "docs/vm-image-sources.md",
@@ -2120,7 +2119,7 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         return ToolError.NotFound;
     }
 
-    const required_docs = [_][]const u8{ "known-limitations.md", "migration-v1.md", "support-matrix.md" };
+    const required_docs = [_][]const u8{ "known-limitations.md", "support-matrix.md" };
     for (required_docs) |doc| {
         const src_doc = try pathJoin(allocator, &.{ root, "docs", doc });
         defer allocator.free(src_doc);

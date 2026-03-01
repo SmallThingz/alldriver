@@ -160,6 +160,36 @@ pub fn stopTracing(session: *Session) ![]u8 {
     return callCdp(session, "Tracing.end", "{}");
 }
 
+pub fn releaseHandle(session: *Session, handle_id: []const u8) !void {
+    switch (session.transport) {
+        .cdp_ws => {
+            const handle = try escapeJsonString(session.allocator, handle_id);
+            defer session.allocator.free(handle);
+            const params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"objectId\":\"{s}\"}}",
+                .{handle},
+            );
+            defer session.allocator.free(params);
+            const raw = try callCdp(session, "Runtime.releaseObject", params);
+            defer session.allocator.free(raw);
+        },
+        .bidi_ws => {
+            const context_id = session.browsing_context_id orelse return error.SessionNotReady;
+            const handle = try escapeJsonString(session.allocator, handle_id);
+            defer session.allocator.free(handle);
+            const params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"target\":{{\"context\":\"{s}\"}},\"handles\":[\"{s}\"]}}",
+                .{ context_id, handle },
+            );
+            defer session.allocator.free(params);
+            const raw = try callBidi(session, "script.disown", params);
+            defer session.allocator.free(raw);
+        },
+    }
+}
+
 pub fn enableNetworkInterception(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {

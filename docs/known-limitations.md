@@ -3,7 +3,7 @@
 ## Protocol Surface Variance
 - Protocol features still depend on externally exposed browser endpoints and installed driver/runtime versions.
 - Unsupported protocol operations return typed capability/protocol errors instead of silent no-op behavior.
-- `modern` exposes CDP/BiDi-first domain APIs, but some operations remain adapter-specific (for example, handle lifecycle operations can return typed unsupported errors).
+- `modern` exposes CDP/BiDi-first domain APIs, but some operations remain adapter-specific when remote endpoints do not expose equivalent features.
 
 ## Scraper-Oriented Scope Boundaries
 - No Cloudflare-specific solver API is provided in core.
@@ -29,8 +29,9 @@
 - Opt in to insecure cert handling with `ignore_tls_errors = true` when this behavior is expected for test infrastructure.
 
 ## Managed Cache Packaging
-- Managed cache install supports direct binary payloads (`file://` and `http://`).
-- Archive extraction/packaging normalization is expected to be handled upstream by distribution tooling.
+- Managed cache install supports direct binary payloads (`file://`, `http://`, `https://`) and common archives (`.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.xz`, `.txz`).
+- HTTPS managed downloads currently rely on `curl` being available on host PATH.
+- Archive executable resolution uses browser catalog executable hints and can require `archive_executable_name` when archives do not contain canonical executable names.
 
 ## Strict GA Policy
 - Tier-1 and Tier-2 failures are both release-blocking in strict GA mode.

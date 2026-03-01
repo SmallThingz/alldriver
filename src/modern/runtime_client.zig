@@ -1,5 +1,6 @@
 const std = @import("std");
 const session_mod = @import("session.zig");
+const executor = @import("../protocol/executor.zig");
 
 pub const RuntimeClient = struct {
     session: *session_mod.ModernSession,
@@ -23,9 +24,6 @@ pub const RuntimeClient = struct {
     }
 
     pub fn releaseHandle(self: *RuntimeClient, handle_id: []const u8) !void {
-        _ = self;
-        _ = handle_id;
-        // Handle release is protocol-specific and not uniformly exposed yet.
-        return error.UnsupportedProtocol;
+        try executor.releaseHandle(&self.session.base, handle_id);
     }
 };

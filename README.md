@@ -1,23 +1,32 @@
 # alldriver
 
-> Cross-browser and cross-webview automation for Zig.
+> Modern browser automation for Zig using CDP and BiDi.
 
 [![zig](https://img.shields.io/badge/Zig-0.15.x-orange)](#)
 [![platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#)
 [![protocols](https://img.shields.io/badge/Protocols-CDP%20%7C%20BiDi-green)](#)
 
-`alldriver` is a desktop-first automation framework with a modern protocol surface:
-- `modern`: CDP + BiDi (`cdp_ws`, `bidi_ws`)
+`alldriver` is a library-first automation framework focused on real browser binaries, deterministic discovery, and typed behavior.
 
-## Why alldriver
-- One library for major desktop browsers + webviews.
-- Deterministic discovery with platform probes and known-path catalogs.
-- Strong capability/error contracts (typed unsupported behavior, no silent no-ops).
-- Built-in matrix/release tooling and adversarial detection gates.
+## Why
+
+- CDP/BiDi-first API with typed domain clients.
+- Deterministic browser/webview discovery across desktop platforms.
+- Strong capability and error contracts (explicit unsupported behavior).
+- Built-in adversarial, matrix, and GA tooling.
 
 ## Safety Boundary
-`alldriver` targets standards-compliant automation (testing, QA, scripting).
-It does **not** provide bot-detection bypass/evasion primitives.
+
+`alldriver` is for standards-compliant automation (testing, QA, scripting).
+It does **not** include detection-bypass/evasion primitives.
+
+## Install
+
+```bash
+zig fetch --save git+https://github.com/SmallThingz/alldriver
+```
+
+Then import in `build.zig.zon` and `build.zig` as usual for Zig dependencies.
 
 ## Quick Start
 
@@ -26,7 +35,7 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn run(allocator: std.mem.Allocator) !void {
-    var installs = try driver.discover(allocator, .{
+    var installs = try driver.modern.discover(allocator, .{
         .kinds = &.{ .chrome, .firefox, .lightpanda },
         .allow_managed_download = false,
     }, .{});
@@ -34,113 +43,129 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     if (installs.items.len == 0) return error.NoBrowserFound;
 
-    const install = installs.items[0];
-    if (driver.support_tier.browserTier(install.kind) != .modern) return error.UnsupportedEngine;
-
-    var s = try driver.modern.launch(allocator, .{
-        .install = install,
+    var session = try driver.modern.launch(allocator, .{
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });
-    defer s.deinit();
+    defer session.deinit();
 
-    var page = s.page();
+    var page = session.page();
     try page.navigate("https://example.com");
-    _ = try s.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
+    _ = try session.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
 }
 ```
 
-## API Model
+## API At A Glance
 
 ### Discovery ownership
+
 - `discover(...) -> BrowserInstallList`
 - `discoverWebViews(...) -> WebViewRuntimeList`
-- Caller releases with `.deinit()`.
+- Caller owns memory and must call `.deinit()`.
 
-### Namespace
-- `driver.modern.*` for Chromium/Gecko + CDP-capable webviews.
-- Legacy WebDriver namespace was removed.
+### Modern session domains
 
-### Modern domains
 - `page()`, `runtime()`, `network()`, `input()`, `log()`, `storage()`, `contexts()`, `targets()`
 
-### Wait / events / cache primitives
-- `Session.waitFor(target, opts)` and `Session.waitForAsync(target, opts)` support:
-  `dom_ready`, `network_idle`, `selector_visible`, `url_contains`, `cookie_present`, `storage_key_present`, `js_truthy`.
-- Compatibility wait helpers were removed; use `waitFor(.{ .selector_visible = "..." }, ...)`.
-- `CancelToken` enables cooperative cancellation for sync/async waits.
-- Lifecycle hooks:
-  `onEvent(filter, callback)` / `offEvent(id)` with event kinds:
-  `navigation_started`, `navigation_completed`, `challenge_detected`, `challenge_solved`, `cookie_updated`.
-- Timeout/diagnostics:
-  `setTimeoutPolicy`, `timeoutPolicy`, `lastDiagnostic` with phase-tagged diagnostics.
-- Typed cookie helpers:
-  `queryCookies` and `buildCookieHeaderForUrl`.
-- Built-in session cache:
-  `SessionCacheStore.open/load/save/saveWithOptions/invalidate/cleanupExpired`.
+### Waits and cancellation
 
-### Session cache payload options (v1)
-- Default recommended payload: `cookies + user_agent` (`preset = .http_session`).
-- Presets:
-  - `.minimal`: cookies only
-  - `.http_session`: cookies + user agent
-  - `.rich_state`: cookies + user agent + storage + URL + extra headers
-- Any combination is supported with `SessionCacheOptions.include` (`SessionCachePayloadMask`).
-  The `include` mask allows enabling/disabling each payload component explicitly.
+- `waitFor(target, opts)` + `waitForAsync(target, opts)`
+- Targets: `dom_ready`, `network_idle`, `selector_visible`, `url_contains`, `cookie_present`, `storage_key_present`, `js_truthy`
+- `CancelToken` for cooperative cancel.
 
-## Browser / WebView Coverage
+### Events
 
-### Browser tiers
-- Tier 1: Chromium family + Firefox (platform dependent).
-- Tier 2: Tor, Mullvad, LibreWolf, Pale Moon, SigmaOS (runtime exposure dependent).
+- `onEvent(filter, callback)` / `offEvent(id)`
+- Event kinds: `navigation_started`, `navigation_completed`, `challenge_detected`, `challenge_solved`, `cookie_updated`
 
-### Webviews
-- `webview2`, `electron`, `android_webview`
+### Timeouts and diagnostics
+
+- `setTimeoutPolicy`, `timeoutPolicy`, `lastDiagnostic`
+
+### Cookie helpers
+
+- `queryCookies`
+- `buildCookieHeaderForUrl`
+
+### Session cache
+
+- `SessionCacheStore.open/load/save/saveWithOptions/invalidate/cleanupExpired`
+- Payload presets:
+  - `.minimal` (cookies)
+  - `.http_session` (cookies + user agent)
+  - `.rich_state` (cookies + user agent + storage + url + extra headers)
+- Custom combinations via `SessionCachePayloadMask`.
+
+## Coverage
+
+### Modern (supported)
+
+- Chromium-family browsers via CDP
+- Firefox/Gecko via BiDi
+- CDP-capable webviews: `webview2`, `electron`, `android_webview`
+
+### Unsupported tier (discovered/classified, not driven)
+
+- Targets without usable CDP/BiDi surfaces on the host.
 
 ## External Binary Dependencies
 
 ### Core runtime
-- Browser binaries (at least one target installed): Chrome/Chromium, Edge, Safari, Firefox, Brave, Tor Browser, DuckDuckGo Browser, Mullvad Browser, LibreWolf, Epic, Arc, Vivaldi, SigmaOS, Sidekick, Shift, Opera GX, Pale Moon.
+
+- Browser binaries (at least one target installed): Chrome/Chromium, Edge, Firefox, Brave, Tor Browser, DuckDuckGo Browser, Mullvad Browser, LibreWolf, Epic, Arc, Vivaldi, SigmaOS, Sidekick, Shift, Opera GX, Pale Moon.
 - Optional Lightpanda support via `-Dinclude_lightpanda_browser=true`.
 - Webview/runtime binaries as applicable: `msedgewebview2`, `electron`.
-- Mobile bridges: `adb`, `shizuku` (or `rish`) for Android WebView.
+- Mobile bridge tooling: `adb`, `shizuku` (or `rish`) for Android WebView.
+- Managed cache tooling (only when using managed downloads): `curl` for `https://` payloads, `tar`/`unzip` for archive payload extraction.
 
 ### Tooling / matrix / release (`zig build tools -- ...`)
+
 - Base tooling: `zig`, `git`, `bash`, `tar`, `date`, `which` (or `where` on Windows), `chmod`.
 - Signing: `gpg`.
 - Remote orchestration: `ssh`, `scp`, `rsync`.
 - VM/QEMU workflows: `qemu-system-x86_64`, `qemu-img`, `curl`, `ssh-keygen`.
 - Optional checksum verification: `sha256sum`.
 
-## Commands
+## Common Commands
 
-### Build and test
-- `zig build test`
-- `zig build examples`
+```bash
+# Build + tests
+zig build test
+zig build examples
 
-### Gates
-- `zig build tools -- adversarial-detection-gate --allow-missing-browser=1`
-- `zig build production-gate`
-- `zig build tools -- production-gate --strict-ga`
+# Tool self-check
+zig build tools -- self-test
 
-### Matrix / release
-- `zig build tools -- matrix-run --platform linux`
-- `zig build tools -- matrix-collect`
-- `zig build tools -- release-bundle --release-id v1.0.0`
+# Gates
+zig build tools -- adversarial-detection-gate --allow-missing-browser=1
+zig build production-gate
+zig build tools -- production-gate --strict-ga
 
-### VM / QEMU helpers
-- `zig build tools -- vm-check-prereqs`
-- `zig build tools -- vm-image-sources --check`
-- `zig build tools -- vm-init-lab --project alldriver`
-- `zig build tools -- vm-create-linux --project alldriver --name linux-matrix`
-- `zig build tools -- vm-start-linux --project alldriver --name linux-matrix`
-- `zig build tools -- vm-run-linux-matrix --project alldriver --name linux-matrix`
+# Matrix + release
+zig build tools -- matrix-run --platform linux
+zig build tools -- matrix-collect
+zig build tools -- release-bundle --release-id v1.0.0
+
+# VM / QEMU helpers
+zig build tools -- vm-check-prereqs
+zig build tools -- vm-image-sources --check
+zig build tools -- vm-init-lab --project alldriver
+zig build tools -- vm-create-linux --project alldriver --name linux-matrix
+zig build tools -- vm-start-linux --project alldriver --name linux-matrix
+zig build tools -- vm-run-linux-matrix --project alldriver --name linux-matrix
+```
+
+## Examples
+
+See `/home/a/projects/zig/browser_driver/examples/README.md` for runnable examples.
 
 ## Docs
-- `docs/support-matrix.md`
-- `docs/path-discovery.md`
-- `docs/extensions.md`
-- `docs/migration-v1.md`
-- `docs/known-limitations.md`
-- `docs/vm-matrix.md`
-- `docs/vm-image-sources.md`
+
+- `/home/a/projects/zig/browser_driver/docs/support-matrix.md`
+- `/home/a/projects/zig/browser_driver/docs/path-discovery.md`
+- `/home/a/projects/zig/browser_driver/docs/extensions.md`
+- `/home/a/projects/zig/browser_driver/docs/migration-v1.md`
+- `/home/a/projects/zig/browser_driver/docs/known-limitations.md`
+- `/home/a/projects/zig/browser_driver/docs/vm-matrix.md`
+- `/home/a/projects/zig/browser_driver/docs/vm-image-sources.md`
