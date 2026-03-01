@@ -267,8 +267,21 @@ fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u
     const parsed = try common.parseEndpoint(endpoint, .cdp);
     if (parsed.adapter != .cdp) return error.UnsupportedProtocol;
 
-    const ws_endpoint = try cdpWebSocketEndpoint(session.allocator, parsed);
-    defer session.allocator.free(ws_endpoint);
+    return callCdpOnce(session, parsed, method, params_json, false) catch |err| {
+        if (!isRetriableCdpTransportError(err)) return err;
+        clearCdpEndpointCache(session);
+        return callCdpOnce(session, parsed, method, params_json, true);
+    };
+}
+
+fn callCdpOnce(
+    session: *Session,
+    parsed: common.EndpointParts,
+    method: []const u8,
+    params_json: ?[]const u8,
+    force_refresh_endpoint: bool,
+) ![]u8 {
+    const ws_endpoint = try ensureCdpEndpoint(session, parsed, force_refresh_endpoint);
     const ws_parts = try parseWsUrl(session.allocator, ws_endpoint);
     defer session.allocator.free(ws_parts.path);
 
@@ -283,15 +296,19 @@ fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u
     while (true) {
         const payload = try client.recvText(session.allocator);
         errdefer session.allocator.free(payload);
-        const env = json_rpc.decodeEnvelope(session.allocator, payload) catch {
+        var env = json_rpc.decodeEnvelope(session.allocator, payload) catch {
             session.allocator.free(payload);
             continue;
         };
+        defer env.deinit(session.allocator);
         if (env.id == null or env.id.? != id) {
             session.allocator.free(payload);
             continue;
         }
-        if (env.has_error) return error.ProtocolCommandFailed;
+        if (env.has_error) {
+            recordProtocolErrorDiagnostic(session, .cdp_ws, method, env, payload);
+            return error.ProtocolCommandFailed;
+        }
         return payload;
     }
 }
@@ -312,17 +329,76 @@ fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]
     while (true) {
         const payload = try client.recvText(session.allocator);
         errdefer session.allocator.free(payload);
-        const env = json_rpc.decodeEnvelope(session.allocator, payload) catch {
+        var env = json_rpc.decodeEnvelope(session.allocator, payload) catch {
             session.allocator.free(payload);
             continue;
         };
+        defer env.deinit(session.allocator);
         if (env.id == null or env.id.? != id) {
             session.allocator.free(payload);
             continue;
         }
-        if (env.has_error) return error.ProtocolCommandFailed;
+        if (env.has_error) {
+            recordProtocolErrorDiagnostic(session, .bidi_ws, method, env, payload);
+            return error.ProtocolCommandFailed;
+        }
         return payload;
     }
+}
+
+fn ensureCdpEndpoint(
+    session: *Session,
+    parsed: common.EndpointParts,
+    force_refresh: bool,
+) ![]const u8 {
+    if (force_refresh) clearCdpEndpointCache(session);
+    if (session.cdp_ws_endpoint == null) {
+        session.cdp_ws_endpoint = try cdpWebSocketEndpoint(session.allocator, parsed);
+    }
+    return session.cdp_ws_endpoint.?;
+}
+
+fn clearCdpEndpointCache(session: *Session) void {
+    if (session.cdp_ws_endpoint) |cached| {
+        session.allocator.free(cached);
+        session.cdp_ws_endpoint = null;
+    }
+}
+
+fn isRetriableCdpTransportError(err: anyerror) bool {
+    return err == error.ConnectionRefused or
+        err == error.ConnectionResetByPeer or
+        err == error.ConnectionClosed or
+        err == error.BrokenPipe;
+}
+
+fn recordProtocolErrorDiagnostic(
+    session: *Session,
+    transport: common.TransportKind,
+    method: []const u8,
+    env: json_rpc.RpcEnvelope,
+    payload: []const u8,
+) void {
+    const error_message = env.error_message orelse "protocol command failed";
+    const payload_preview = if (payload.len <= 240) payload else payload[0..240];
+    var code_buf: [64]u8 = undefined;
+    const code = if (env.error_code) |error_code|
+        std.fmt.bufPrint(&code_buf, "rpc_{d}", .{error_code}) catch "ProtocolCommandFailed"
+    else
+        "ProtocolCommandFailed";
+
+    var message_buf: [640]u8 = undefined;
+    const message = std.fmt.bufPrint(
+        &message_buf,
+        "{s} failed: {s}; payload={s}",
+        .{ method, error_message, payload_preview },
+    ) catch "protocol command failed";
+    session.recordDiagnostic(.{
+        .phase = .overall,
+        .code = code,
+        .message = message,
+        .transport = @tagName(transport),
+    });
 }
 
 fn cdpWebSocketEndpoint(
@@ -494,4 +570,31 @@ test "first json list endpoint prefers page targets" {
     );
     defer allocator.free(ws_url);
     try std.testing.expectEqualStrings("ws://127.0.0.1:9222/devtools/page/abc", ws_url);
+}
+
+test "cdp endpoint cache pins websocket endpoint for session" {
+    const allocator = std.testing.allocator;
+    var session = Session{
+        .allocator = allocator,
+        .id = 1,
+        .mode = .browser,
+        .transport = .cdp_ws,
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, "attached"),
+            .version = null,
+            .source = .explicit,
+        },
+        .capability_set = cdp.capabilities(),
+        .adapter_kind = .cdp,
+        .endpoint = try allocator.dupe(u8, "cdp://127.0.0.1:9222/devtools/page/abc"),
+    };
+    defer session.deinit();
+
+    const parsed = try common.parseEndpoint(session.endpoint.?, .cdp);
+    const first = try ensureCdpEndpoint(&session, parsed, false);
+    const second = try ensureCdpEndpoint(&session, parsed, false);
+    try std.testing.expectEqualStrings("ws://127.0.0.1:9222/devtools/page/abc", first);
+    try std.testing.expect(first.ptr == second.ptr);
 }

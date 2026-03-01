@@ -3,6 +3,13 @@ const std = @import("std");
 pub const RpcEnvelope = struct {
     id: ?u64,
     has_error: bool,
+    error_code: ?i64 = null,
+    error_message: ?[]u8 = null,
+
+    pub fn deinit(self: *RpcEnvelope, allocator: std.mem.Allocator) void {
+        if (self.error_message) |message| allocator.free(message);
+        self.* = undefined;
+    }
 };
 
 pub fn encodeRequest(
@@ -59,11 +66,26 @@ pub fn decodeEnvelope(allocator: std.mem.Allocator, response_json: []const u8) !
         id = parseIdValue(id_value);
     }
 
-    const has_error = root.object.get("error") != null;
+    var has_error = false;
+    var error_code: ?i64 = null;
+    var error_message: ?[]u8 = null;
+    if (root.object.get("error")) |error_value| {
+        has_error = true;
+        if (error_value == .object) {
+            error_code = getErrorCode(error_value.object);
+            if (error_value.object.get("message")) |message_value| {
+                if (message_value == .string) {
+                    error_message = try allocator.dupe(u8, message_value.string);
+                }
+            }
+        }
+    }
 
     return .{
         .id = id,
         .has_error = has_error,
+        .error_code = error_code,
+        .error_message = error_message,
     };
 }
 
@@ -71,6 +93,15 @@ fn parseIdValue(value: std.json.Value) ?u64 {
     return switch (value) {
         .integer => |v| if (v >= 0) @as(u64, @intCast(v)) else null,
         .string => |s| std.fmt.parseInt(u64, s, 10) catch null,
+        else => null,
+    };
+}
+
+fn getErrorCode(obj: std.json.ObjectMap) ?i64 {
+    const value = obj.get("code") orelse return null;
+    return switch (value) {
+        .integer => |n| n,
+        .float => |n| @intFromFloat(n),
         else => null,
     };
 }
@@ -86,14 +117,20 @@ test "encode request" {
 
 test "decode envelope with error" {
     const allocator = std.testing.allocator;
-    const env = try decodeEnvelope(allocator, "{\"id\":11,\"error\":{\"message\":\"boom\"}}");
+    var env = try decodeEnvelope(allocator, "{\"id\":11,\"error\":{\"code\":-32000,\"message\":\"boom\"}}");
+    defer env.deinit(allocator);
     try std.testing.expectEqual(@as(?u64, 11), env.id);
     try std.testing.expect(env.has_error);
+    try std.testing.expectEqual(@as(?i64, -32000), env.error_code);
+    try std.testing.expectEqualStrings("boom", env.error_message.?);
 }
 
 test "decode envelope event message" {
     const allocator = std.testing.allocator;
-    const env = try decodeEnvelope(allocator, "{\"method\":\"Network.requestWillBeSent\",\"params\":{}}");
+    var env = try decodeEnvelope(allocator, "{\"method\":\"Network.requestWillBeSent\",\"params\":{}}");
+    defer env.deinit(allocator);
     try std.testing.expectEqual(@as(?u64, null), env.id);
     try std.testing.expect(!env.has_error);
+    try std.testing.expectEqual(@as(?i64, null), env.error_code);
+    try std.testing.expectEqual(@as(?[]u8, null), env.error_message);
 }

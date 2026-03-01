@@ -19,6 +19,7 @@ pub const Session = struct {
     capability_set: types.CapabilitySet,
     adapter_kind: common.AdapterKind,
     endpoint: ?[]u8,
+    cdp_ws_endpoint: ?[]u8 = null,
     current_url: ?[]u8 = null,
     browsing_context_id: ?[]u8 = null,
     request_id: u64 = 0,
@@ -44,6 +45,7 @@ pub const Session = struct {
 
         if (self.current_url) |url| self.allocator.free(url);
         if (self.endpoint) |ep| self.allocator.free(ep);
+        if (self.cdp_ws_endpoint) |ep| self.allocator.free(ep);
         if (self.browsing_context_id) |ctx| self.allocator.free(ctx);
 
         if (self.owned_argv) |args| {

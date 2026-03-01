@@ -7,6 +7,7 @@ const session_mod = @import("core/session.zig");
 const common = @import("protocol/common.zig");
 const cdp = @import("protocol/cdp/adapter.zig");
 const bidi = @import("protocol/bidi/adapter.zig");
+const http_client = @import("transport/http_client.zig");
 const extensions = @import("extensions/api.zig");
 
 pub const Session = session_mod.Session;
@@ -83,14 +84,17 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     var child = std.process.Child.init(final_args, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
     child.spawn() catch return error.SpawnFailed;
     errdefer {
         _ = child.kill() catch {};
     }
 
     const launch_timeout_ms = (opts.timeout_policy orelse types.TimeoutPolicy{}).launch_ms;
-    waitForLocalDebugEndpoint(debug_port, launch_timeout_ms) catch return error.Timeout;
+    waitForDebugEndpointReady(adapter_kind, &child, debug_port, launch_timeout_ms) catch |err| return switch (err) {
+        error.SpawnFailed => error.SpawnFailed,
+        else => error.Timeout,
+    };
 
     const install_copy: types.BrowserInstall = .{
         .kind = opts.install.kind,
@@ -222,7 +226,7 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
     child.spawn() catch return error.SpawnFailed;
     errdefer {
         _ = child.kill() catch {};
@@ -519,18 +523,45 @@ fn reserveLocalPort() !u16 {
     return std.mem.bigToNative(u16, real.port);
 }
 
-fn waitForLocalDebugEndpoint(port: u16, timeout_ms: u32) !void {
+fn waitForDebugEndpointReady(
+    adapter: common.AdapterKind,
+    child: *std.process.Child,
+    port: u16,
+    timeout_ms: u32,
+) !void {
     const address = try std.net.Address.parseIp4("127.0.0.1", port);
     const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     while (std.time.milliTimestamp() < deadline_ms) {
-        const stream = std.net.tcpConnectToAddress(address) catch {
-            std.Thread.sleep(25 * std.time.ns_per_ms);
-            continue;
-        };
-        stream.close();
-        return;
+        if (childExitedPosixNoHang(child)) return error.SpawnFailed;
+        switch (adapter) {
+            .cdp => {
+                if (cdpHttpEndpointReady(port)) return;
+            },
+            .bidi => {
+                const stream = std.net.tcpConnectToAddress(address) catch {
+                    std.Thread.sleep(25 * std.time.ns_per_ms);
+                    continue;
+                };
+                stream.close();
+                return;
+            },
+        }
+        std.Thread.sleep(25 * std.time.ns_per_ms);
     }
     return error.Timeout;
+}
+
+fn childExitedPosixNoHang(child: *std.process.Child) bool {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return false;
+    const wait_result = std.posix.waitpid(child.id, std.posix.W.NOHANG);
+    return wait_result.pid != 0;
+}
+
+fn cdpHttpEndpointReady(port: u16) bool {
+    const response = http_client.getJson(std.heap.page_allocator, "127.0.0.1", port, "/json/version") catch return false;
+    defer std.heap.page_allocator.free(response.body);
+    if (response.status_code < 200 or response.status_code >= 300) return false;
+    return std.mem.indexOf(u8, response.body, "webSocketDebuggerUrl") != null;
 }
 
 test "attach supports cdp and bidi endpoints only" {
