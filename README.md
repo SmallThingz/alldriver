@@ -162,9 +162,6 @@ See `/home/a/projects/zig/browser_driver/examples/README.md` for runnable exampl
 
 ## Docs
 
-- `/home/a/projects/zig/browser_driver/docs/support-matrix.md`
-- `/home/a/projects/zig/browser_driver/docs/path-discovery.md`
-- `/home/a/projects/zig/browser_driver/docs/extensions.md`
-- `/home/a/projects/zig/browser_driver/docs/known-limitations.md`
-- `/home/a/projects/zig/browser_driver/docs/vm-matrix.md`
-- `/home/a/projects/zig/browser_driver/docs/vm-image-sources.md`
+- `/home/a/projects/zig/browser_driver/DOCUMENTATION.md`
+- `/home/a/projects/zig/browser_driver/CONTRIBUTING.md`
+- `/home/a/projects/zig/browser_driver/SECURITY.md`

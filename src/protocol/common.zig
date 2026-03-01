@@ -93,10 +93,7 @@ pub fn parseEndpoint(endpoint: []const u8, default_adapter: AdapterKind) !Endpoi
         adapter = .cdp;
     } else if (std.mem.eql(u8, scheme, "bidi")) {
         adapter = .bidi;
-    } else if (std.mem.eql(u8, scheme, "http") or
-        std.mem.eql(u8, scheme, "https") or
-        std.mem.eql(u8, scheme, "webdriver"))
-    {
+    } else {
         return error.UnsupportedProtocol;
     }
 
@@ -130,4 +127,11 @@ test "preferred adapter contract stays driverless for chromium and gecko" {
     try std.testing.expectEqual(AdapterKind.bidi, preferredAdapterForEngine(.gecko));
     try std.testing.expectEqual(TransportKind.cdp_ws, transportForAdapter(.cdp));
     try std.testing.expectEqual(TransportKind.bidi_ws, transportForAdapter(.bidi));
+}
+
+test "parse endpoint rejects unsupported schemes" {
+    try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("http://127.0.0.1:4444/session", .cdp));
+    try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("https://127.0.0.1/session", .cdp));
+    try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("webdriver://127.0.0.1/session", .cdp));
+    try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("foo://127.0.0.1:9222", .cdp));
 }

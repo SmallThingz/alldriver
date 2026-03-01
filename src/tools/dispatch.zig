@@ -1668,12 +1668,9 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
     {
         const required_files = [_][]const u8{
             "README.md",
-            "docs/support-matrix.md",
-            "docs/path-discovery.md",
-            "docs/extensions.md",
-            "docs/known-limitations.md",
-            "docs/vm-matrix.md",
-            "docs/vm-image-sources.md",
+            "DOCUMENTATION.md",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
         };
         var docs_ok = true;
         for (required_files) |rel| {
@@ -2119,9 +2116,9 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         return ToolError.NotFound;
     }
 
-    const required_docs = [_][]const u8{ "known-limitations.md", "support-matrix.md" };
+    const required_docs = [_][]const u8{ "DOCUMENTATION.md", "CONTRIBUTING.md", "SECURITY.md" };
     for (required_docs) |doc| {
-        const src_doc = try pathJoin(allocator, &.{ root, "docs", doc });
+        const src_doc = try pathJoin(allocator, &.{ root, doc });
         defer allocator.free(src_doc);
         const dst_doc = try pathJoin(allocator, &.{ bundle_dir, "docs", doc });
         defer allocator.free(dst_doc);
