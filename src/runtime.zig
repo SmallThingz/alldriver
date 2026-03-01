@@ -61,7 +61,7 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
 
     try raw_args.append(allocator, opts.install.path);
 
-    const debug_port = try reserveLocalPort(allocator);
+    const debug_port = try reserveLocalPort();
     try appendDefaultArgs(
         allocator,
         &raw_args,
@@ -88,6 +88,9 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     errdefer {
         _ = child.kill() catch {};
     }
+
+    const launch_timeout_ms = (opts.timeout_policy orelse types.TimeoutPolicy{}).launch_ms;
+    waitForLocalDebugEndpoint(debug_port, launch_timeout_ms) catch return error.Timeout;
 
     const install_copy: types.BrowserInstall = .{
         .kind = opts.install.kind,
@@ -208,10 +211,6 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
     }
 
     try argv_list.append(allocator, try allocator.dupe(u8, opts.host_executable));
-    if (opts.legacy_automation_markers) {
-        try argv_list.append(allocator, try allocator.dupe(u8, "--disable-blink-features=AutomationControlled"));
-        try argv_list.append(allocator, try allocator.dupe(u8, "--disable-infobars"));
-    }
     for (opts.args) |arg| try argv_list.append(allocator, try allocator.dupe(u8, arg));
 
     const argv = try argv_list.toOwnedSlice(allocator);
@@ -265,7 +264,7 @@ pub fn attachAndroidWebView(allocator: std.mem.Allocator, opts: types.AndroidWeb
     const endpoint = if (opts.endpoint) |explicit|
         try allocator.dupe(u8, explicit)
     else
-        try std.fmt.allocPrint(allocator, "cdp://{s}:{d}/", .{ opts.host, opts.port });
+        try cdpEndpointForHostPort(allocator, opts.host, opts.port);
     defer allocator.free(endpoint);
     return attachWebView(allocator, .{ .kind = .android_webview, .endpoint = endpoint });
 }
@@ -274,7 +273,7 @@ pub fn attachElectronWebView(allocator: std.mem.Allocator, opts: types.ElectronW
     const endpoint = if (opts.endpoint) |explicit|
         try allocator.dupe(u8, explicit)
     else
-        try std.fmt.allocPrint(allocator, "cdp://{s}:{d}/", .{ opts.host, opts.port });
+        try cdpEndpointForHostPort(allocator, opts.host, opts.port);
     defer allocator.free(endpoint);
     return attachWebView(allocator, .{ .kind = .electron, .endpoint = endpoint });
 }
@@ -295,7 +294,6 @@ pub fn launchElectronWebView(allocator: std.mem.Allocator, opts: types.ElectronW
     return launchWebViewHost(allocator, .{
         .kind = .electron,
         .host_executable = opts.executable_path,
-        .legacy_automation_markers = opts.legacy_automation_markers,
         .args = args.items,
         .endpoint = if (opts.debug_port) |port|
             try std.fmt.allocPrint(allocator, "cdp://127.0.0.1:{d}/", .{port})
@@ -340,18 +338,8 @@ fn appendDefaultArgs(
         }
     }
 
-    if (opts.install.engine == .chromium and opts.legacy_automation_markers) {
-        try args.append(allocator, "--disable-blink-features=AutomationControlled");
-        try args.append(allocator, "--disable-infobars");
-    }
-
     switch (adapter) {
-        .cdp => {
-            const flag = try std.fmt.allocPrint(allocator, "--remote-debugging-port={d}", .{debug_port});
-            try temp_owned_strings.append(allocator, flag);
-            try args.append(allocator, flag);
-        },
-        .bidi => {
+        .cdp, .bidi => {
             const flag = try std.fmt.allocPrint(allocator, "--remote-debugging-port={d}", .{debug_port});
             try temp_owned_strings.append(allocator, flag);
             try args.append(allocator, flag);
@@ -506,6 +494,10 @@ fn buildEndpoint(allocator: std.mem.Allocator, adapter: common.AdapterKind, sess
     };
 }
 
+fn cdpEndpointForHostPort(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
+    return std.fmt.allocPrint(allocator, "cdp://{s}:{d}/", .{ host, port });
+}
+
 fn adapterForWebViewKind(kind: types.WebViewKind) common.AdapterKind {
     return switch (kind) {
         .webview2, .electron, .android_webview => .cdp,
@@ -519,13 +511,26 @@ fn browserKindForWebView(kind: types.WebViewKind) types.BrowserKind {
     };
 }
 
-fn reserveLocalPort(allocator: std.mem.Allocator) !u16 {
-    _ = allocator;
+fn reserveLocalPort() !u16 {
     var address = try std.net.Address.parseIp4("127.0.0.1", 0);
     var server = try address.listen(.{});
     defer server.deinit();
     const real = server.listen_address.in.sa;
     return std.mem.bigToNative(u16, real.port);
+}
+
+fn waitForLocalDebugEndpoint(port: u16, timeout_ms: u32) !void {
+    const address = try std.net.Address.parseIp4("127.0.0.1", port);
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (std.time.milliTimestamp() < deadline_ms) {
+        const stream = std.net.tcpConnectToAddress(address) catch {
+            std.Thread.sleep(25 * std.time.ns_per_ms);
+            continue;
+        };
+        stream.close();
+        return;
+    }
+    return error.Timeout;
 }
 
 test "attach supports cdp and bidi endpoints only" {

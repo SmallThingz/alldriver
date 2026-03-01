@@ -22,7 +22,8 @@ pub fn main() !void {
         return;
     }
 
-    // Persistent profile launch.
+    // Persistent profile launch. Launch now waits for debug-endpoint readiness
+    // before returning, bounded by the launch timeout policy.
     var persistent = try driver.modern.launch(allocator, .{
         .install = installs.items[0],
         .profile_mode = .persistent,

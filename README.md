@@ -109,6 +109,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 - Targets without usable CDP/BiDi surfaces on the host.
 
+## Runtime Notes
+
+- Launch now blocks until the local debug endpoint is reachable (bounded by launch timeout policy) to reduce race-condition `ConnectionRefused` failures in immediate post-launch actions.
+- Deprecated launch compatibility flag `legacy_automation_markers` has been removed from public options.
+
 ## External Binary Dependencies
 
 ### Core runtime

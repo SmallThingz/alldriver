@@ -153,6 +153,11 @@ Notes:
   - Windows: `%LOCALAPPDATA%\\alldriver\\browsers`
 - Discovery always checks managed cache. `allow_managed_download` only controls whether provisioning/download workflows are permitted.
 
+## Cleanup Notes
+
+- Deprecated launch compatibility option `legacy_automation_markers` was removed from launch/webview option types.
+- Browser launch waits for local debug endpoint readiness before returning a session, bounded by `TimeoutPolicy.launch_ms`.
+
 ## Compile-Time Extensions
 
 Hooks are defined in `src/extensions/api.zig` and are statically linked:

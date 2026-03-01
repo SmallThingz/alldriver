@@ -100,7 +100,6 @@ pub const LaunchOptions = struct {
     profile_dir: ?[]const u8 = null,
     headless: bool = false,
     ignore_tls_errors: bool = false,
-    legacy_automation_markers: bool = false,
     gecko_stealth_prefs: bool = false,
     timeout_policy: ?TimeoutPolicy = null,
     args: []const []const u8 = &.{},
@@ -394,7 +393,6 @@ pub const WebViewAttachOptions = struct {
 pub const WebViewLaunchOptions = struct {
     kind: WebViewKind,
     host_executable: []const u8,
-    legacy_automation_markers: bool = false,
     args: []const []const u8 = &.{},
     endpoint: ?[]const u8 = null,
 };
@@ -430,7 +428,6 @@ pub const ElectronWebViewLaunchOptions = struct {
     profile_dir: ?[]const u8 = null,
     headless: bool = false,
     ignore_tls_errors: bool = false,
-    legacy_automation_markers: bool = false,
 };
 
 pub const DiscoveryError = error{

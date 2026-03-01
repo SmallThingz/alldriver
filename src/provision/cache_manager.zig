@@ -64,6 +64,8 @@ pub fn discoverManaged(
         try defaultCacheDir(allocator);
     defer allocator.free(cache_dir);
 
+    if (!util.exists(cache_dir)) return allocator.alloc(ManagedHit, 0);
+
     var hits: std.ArrayList(ManagedHit) = .empty;
     errdefer {
         for (hits.items) |hit| allocator.free(hit.path);

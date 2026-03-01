@@ -130,7 +130,7 @@ pub const Session = struct {
         const started = std.time.milliTimestamp();
         return actions.evaluate(self, script) catch |err| {
             self.recordDiagnostic(.{
-                .phase = .storage,
+                .phase = .overall,
                 .code = @errorName(err),
                 .message = "script evaluation failed",
                 .transport = @tagName(self.transport),
