@@ -75,31 +75,29 @@ pub fn discover(
 
     try appendBundledLightpandaCandidate(allocator, &candidates, &dedup, &keys, kinds);
 
-    if (prefs.allow_managed_download) {
-        const managed_hits = try cache_manager.discoverManaged(allocator, kinds, prefs.managed_cache_dir);
-        defer {
-            for (managed_hits) |hit| allocator.free(hit.path);
-            allocator.free(managed_hits);
-        }
+    const managed_hits = try cache_manager.discoverManaged(allocator, kinds, prefs.managed_cache_dir);
+    defer {
+        for (managed_hits) |hit| allocator.free(hit.path);
+        allocator.free(managed_hits);
+    }
 
-        for (managed_hits) |hit| {
-            try appendCandidate(
-                allocator,
-                &candidates,
-                &dedup,
-                &keys,
-                .{
-                    .install = .{
-                        .kind = hit.kind,
-                        .engine = hit.engine,
-                        .path = try allocator.dupe(u8, hit.path),
-                        .version = null,
-                        .source = hit.source,
-                    },
-                    .score = hit.score,
+    for (managed_hits) |hit| {
+        try appendCandidate(
+            allocator,
+            &candidates,
+            &dedup,
+            &keys,
+            .{
+                .install = .{
+                    .kind = hit.kind,
+                    .engine = hit.engine,
+                    .path = try allocator.dupe(u8, hit.path),
+                    .version = null,
+                    .source = hit.source,
                 },
-            );
-        }
+                .score = hit.score,
+            },
+        );
     }
 
     if (opts.include_path_env) {
@@ -599,7 +597,7 @@ test "discover returns explicit path and infers kind" {
     try std.testing.expectEqual(types.EngineKind.gecko, installs[0].engine);
 }
 
-test "discover managed cache candidate when enabled" {
+test "discover managed cache candidate even when managed download is disabled" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -615,7 +613,7 @@ test "discover managed cache candidate when enabled" {
 
     const installs = try discover(allocator, .{
         .kinds = &.{.chrome},
-        .allow_managed_download = true,
+        .allow_managed_download = false,
         .managed_cache_dir = cache_root,
     }, .{
         .include_path_env = false,

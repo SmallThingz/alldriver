@@ -11,8 +11,9 @@ pub fn main() !void {
     var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox },
         .explicit_path = explicit,
+        // Discovery always checks managed cache. This flag controls whether
+        // managed provisioning/download workflows are allowed.
         .allow_managed_download = true,
-        .managed_cache_dir = "/home/a/.cache/alldriver",
     }, .{});
     defer installs.deinit();
 

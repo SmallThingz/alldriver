@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const catalog = @import("../catalog/browser_kind.zig");
 const path_table = @import("../catalog/path_table.zig");
 const types = @import("../types.zig");
@@ -19,9 +20,37 @@ pub const InstallOptions = struct {
 };
 
 pub fn defaultCacheDir(allocator: std.mem.Allocator) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
-    defer allocator.free(home);
-    return std.fs.path.join(allocator, &.{ home, ".cache", "alldriver", "browsers" });
+    switch (builtin.os.tag) {
+        .windows => {
+            if (std.process.getEnvVarOwned(allocator, "LOCALAPPDATA")) |base| {
+                defer allocator.free(base);
+                return std.fs.path.join(allocator, &.{ base, "alldriver", "browsers" });
+            } else |_| {}
+            if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |base| {
+                defer allocator.free(base);
+                return std.fs.path.join(allocator, &.{ base, "AppData", "Local", "alldriver", "browsers" });
+            } else |_| {}
+            return allocator.dupe(u8, ".\\alldriver\\browsers");
+        },
+        .macos => {
+            if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+                defer allocator.free(home);
+                return std.fs.path.join(allocator, &.{ home, "Library", "Caches", "alldriver", "browsers" });
+            } else |_| {}
+            return allocator.dupe(u8, "/tmp/alldriver/browsers");
+        },
+        else => {
+            if (std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |base| {
+                defer allocator.free(base);
+                return std.fs.path.join(allocator, &.{ base, "alldriver", "browsers" });
+            } else |_| {}
+            if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+                defer allocator.free(home);
+                return std.fs.path.join(allocator, &.{ home, ".cache", "alldriver", "browsers" });
+            } else |_| {}
+            return allocator.dupe(u8, "/tmp/alldriver/browsers");
+        },
+    }
 }
 
 pub fn discoverManaged(

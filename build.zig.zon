@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .lightpanda_browser = .{
-            .url = "https://github.com/lightpanda-io/browser/archive/refs/heads/main.tar.gz",
-            .hash = "browser-0.0.0-oM42-Oc8QgD8PTJUY4hGcNZ10aXXvJADHkE0OpJLiAo4",
+            .url = "https://github.com/lightpanda-io/browser/archive/eaf1cb26b26872ecb8cbfbe3ca1122d231ee328a.tar.gz",
+            .hash = "browser-0.0.0-oM42-JuFQwB8XuUk7nbr6syLVyu48shPJsOHwZovFhmt",
             .lazy = true,
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.

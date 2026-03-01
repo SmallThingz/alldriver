@@ -122,7 +122,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 `discover()` uses deterministic precedence:
 
 1. Explicit path (`BrowserPreference.explicit_path`)
-2. Managed cache (if enabled)
+2. Managed cache (always scanned; default fixed cache root per OS)
 3. `PATH` executable scan
 4. Known path catalog (`src/catalog/path_table.zig`)
 5. OS probes (Windows/macOS/Linux providers)
@@ -147,6 +147,11 @@ Managed install supports:
 Notes:
 
 - Managed downloads and extraction are implemented with Zig stdlib (`std.http`, `std.zip`, `std.tar`, `std.compress`).
+- Default managed cache root (when `BrowserPreference.managed_cache_dir` is not set):
+  - Linux: `$XDG_CACHE_HOME/alldriver/browsers` (fallback: `$HOME/.cache/alldriver/browsers`)
+  - macOS: `$HOME/Library/Caches/alldriver/browsers`
+  - Windows: `%LOCALAPPDATA%\\alldriver\\browsers`
+- Discovery always checks managed cache. `allow_managed_download` only controls whether provisioning/download workflows are permitted.
 
 ## Compile-Time Extensions
 

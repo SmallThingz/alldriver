@@ -118,6 +118,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
 - Webview/runtime binaries as applicable: `msedgewebview2`, `electron`.
 - Mobile bridge tooling: `adb`, `shizuku` (or `rish`) for Android WebView.
 
+Managed browser cache defaults (used when `managed_cache_dir` is unset):
+- Linux: `$XDG_CACHE_HOME/alldriver/browsers` (fallback `$HOME/.cache/alldriver/browsers`)
+- macOS: `$HOME/Library/Caches/alldriver/browsers`
+- Windows: `%LOCALAPPDATA%\\alldriver\\browsers`
+
+`discover()` always scans managed cache. `allow_managed_download` controls provisioning/download permission, not cache discovery.
+
 ### Tooling / matrix / release (`zig build tools -- ...`)
 
 - Base tooling: `zig`, `git`, `bash`, `tar`, `date`, `which` (or `where` on Windows), `chmod`.
