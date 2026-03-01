@@ -1861,14 +1861,35 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
 
     const adversarial_report_path = try pathJoin(allocator, &.{ out_dir, "adversarial-detection.txt" });
     defer allocator.free(adversarial_report_path);
-    if (!(try runStepWithLog(
-        allocator,
-        root,
-        &env,
-        out_dir,
-        "adversarial_detection_gate",
-        &.{ "zig", "build", "tools", "--", "adversarial-detection-gate", "--out", adversarial_report_path },
-    ))) ok_all = false;
+    if (strict_ga) {
+        if (!(try runStepWithLog(
+            allocator,
+            root,
+            &env,
+            out_dir,
+            "adversarial_detection_gate",
+            &.{ "zig", "build", "tools", "--", "adversarial-detection-gate", "--out", adversarial_report_path },
+        ))) ok_all = false;
+    } else {
+        if (!(try runStepWithLog(
+            allocator,
+            root,
+            &env,
+            out_dir,
+            "adversarial_detection_gate",
+            &.{
+                "zig",
+                "build",
+                "tools",
+                "--",
+                "adversarial-detection-gate",
+                "--allow-missing-browser=1",
+                "--allow-launch-probe-failures=1",
+                "--out",
+                adversarial_report_path,
+            },
+        ))) ok_all = false;
+    }
 
     const env_txt_path = try pathJoin(allocator, &.{ out_dir, "environment.txt" });
     const head_commit = runCaptureTrimmed(allocator, &.{ "git", "rev-parse", "HEAD" }, root, null) catch try allocator.dupe(u8, "unknown");
