@@ -73,6 +73,7 @@ pub const UnsupportedCapabilityInfo = errors.UnsupportedCapabilityInfo;
 pub const Session = session_mod.Session;
 pub const SessionCacheStore = @import("session_cache/store.zig").SessionCacheStore;
 pub const session_cache = @import("session_cache/store.zig");
+pub const lightpanda = @import("provision/lightpanda.zig");
 
 pub const modern = modern_api;
 pub const support_tier = support_tier_catalog;

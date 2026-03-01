@@ -32,11 +32,6 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .lightpanda_browser = .{
-            .url = "https://github.com/lightpanda-io/browser/archive/eaf1cb26b26872ecb8cbfbe3ca1122d231ee328a.tar.gz",
-            .hash = "browser-0.0.0-oM42-JuFQwB8XuUk7nbr6syLVyu48shPJsOHwZovFhmt",
-            .lazy = true,
-        },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding

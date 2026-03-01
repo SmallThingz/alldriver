@@ -41,6 +41,7 @@ fn printUsage() void {
         \\  release-bundle
         \\  test-behavioral-matrix
         \\  adversarial-detection-gate
+        \\  download-lightpanda
         \\  vm-check-prereqs
         \\  vm-init-lab
         \\  vm-register-host
@@ -95,6 +96,8 @@ pub fn main() !void {
         try cmdTestBehavioral(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "adversarial-detection-gate")) {
         try cmdAdversarialDetectionGate(allocator, root, sub);
+    } else if (std.mem.eql(u8, cmd, "download-lightpanda")) {
+        try cmdDownloadLightpanda(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "vm-check-prereqs")) {
         try cmdVmCheckPrereqs(allocator, root, sub);
     } else if (std.mem.eql(u8, cmd, "vm-init-lab")) {
@@ -1206,6 +1209,25 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     if (!overall_pass) {
         return ToolError.VerificationFailed;
     }
+}
+
+fn cmdDownloadLightpanda(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
+    _ = root;
+    var flags = try parseFlags(allocator, args);
+    defer freeStringMap(allocator, &flags);
+
+    const cache_dir = flags.get("cache-dir");
+    const tag = flags.get("tag");
+    const expected_sha256_hex = flags.get("sha256");
+
+    const installed_path = try driver.lightpanda.downloadLatest(allocator, .{
+        .cache_dir = cache_dir,
+        .tag = tag,
+        .expected_sha256_hex = expected_sha256_hex,
+    });
+    defer allocator.free(installed_path);
+
+    std.debug.print("lightpanda installed: {s}\n", .{installed_path});
 }
 
 fn expectationSatisfied(expectation: GateExpectation, detected: bool) bool {

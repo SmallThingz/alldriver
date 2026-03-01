@@ -31,6 +31,7 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 - `18_cookie_header_export.zig`: query cookies with typed filters and build canonical `Cookie` headers for URLs.
 - `19_session_cache.zig`: persist/load session state with payload presets and custom payload masks.
 - `20_timeout_and_cancel.zig`: apply timeout policies and cooperative cancellation for waits.
+- `21_lightpanda_runtime_download.zig`: download/install latest Lightpanda at runtime and verify discovery.
 
 ## Notes
 

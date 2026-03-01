@@ -97,6 +97,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
   - `.rich_state` (cookies + user agent + storage + url + extra headers)
 - Custom combinations via `SessionCachePayloadMask`.
 
+### Runtime Lightpanda Download
+
+- Runtime API: `driver.lightpanda.downloadLatest(allocator, .{ .cache_dir = null, .tag = null })`
+- Tools command: `zig build tools -- download-lightpanda`
+
 ## Coverage
 
 ### Modern (supported)
@@ -119,7 +124,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 ### Core runtime
 
 - Browser binaries (at least one target installed): Chrome/Chromium, Edge, Firefox, Brave, Tor Browser, DuckDuckGo Browser, Mullvad Browser, LibreWolf, Epic, Arc, Vivaldi, SigmaOS, Sidekick, Shift, Opera GX, Pale Moon.
-- Optional Lightpanda support via `-Dinclude_lightpanda_browser=true`.
+- Optional Lightpanda binary can be installed at runtime via `driver.lightpanda.downloadLatest(...)` (GitHub release assets).
 - Webview/runtime binaries as applicable: `msedgewebview2`, `electron`.
 - Mobile bridge tooling: `adb`, `shizuku` (or `rish`) for Android WebView.
 
@@ -157,6 +162,9 @@ zig build tools -- production-gate --strict-ga
 zig build tools -- matrix-run --platform linux
 zig build tools -- matrix-collect
 zig build tools -- release-bundle --release-id v1.0.0
+
+# Runtime browser provisioning
+zig build tools -- download-lightpanda
 
 # VM / QEMU helpers
 zig build tools -- vm-check-prereqs

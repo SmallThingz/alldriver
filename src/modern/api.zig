@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("../types.zig");
 const runtime = @import("runtime.zig");
 const session_mod = @import("session.zig");
+const lightpanda = @import("../provision/lightpanda.zig");
 
 pub const ModernInstall = types.BrowserInstall;
 pub const ModernSession = session_mod.ModernSession;
@@ -57,4 +58,11 @@ pub fn launchElectronWebView(
     opts: types.ElectronWebViewLaunchOptions,
 ) !ModernSession {
     return runtime.launchElectronWebView(allocator, opts);
+}
+
+pub fn downloadLightpandaLatest(
+    allocator: std.mem.Allocator,
+    opts: lightpanda.DownloadOptions,
+) ![]u8 {
+    return lightpanda.downloadLatest(allocator, opts);
 }

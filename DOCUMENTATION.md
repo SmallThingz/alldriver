@@ -153,6 +153,15 @@ Notes:
   - Windows: `%LOCALAPPDATA%\\alldriver\\browsers`
 - Discovery always checks managed cache. `allow_managed_download` only controls whether provisioning/download workflows are permitted.
 
+### Runtime Lightpanda Provisioning
+
+- API: `driver.lightpanda.downloadLatest(allocator, opts)`
+  - `opts.cache_dir`: optional managed cache root override
+  - `opts.tag`: optional GitHub release tag; `null` means latest release
+  - `opts.expected_sha256_hex`: optional payload checksum verification
+- Tools: `zig build tools -- download-lightpanda [--cache-dir=...] [--tag=...] [--sha256=...]`
+- The downloader resolves release assets for the current runtime OS/arch and installs into managed cache so normal `discover()` picks it up.
+
 ## Cleanup Notes
 
 - Deprecated launch compatibility option `legacy_automation_markers` was removed from launch/webview option types.
@@ -203,6 +212,9 @@ zig build tools -- vm-register-host --name windows-host --os windows --arch x64 
 zig build tools -- vm-run-remote-matrix --project alldriver --host macos-host
 zig build tools -- vm-run-remote-matrix --project alldriver --host windows-host
 zig build tools -- vm-ga-collect-and-bundle --project alldriver --release-id v1-ga --linux-host linux-matrix --macos-host macos-host --windows-host windows-host
+
+# Runtime Lightpanda provisioning
+zig build tools -- download-lightpanda
 ```
 
 ## VM Image Sources
@@ -228,7 +240,7 @@ Official upstream pages:
 ### Core runtime
 
 - Browser binaries for targets you automate
-- Optional Lightpanda integration: `-Dinclude_lightpanda_browser=true`
+- Optional Lightpanda runtime provisioning via `driver.lightpanda.downloadLatest(...)`
 - Webview runtimes as needed: `msedgewebview2`, `electron`
 - Android bridge tools: `adb`, `shizuku` (or `rish`)
 

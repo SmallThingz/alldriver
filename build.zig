@@ -21,11 +21,6 @@ pub fn build(b: *std.Build) void {
         "enable_builtin_extension",
         "Enable the built-in compile-time extension adapter",
     ) orelse false;
-    const include_lightpanda_browser = b.option(
-        bool,
-        "include_lightpanda_browser",
-        "Bundle Lightpanda browser from lazy dependency metadata and enable Lightpanda discovery",
-    ) orelse false;
     const vm_lab_dir = b.option(
         []const u8,
         "vm_lab_dir",
@@ -36,15 +31,8 @@ pub fn build(b: *std.Build) void {
         "vm_host",
         "Registered remote host name for vm-remote-matrix step",
     ) orelse "";
-    var lightpanda_bundle_root: []const u8 = "";
-    if (include_lightpanda_browser) {
-        const lightpanda_dep = b.lazyDependency("lightpanda_browser", .{}) orelse return;
-        lightpanda_bundle_root = lightpanda_dep.path(".").getPath(b);
-    }
     const config = b.addOptions();
     config.addOption(bool, "enable_builtin_extension", enable_builtin_extension);
-    config.addOption(bool, "include_lightpanda_browser", include_lightpanda_browser);
-    config.addOption([]const u8, "lightpanda_bundle_root", lightpanda_bundle_root);
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -188,6 +176,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "example-18-cookie-header-export", .path = "examples/18_cookie_header_export.zig" },
         .{ .name = "example-19-session-cache", .path = "examples/19_session_cache.zig" },
         .{ .name = "example-20-timeout-and-cancel", .path = "examples/20_timeout_and_cancel.zig" },
+        .{ .name = "example-21-lightpanda-runtime-download", .path = "examples/21_lightpanda_runtime_download.zig" },
     };
     const examples_step = b.step("examples", "Build all library usage examples");
     inline for (example_specs) |spec| {

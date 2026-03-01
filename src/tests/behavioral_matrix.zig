@@ -1,7 +1,6 @@
 const std = @import("std");
 const driver = @import("../root.zig");
 const helpers = @import("helpers.zig");
-const config = @import("alldriver_config");
 
 const example_url = "data:text/html,<html><head><title>gate</title></head><body>gate</body></html>";
 
@@ -15,20 +14,10 @@ fn fetchAndAssert(session: anytype, allocator: std.mem.Allocator) !void {
     try std.testing.expect(std.mem.indexOf(u8, payload, "data:text/html") != null);
 }
 
-fn includeLightpanda() bool {
-    return @hasDecl(config, "include_lightpanda_browser") and config.include_lightpanda_browser;
-}
-
 fn behavioralKinds() []const driver.BrowserKind {
-    if (includeLightpanda()) {
-        return &[_]driver.BrowserKind{
-            .chrome, .edge, .firefox, .brave,    .tor,   .duckduckgo, .mullvad,    .librewolf,
-            .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx,    .lightpanda, .palemoon,
-        };
-    }
     return &[_]driver.BrowserKind{
-        .chrome, .edge, .firefox, .brave,    .tor,   .duckduckgo, .mullvad,  .librewolf,
-        .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx,    .palemoon,
+        .chrome, .edge, .firefox, .brave,    .tor,   .duckduckgo, .mullvad,    .librewolf,
+        .epic,   .arc,  .vivaldi, .sidekick, .shift, .operagx,    .lightpanda, .palemoon,
     };
 }
 
