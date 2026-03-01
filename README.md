@@ -150,6 +150,9 @@ Managed browser cache defaults (used when `managed_cache_dir` is unset):
 zig build test
 zig build examples
 
+# Opt-in live adversarial check for flatmates.com.au (fails on 429/challenge facade)
+ALLDRIVER_ADVERSARIAL_FLATMATES=1 zig build test --summary all
+
 # Tool self-check
 zig build tools -- self-test
 

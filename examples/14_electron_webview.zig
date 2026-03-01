@@ -24,11 +24,13 @@ pub fn main() !void {
         return;
     };
 
-    var session = try driver.modern.launchElectronWebView(allocator, .{
+    var launch_op = try driver.modern.launchElectronWebViewAsync(allocator, .{
         .executable_path = executable_path,
         .profile_mode = .ephemeral,
         .headless = true,
     });
+    defer launch_op.deinit();
+    var session = try launch_op.await(30_000);
     defer session.deinit();
 
     var page = session.page();

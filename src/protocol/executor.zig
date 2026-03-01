@@ -267,7 +267,7 @@ fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u
     const parsed = try common.parseEndpoint(endpoint, .cdp);
     if (parsed.adapter != .cdp) return error.UnsupportedProtocol;
 
-    const ws_endpoint = try resolveCdpWebSocketEndpoint(session.allocator, parsed.host, parsed.port);
+    const ws_endpoint = try cdpWebSocketEndpoint(session.allocator, parsed);
     defer session.allocator.free(ws_endpoint);
     const ws_parts = try parseWsUrl(session.allocator, ws_endpoint);
     defer session.allocator.free(ws_parts.path);
@@ -325,14 +325,40 @@ fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]
     }
 }
 
-fn resolveCdpWebSocketEndpoint(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
-    const version = try http.getJson(allocator, host, port, "/json/version");
-    defer allocator.free(version.body);
-    if (extractJsonStringValue(allocator, version.body, "webSocketDebuggerUrl")) |url| return url else |_| {}
+fn cdpWebSocketEndpoint(
+    allocator: std.mem.Allocator,
+    parsed: common.EndpointParts,
+) ![]u8 {
+    if (!shouldResolveCdpEndpointPath(parsed.path)) {
+        return std.fmt.allocPrint(allocator, "ws://{s}:{d}{s}", .{ parsed.host, parsed.port, parsed.path });
+    }
+    return resolveCdpWebSocketEndpoint(allocator, parsed.host, parsed.port);
+}
 
-    const list = try http.getJson(allocator, host, port, "/json/list");
-    defer allocator.free(list.body);
-    return firstJsonListWsEndpoint(allocator, list.body);
+fn shouldResolveCdpEndpointPath(path: []const u8) bool {
+    if (path.len == 0 or std.mem.eql(u8, path, "/")) return true;
+    if (std.mem.startsWith(u8, path, "/devtools/browser/")) return true;
+    if (std.mem.startsWith(u8, path, "/json")) return true;
+    return false;
+}
+
+fn resolveCdpWebSocketEndpoint(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
+    const list_paths = [_][]const u8{ "/json/list", "/json" };
+    for (list_paths) |path| {
+        const list = http.getJson(allocator, host, port, path) catch continue;
+        defer allocator.free(list.body);
+        if (!httpStatusIsSuccess(list.status_code)) continue;
+        if (firstJsonListWsEndpoint(allocator, list.body)) |ws_url| return ws_url else |_| {}
+    }
+
+    const version = http.getJson(allocator, host, port, "/json/version") catch return error.MissingEndpoint;
+    defer allocator.free(version.body);
+    if (!httpStatusIsSuccess(version.status_code)) return error.MissingEndpoint;
+    return extractJsonStringValue(allocator, version.body, "webSocketDebuggerUrl");
+}
+
+fn httpStatusIsSuccess(code: u16) bool {
+    return code >= 200 and code < 300;
 }
 
 fn parseWsUrl(allocator: std.mem.Allocator, endpoint: []const u8) !struct { host: []const u8, port: u16, path: []u8 } {
@@ -353,13 +379,29 @@ fn firstJsonListWsEndpoint(allocator: std.mem.Allocator, payload: []const u8) ![
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
     if (parsed.value != .array) return error.InvalidResponse;
+
+    var fallback: ?[]const u8 = null;
     for (parsed.value.array.items) |item| {
         if (item != .object) continue;
         if (item.object.get("webSocketDebuggerUrl")) |ws_url| {
-            if (ws_url == .string) return allocator.dupe(u8, ws_url.string);
+            if (ws_url != .string) continue;
+            if (fallback == null) fallback = ws_url.string;
+            const target_type = item.object.get("type") orelse {
+                fallback = ws_url.string;
+                continue;
+            };
+            if (target_type == .string and isNavigableCdpTargetType(target_type.string)) {
+                return allocator.dupe(u8, ws_url.string);
+            }
         }
     }
+    if (fallback) |ws_url| return allocator.dupe(u8, ws_url);
     return error.MissingEndpoint;
+}
+
+fn isNavigableCdpTargetType(target_type: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(target_type, "page") or
+        std.ascii.eqlIgnoreCase(target_type, "tab");
 }
 
 fn evalViaCdp(session: *Session, script: []const u8) ![]u8 {
@@ -426,4 +468,30 @@ test "parseWsUrl supports ws endpoint" {
     defer allocator.free(parsed.path);
     try std.testing.expectEqual(@as(u16, 9222), parsed.port);
     try std.testing.expect(std.mem.eql(u8, parsed.host, "127.0.0.1"));
+}
+
+test "cdp endpoint path resolution rules keep page targets direct" {
+    try std.testing.expect(shouldResolveCdpEndpointPath("/"));
+    try std.testing.expect(shouldResolveCdpEndpointPath("/devtools/browser/abc"));
+    try std.testing.expect(!shouldResolveCdpEndpointPath("/devtools/page/abc"));
+}
+
+test "cdp endpoint selection keeps explicit page endpoint" {
+    const allocator = std.testing.allocator;
+    const parsed = try common.parseEndpoint("cdp://127.0.0.1:9222/devtools/page/123", .cdp);
+    const ws_url = try cdpWebSocketEndpoint(allocator, parsed);
+    defer allocator.free(ws_url);
+    try std.testing.expectEqualStrings("ws://127.0.0.1:9222/devtools/page/123", ws_url);
+}
+
+test "first json list endpoint prefers page targets" {
+    const allocator = std.testing.allocator;
+    const ws_url = try firstJsonListWsEndpoint(allocator,
+        \\[
+        \\  {"id":"worker","type":"service_worker","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/worker"},
+        \\  {"id":"page","type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/abc"}
+        \\]
+    );
+    defer allocator.free(ws_url);
+    try std.testing.expectEqualStrings("ws://127.0.0.1:9222/devtools/page/abc", ws_url);
 }

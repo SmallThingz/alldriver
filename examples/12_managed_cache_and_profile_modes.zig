@@ -24,13 +24,15 @@ pub fn main() !void {
 
     // Persistent profile launch. Launch now waits for debug-endpoint readiness
     // before returning, bounded by the launch timeout policy.
-    var persistent = try driver.modern.launch(allocator, .{
+    var persistent_launch_op = try driver.modern.launchAsync(allocator, .{
         .install = installs.items[0],
         .profile_mode = .persistent,
         .profile_dir = "/tmp/alldriver-profile",
         .headless = true,
         .args = &.{},
     });
+    defer persistent_launch_op.deinit();
+    var persistent = try persistent_launch_op.await(30_000);
     defer persistent.deinit();
 
     var persistent_page = persistent.page();
@@ -38,12 +40,14 @@ pub fn main() !void {
     _ = try persistent.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 10_000 });
 
     // Ephemeral launch (isolated disposable profile that is deleted on deinit).
-    var ephemeral = try driver.modern.launch(allocator, .{
+    var ephemeral_launch_op = try driver.modern.launchAsync(allocator, .{
         .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
         .args = &.{},
     });
+    defer ephemeral_launch_op.deinit();
+    var ephemeral = try ephemeral_launch_op.await(30_000);
     defer ephemeral.deinit();
 
     var ephemeral_page = ephemeral.page();

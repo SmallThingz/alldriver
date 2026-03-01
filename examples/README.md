@@ -35,6 +35,7 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 
 ## Notes
 
+- Launch-based examples use `driver.modern.launchAsync(...).await(...)` so control is returned only after launch/connection completes or times out.
 - Some examples require installed browsers and local debug endpoints.
 - Mobile bridge examples require host tooling (`adb` or `shizuku`/`rish`) and forwarded endpoints.
 - Launch APIs support `ignore_tls_errors = true` for environments with self-signed or invalid certificates.

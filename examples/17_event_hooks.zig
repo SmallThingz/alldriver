@@ -27,12 +27,14 @@ pub fn main() !void {
         return;
     }
 
-    var session = try driver.modern.launch(allocator, .{
+    var launch_op = try driver.modern.launchAsync(allocator, .{
         .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
         .ignore_tls_errors = true,
     });
+    defer launch_op.deinit();
+    var session = try launch_op.await(30_000);
     defer session.deinit();
 
     const sub_id = try session.base.onEvent(.{

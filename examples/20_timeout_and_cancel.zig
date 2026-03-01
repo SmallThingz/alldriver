@@ -17,7 +17,7 @@ pub fn main() !void {
         return;
     }
 
-    var session = try driver.modern.launch(allocator, .{
+    var launch_op = try driver.modern.launchAsync(allocator, .{
         .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
@@ -27,6 +27,8 @@ pub fn main() !void {
             .wait_ms = 8_000,
         },
     });
+    defer launch_op.deinit();
+    var session = try launch_op.await(30_000);
     defer session.deinit();
 
     var page = session.page();

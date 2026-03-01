@@ -14,11 +14,13 @@ pub fn main() !void {
 
     if (installs.items.len == 0) return error.NoBrowserFound;
 
-    var session = try driver.modern.launch(allocator, .{
+    var launch_op = try driver.modern.launchAsync(allocator, .{
         .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });
+    defer launch_op.deinit();
+    var session = try launch_op.await(30_000);
     defer session.deinit();
 
     const page_data = "data:text/html,<html><body><input id='name'/><button id='go' onclick=\"document.title=document.getElementById('name').value\">Go</button></body></html>";

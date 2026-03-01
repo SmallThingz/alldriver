@@ -19,11 +19,13 @@ pub fn main() !void {
         return error.UnsupportedEngine;
     }
 
-    var session = try driver.modern.launch(allocator, .{
+    var launch_op = try driver.modern.launchAsync(allocator, .{
         .install = install,
         .profile_mode = .ephemeral,
         .headless = true,
     });
+    defer launch_op.deinit();
+    var session = try launch_op.await(30_000);
     defer session.deinit();
 
     var page = session.page();
