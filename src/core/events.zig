@@ -15,18 +15,25 @@ pub fn register(
     filter: types.EventFilter,
     callback: *const fn (types.LifecycleEvent) void,
 ) !u64 {
+    session.event_lock.lock();
+    defer session.event_lock.unlock();
+
     const id = session.next_event_subscription_id;
     session.next_event_subscription_id += 1;
 
     var owned_kinds: []types.LifecycleEventKind = &.{};
+    errdefer if (owned_kinds.len > 0) session.allocator.free(owned_kinds);
     if (filter.kinds.len > 0) {
         owned_kinds = try session.allocator.alloc(types.LifecycleEventKind, filter.kinds.len);
         @memcpy(owned_kinds, filter.kinds);
     }
 
+    const owned_domain = if (filter.domain) |d| try session.allocator.dupe(u8, d) else null;
+    errdefer if (owned_domain) |d| session.allocator.free(d);
+
     const sub: EventSubscription = .{
         .id = id,
-        .domain = if (filter.domain) |d| try session.allocator.dupe(u8, d) else null,
+        .domain = owned_domain,
         .kinds = owned_kinds,
         .callback = callback,
     };
@@ -36,6 +43,9 @@ pub fn register(
 }
 
 pub fn unregister(session: *Session, id: u64) bool {
+    session.event_lock.lock();
+    defer session.event_lock.unlock();
+
     var idx: usize = 0;
     while (idx < session.event_subscriptions.items.len) : (idx += 1) {
         if (session.event_subscriptions.items[idx].id != id) continue;
@@ -47,6 +57,9 @@ pub fn unregister(session: *Session, id: u64) bool {
 }
 
 pub fn clear(session: *Session) void {
+    session.event_lock.lock();
+    defer session.event_lock.unlock();
+
     while (session.event_subscriptions.items.len > 0) {
         const sub = session.event_subscriptions.pop().?;
         freeSubscription(session.allocator, sub);
@@ -54,13 +67,22 @@ pub fn clear(session: *Session) void {
 }
 
 pub fn emit(session: *Session, event: types.LifecycleEvent) void {
+    var callbacks: std.ArrayList(*const fn (types.LifecycleEvent) void) = .empty;
+    defer callbacks.deinit(session.allocator);
+
+    session.event_lock.lock();
     for (session.event_subscriptions.items) |sub| {
         if (!matchesKind(sub.kinds, event)) continue;
         if (sub.domain) |domain| {
             const event_domain = domainForEvent(event) orelse continue;
             if (!domainMatches(event_domain, domain)) continue;
         }
-        sub.callback(event);
+        callbacks.append(session.allocator, sub.callback) catch continue;
+    }
+    session.event_lock.unlock();
+
+    for (callbacks.items) |callback| {
+        callback(event);
     }
 }
 

@@ -259,10 +259,7 @@ test "lightpanda cdp navigation and cookie extraction (opt-in)" {
         thread.join();
     };
 
-    const launch_args: []const []const u8 = if (builtin.os.tag == .linux)
-        &.{ "--no-sandbox", "--disable-dev-shm-usage" }
-    else
-        &.{};
+    const launch_args: []const []const u8 = &.{};
     var launched: ?driver.modern.ModernSession = null;
     var launch_failure: ?anyerror = null;
     for (installs.items) |install| {
@@ -272,7 +269,7 @@ test "lightpanda cdp navigation and cookie extraction (opt-in)" {
             .profile_mode = .ephemeral,
             .headless = true,
             .ignore_tls_errors = true,
-            .include_lightpanda_browser = true,
+            .include_lightpanda_browser = false,
             .timeout_policy = .{ .launch_ms = 120_000 },
             .args = launch_args,
         }) catch |err| {
@@ -348,10 +345,7 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
         thread.join();
     };
 
-    const launch_args: []const []const u8 = if (builtin.os.tag == .linux)
-        &.{ "--no-sandbox", "--disable-dev-shm-usage" }
-    else
-        &.{};
+    const launch_args: []const []const u8 = &.{};
     var launched: ?driver.modern.ModernSession = null;
     var launch_failure: ?anyerror = null;
     for (installs.items) |install| {
@@ -361,7 +355,7 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
             .profile_mode = .ephemeral,
             .headless = true,
             .ignore_tls_errors = true,
-            .include_lightpanda_browser = true,
+            .include_lightpanda_browser = false,
             .timeout_policy = .{ .launch_ms = 120_000 },
             .args = launch_args,
         }) catch |err| {

@@ -207,6 +207,30 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
+    const platform_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform_matrix_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "alldriver_config", .module = config.createModule() },
+            },
+        }),
+    });
+    const run_platform_tests = b.addRunArtifact(platform_tests);
+
+    const behavioral_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/behavioral_matrix_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "alldriver_config", .module = config.createModule() },
+            },
+        }),
+    });
+    const run_behavioral_tests = b.addRunArtifact(behavioral_tests);
+
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
@@ -227,6 +251,8 @@ pub fn build(b: *std.Build) void {
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_platform_tests.step);
+    test_step.dependOn(&run_behavioral_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_tools_tests.step);
 

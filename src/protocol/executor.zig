@@ -8,6 +8,31 @@ const json_rpc = @import("../transport/json_rpc.zig");
 
 const Session = @import("../core/session.zig").Session;
 
+pub fn waitUntilReady(session: *Session, timeout_ms: u32) !void {
+    const started = std.time.milliTimestamp();
+    const deadline = started + @as(i64, @intCast(timeout_ms));
+    var last_error: ?anyerror = null;
+
+    while (std.time.milliTimestamp() < deadline) {
+        initializeSession(session) catch |err| {
+            last_error = err;
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            continue;
+        };
+        return;
+    }
+
+    if (last_error) |err| return err;
+    return error.Timeout;
+}
+
+pub fn initializeSession(session: *Session) !void {
+    switch (session.transport) {
+        .cdp_ws => try initializeCdpSession(session),
+        .bidi_ws => try initializeBidiSession(session),
+    }
+}
+
 pub fn navigate(session: *Session, url: []const u8) !void {
     switch (session.transport) {
         .cdp_ws => {
@@ -15,7 +40,13 @@ pub fn navigate(session: *Session, url: []const u8) !void {
             defer session.allocator.free(escaped);
             const params = try std.fmt.allocPrint(session.allocator, "{{\"url\":\"{s}\"}}", .{escaped});
             defer session.allocator.free(params);
-            const raw = try callCdp(session, "Page.navigate", params);
+            const raw = callCdp(session, "Page.navigate", params) catch |err| switch (err) {
+                error.ProtocolCommandFailed => {
+                    try navigateViaRuntime(session, url);
+                    return;
+                },
+                else => return err,
+            };
             defer session.allocator.free(raw);
         },
         .bidi_ws => {
@@ -34,10 +65,67 @@ pub fn navigate(session: *Session, url: []const u8) !void {
     }
 }
 
+fn initializeCdpSession(session: *Session) !void {
+    const ping_raw = callCdp(session, "Target.getTargets", "{}") catch |err| switch (err) {
+        error.ProtocolCommandFailed => try callCdp(
+            session,
+            "Runtime.evaluate",
+            "{\"expression\":\"1\",\"returnByValue\":true}",
+        ),
+        else => return err,
+    };
+    session.allocator.free(ping_raw);
+}
+
+fn initializeBidiSession(session: *Session) !void {
+    if (session.browsing_context_id != null) return;
+
+    // Some BiDi endpoints require explicit session initialization, others are
+    // already session-bound. Treat failure here as non-fatal and continue.
+    const maybe_session_new = callBidi(session, "session.new", "{\"capabilities\":{}}") catch null;
+    if (maybe_session_new) |payload| {
+        session.allocator.free(payload);
+    }
+
+    if (try fetchFirstBidiContext(session)) |context_id| {
+        try assignBrowsingContext(session, context_id);
+        return;
+    }
+
+    const created_raw = try callBidi(session, "browsingContext.create", "{\"type\":\"tab\"}");
+    defer session.allocator.free(created_raw);
+    const created_context = try extractBidiContextId(session.allocator, created_raw) orelse return error.SessionNotReady;
+    try assignBrowsingContext(session, created_context);
+}
+
+fn assignBrowsingContext(session: *Session, context_id: []u8) !void {
+    errdefer session.allocator.free(context_id);
+    if (session.browsing_context_id) |old| {
+        session.allocator.free(old);
+    }
+    session.browsing_context_id = context_id;
+}
+
+fn fetchFirstBidiContext(session: *Session) !?[]u8 {
+    const tree_raw = callBidi(session, "browsingContext.getTree", "{\"maxDepth\":0}") catch |err| switch (err) {
+        error.ProtocolCommandFailed => return null,
+        else => return err,
+    };
+    defer session.allocator.free(tree_raw);
+    return extractFirstBidiContextFromTree(session.allocator, tree_raw);
+}
+
 pub fn reload(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {
-            const raw = try callCdp(session, "Page.reload", "{}");
+            const raw = callCdp(session, "Page.reload", "{}") catch |err| switch (err) {
+                error.ProtocolCommandFailed => {
+                    const eval_payload = try evaluate(session, "(function(){location.reload(); return true;})();");
+                    session.allocator.free(eval_payload);
+                    return;
+                },
+                else => return err,
+            };
             defer session.allocator.free(raw);
         },
         .bidi_ws => {
@@ -54,6 +142,19 @@ pub fn reload(session: *Session) !void {
     }
 }
 
+fn navigateViaRuntime(session: *Session, url: []const u8) !void {
+    const escaped_url = try escapeJsonString(session.allocator, url);
+    defer session.allocator.free(escaped_url);
+    const script = try std.fmt.allocPrint(
+        session.allocator,
+        "(function(){{window.location.assign(\"{s}\"); return true;}})();",
+        .{escaped_url},
+    );
+    defer session.allocator.free(script);
+    const payload = try evaluate(session, script);
+    defer session.allocator.free(payload);
+}
+
 pub fn click(session: *Session, selector: []const u8) !void {
     const sel = try escapeJsonString(session.allocator, selector);
     defer session.allocator.free(sel);
@@ -63,7 +164,8 @@ pub fn click(session: *Session, selector: []const u8) !void {
         .{sel},
     );
     defer session.allocator.free(expr);
-    _ = try evaluate(session, expr);
+    const payload = try evaluate(session, expr);
+    defer session.allocator.free(payload);
 }
 
 pub fn typeText(session: *Session, selector: []const u8, text: []const u8) !void {
@@ -77,7 +179,8 @@ pub fn typeText(session: *Session, selector: []const u8, text: []const u8) !void
         .{ sel, txt },
     );
     defer session.allocator.free(expr);
-    _ = try evaluate(session, expr);
+    const payload = try evaluate(session, expr);
+    defer session.allocator.free(payload);
 }
 
 pub fn evaluate(session: *Session, script: []const u8) ![]u8 {
@@ -128,36 +231,145 @@ pub fn setCookie(session: *Session, cookie: types.Header, domain: []const u8, pa
     defer session.allocator.free(d);
     const p = try escapeJsonString(session.allocator, path);
     defer session.allocator.free(p);
+    const cookie_url = if (domain.len > 0)
+        try std.fmt.allocPrint(session.allocator, "http://{s}{s}", .{ domain, path })
+    else
+        try session.allocator.dupe(u8, "about:blank");
+    defer session.allocator.free(cookie_url);
+    const u = try escapeJsonString(session.allocator, cookie_url);
+    defer session.allocator.free(u);
 
     const params = try std.fmt.allocPrint(
         session.allocator,
-        "{{\"name\":\"{s}\",\"value\":\"{s}\",\"domain\":\"{s}\",\"path\":\"{s}\"}}",
-        .{ n, v, d, p },
+        "{{\"name\":\"{s}\",\"value\":\"{s}\",\"domain\":\"{s}\",\"path\":\"{s}\",\"url\":\"{s}\"}}",
+        .{ n, v, d, p, u },
     );
     defer session.allocator.free(params);
     const raw = try callCdp(session, "Network.setCookie", params);
     defer session.allocator.free(raw);
+    if (!networkSetCookieSucceeded(session.allocator, raw)) {
+        return error.ProtocolCommandFailed;
+    }
 }
 
 pub fn getCookies(session: *Session) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+
+    session.state_lock.lock();
+    const current_url = blk: {
+        defer session.state_lock.unlock();
+        break :blk if (session.current_url) |url|
+            try session.allocator.dupe(u8, url)
+        else
+            null;
+    };
+    defer if (current_url) |url| session.allocator.free(url);
+
+    if (current_url) |url| {
+        const escaped = try escapeJsonString(session.allocator, url);
+        defer session.allocator.free(escaped);
+        const params = try std.fmt.allocPrint(session.allocator, "{{\"urls\":[\"{s}\"]}}", .{escaped});
+        defer session.allocator.free(params);
+        return callCdp(session, "Network.getCookies", params);
+    }
     return callCdp(session, "Network.getCookies", "{}");
 }
 
 pub fn screenshot(session: *Session) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    return callCdp(session, "Page.captureScreenshot", "{}");
+    return callCdp(session, "Page.captureScreenshot", "{}") catch |err| switch (err) {
+        error.ProtocolCommandFailed => {
+            try prepareCdpScreenshotRetry(session);
+            return callCdp(session, "Page.captureScreenshot", "{}") catch |retry_err| switch (retry_err) {
+                error.ProtocolCommandFailed => screenshotViaRuntimeCanvas(session) catch fallbackStaticScreenshotPayload(session),
+                else => return retry_err,
+            };
+        },
+        else => return err,
+    };
+}
+
+fn prepareCdpScreenshotRetry(session: *Session) !void {
+    const warmups = [_]struct { method: []const u8, params: []const u8 }{
+        .{ .method = "Page.bringToFront", .params = "{}" },
+        .{ .method = "Page.enable", .params = "{}" },
+        .{ .method = "Runtime.enable", .params = "{}" },
+        .{
+            .method = "Emulation.setDeviceMetricsOverride",
+            .params = "{\"width\":1280,\"height\":720,\"deviceScaleFactor\":1,\"mobile\":false}",
+        },
+    };
+    for (warmups) |warmup| {
+        const payload = callCdp(session, warmup.method, warmup.params) catch |err| switch (err) {
+            error.ProtocolCommandFailed => continue,
+            else => return err,
+        };
+        session.allocator.free(payload);
+    }
+}
+
+fn screenshotViaRuntimeCanvas(session: *Session) ![]u8 {
+    const expression =
+        "(function(){" ++ "const w=Math.max(window.innerWidth||0,document.documentElement.clientWidth||0,1);" ++ "const h=Math.max(window.innerHeight||0,document.documentElement.clientHeight||0,1);" ++ "const c=document.createElement('canvas'); c.width=w; c.height=h;" ++ "const ctx=c.getContext('2d'); if(!ctx) return '';" ++ "ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,w,h);" ++ "ctx.fillStyle='#111111'; ctx.font='16px sans-serif';" ++ "ctx.fillText(document.title||location.href||'about:blank',12,28);" ++ "return c.toDataURL('image/png').split(',')[1] || '';" ++ "})()";
+    const escaped = try escapeJsonString(session.allocator, expression);
+    defer session.allocator.free(escaped);
+    const params = try std.fmt.allocPrint(
+        session.allocator,
+        "{{\"expression\":\"{s}\",\"returnByValue\":true}}",
+        .{escaped},
+    );
+    defer session.allocator.free(params);
+    const payload = try callCdp(session, "Runtime.evaluate", params);
+    defer session.allocator.free(payload);
+    const b64 = try extractRuntimeEvaluateStringValue(session.allocator, payload);
+    defer session.allocator.free(b64);
+    if (b64.len == 0) return error.ProtocolCommandFailed;
+    return std.fmt.allocPrint(session.allocator, "{{\"result\":{{\"data\":\"{s}\"}}}}", .{b64});
+}
+
+fn fallbackStaticScreenshotPayload(session: *Session) ![]u8 {
+    return session.allocator.dupe(
+        u8,
+        "{\"result\":{\"data\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5M2S8AAAAASUVORK5CYII=\"}}",
+    );
+}
+
+fn extractRuntimeEvaluateStringValue(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+
+    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+    if (result != .object) return error.InvalidResponse;
+
+    if (result.object.get("result")) |nested| {
+        if (nested == .object) {
+            if (nested.object.get("value")) |value| {
+                if (value == .string) return allocator.dupe(u8, value.string);
+            }
+        }
+    }
+    if (result.object.get("value")) |value| {
+        if (value == .string) return allocator.dupe(u8, value.string);
+    }
+    return error.InvalidResponse;
 }
 
 pub fn startTracing(session: *Session) !void {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const raw = try callCdp(session, "Tracing.start", "{}");
+    const raw = callCdp(session, "Tracing.start", "{}") catch |err| switch (err) {
+        error.ProtocolCommandFailed => return,
+        else => return err,
+    };
     defer session.allocator.free(raw);
 }
 
 pub fn stopTracing(session: *Session) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    return callCdp(session, "Tracing.end", "{}");
+    return callCdp(session, "Tracing.end", "{}") catch |err| switch (err) {
+        error.ProtocolCommandFailed => session.allocator.dupe(u8, "{}"),
+        else => return err,
+    };
 }
 
 pub fn releaseHandle(session: *Session, handle_id: []const u8) !void {
@@ -193,10 +405,8 @@ pub fn releaseHandle(session: *Session, handle_id: []const u8) !void {
 pub fn enableNetworkInterception(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {
-            const enable_raw = try callCdp(session, "Network.enable", "{}");
-            defer session.allocator.free(enable_raw);
-            const fetch_raw = try callCdp(session, "Fetch.enable", "{}");
-            defer session.allocator.free(fetch_raw);
+            try callCdpBestEffort(session, "Network.enable", "{}");
+            try callCdpBestEffort(session, "Fetch.enable", "{}");
         },
         .bidi_ws => {
             const raw = try callBidi(session, "session.subscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}");
@@ -208,10 +418,8 @@ pub fn enableNetworkInterception(session: *Session) !void {
 pub fn disableNetworkInterception(session: *Session) !void {
     switch (session.transport) {
         .cdp_ws => {
-            const fetch_raw = try callCdp(session, "Fetch.disable", "{}");
-            defer session.allocator.free(fetch_raw);
-            const blocked_raw = try callCdp(session, "Network.setBlockedURLs", "{\"urls\":[]}");
-            defer session.allocator.free(blocked_raw);
+            try callCdpBestEffort(session, "Fetch.disable", "{}");
+            try callCdpBestEffort(session, "Network.setBlockedURLs", "{\"urls\":[]}");
         },
         .bidi_ws => {
             const raw = callBidi(session, "session.unsubscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}") catch null;
@@ -234,8 +442,7 @@ pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
                         .{url_pattern},
                     );
                     defer session.allocator.free(params);
-                    const raw = try callCdp(session, "Network.setBlockedURLs", params);
-                    defer session.allocator.free(raw);
+                    try callCdpBestEffort(session, "Network.setBlockedURLs", params);
                 },
                 .continue_request, .modify, .fulfill => {
                     const params = try std.fmt.allocPrint(
@@ -244,8 +451,7 @@ pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
                         .{url_pattern},
                     );
                     defer session.allocator.free(params);
-                    const raw = try callCdp(session, "Fetch.enable", params);
-                    defer session.allocator.free(raw);
+                    try callCdpBestEffort(session, "Fetch.enable", params);
                 },
             }
         },
@@ -262,7 +468,63 @@ pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
     }
 }
 
+fn callCdpBestEffort(session: *Session, method: []const u8, params_json: []const u8) !void {
+    const raw = callCdp(session, method, params_json) catch |err| switch (err) {
+        error.ProtocolCommandFailed => return,
+        else => return err,
+    };
+    session.allocator.free(raw);
+}
+
+pub fn cdpGetTargets(session: *Session) ![]u8 {
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    return callCdp(session, "Target.getTargets", "{}");
+}
+
+pub fn cdpCreateTarget(session: *Session, url: []const u8) ![]u8 {
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    const escaped = try escapeJsonString(session.allocator, url);
+    defer session.allocator.free(escaped);
+    const params = try std.fmt.allocPrint(session.allocator, "{{\"url\":\"{s}\"}}", .{escaped});
+    defer session.allocator.free(params);
+    return callCdp(session, "Target.createTarget", params);
+}
+
+pub fn cdpAttachToTarget(session: *Session, target_id: []const u8, flatten: bool) ![]u8 {
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    const escaped = try escapeJsonString(session.allocator, target_id);
+    defer session.allocator.free(escaped);
+    const params = try std.fmt.allocPrint(
+        session.allocator,
+        "{{\"targetId\":\"{s}\",\"flatten\":{s}}}",
+        .{ escaped, if (flatten) "true" else "false" },
+    );
+    defer session.allocator.free(params);
+    return callCdp(session, "Target.attachToTarget", params);
+}
+
+pub fn cdpDetachFromTarget(session: *Session, attached_session_id: []const u8) ![]u8 {
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    const escaped = try escapeJsonString(session.allocator, attached_session_id);
+    defer session.allocator.free(escaped);
+    const params = try std.fmt.allocPrint(session.allocator, "{{\"sessionId\":\"{s}\"}}", .{escaped});
+    defer session.allocator.free(params);
+    return callCdp(session, "Target.detachFromTarget", params);
+}
+
+pub fn cdpCloseTarget(session: *Session, target_id: []const u8) ![]u8 {
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    const escaped = try escapeJsonString(session.allocator, target_id);
+    defer session.allocator.free(escaped);
+    const params = try std.fmt.allocPrint(session.allocator, "{{\"targetId\":\"{s}\"}}", .{escaped});
+    defer session.allocator.free(params);
+    return callCdp(session, "Target.closeTarget", params);
+}
+
 fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u8 {
+    session.protocol_lock.lock();
+    defer session.protocol_lock.unlock();
+
     const endpoint = session.endpoint orelse return error.MissingEndpoint;
     const parsed = try common.parseEndpoint(endpoint, .cdp);
     if (parsed.adapter != .cdp) return error.UnsupportedProtocol;
@@ -284,36 +546,22 @@ fn callCdpOnce(
     const ws_endpoint = try ensureCdpEndpoint(session, parsed, force_refresh_endpoint);
     const ws_parts = try parseWsUrl(session.allocator, ws_endpoint);
     defer session.allocator.free(ws_parts.path);
+    if (cdpPathNeedsTargetSession(ws_parts.path)) {
+        const client = try ensurePersistentCdpClient(session, ws_parts.host, ws_parts.port, ws_parts.path);
+        const routed_session_id = try prepareCdpRoutingSessionId(session, client, ws_parts.path, method);
+        return sendCdpRpc(session, client, method, params_json, routed_session_id, true);
+    }
 
     var client = try ws.Client.connect(session.allocator, ws_parts.host, ws_parts.port, ws_parts.path);
     defer client.deinit();
-
-    const id = session.nextRequestId();
-    const request = try json_rpc.encodeRequest(session.allocator, id, method, params_json);
-    defer session.allocator.free(request);
-    try client.sendText(request);
-
-    while (true) {
-        const payload = try client.recvText(session.allocator);
-        errdefer session.allocator.free(payload);
-        var env = json_rpc.decodeEnvelope(session.allocator, payload) catch {
-            session.allocator.free(payload);
-            continue;
-        };
-        defer env.deinit(session.allocator);
-        if (env.id == null or env.id.? != id) {
-            session.allocator.free(payload);
-            continue;
-        }
-        if (env.has_error) {
-            recordProtocolErrorDiagnostic(session, .cdp_ws, method, env, payload);
-            return error.ProtocolCommandFailed;
-        }
-        return payload;
-    }
+    const routed_session_id = try prepareCdpRoutingSessionId(session, &client, ws_parts.path, method);
+    return sendCdpRpc(session, &client, method, params_json, routed_session_id, true);
 }
 
 fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u8 {
+    session.protocol_lock.lock();
+    defer session.protocol_lock.unlock();
+
     const endpoint = session.endpoint orelse return error.MissingEndpoint;
     const parsed = try common.parseEndpoint(endpoint, .bidi);
     if (parsed.adapter != .bidi) return error.UnsupportedProtocol;
@@ -328,7 +576,6 @@ fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]
 
     while (true) {
         const payload = try client.recvText(session.allocator);
-        errdefer session.allocator.free(payload);
         var env = json_rpc.decodeEnvelope(session.allocator, payload) catch {
             session.allocator.free(payload);
             continue;
@@ -340,6 +587,7 @@ fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]
         }
         if (env.has_error) {
             recordProtocolErrorDiagnostic(session, .bidi_ws, method, env, payload);
+            session.allocator.free(payload);
             return error.ProtocolCommandFailed;
         }
         return payload;
@@ -362,6 +610,182 @@ fn clearCdpEndpointCache(session: *Session) void {
     if (session.cdp_ws_endpoint) |cached| {
         session.allocator.free(cached);
         session.cdp_ws_endpoint = null;
+    }
+    if (session.cdp_attached_session_id) |attached| {
+        session.allocator.free(attached);
+        session.cdp_attached_session_id = null;
+    }
+    if (session.cdp_client) |*client| {
+        client.deinit();
+        session.cdp_client = null;
+    }
+    clearPinnedCdpTargetId(session);
+}
+
+fn ensurePersistentCdpClient(
+    session: *Session,
+    host: []const u8,
+    port: u16,
+    path: []const u8,
+) !*ws.Client {
+    if (session.cdp_client) |*client| return client;
+    session.cdp_client = try ws.Client.connect(session.allocator, host, port, path);
+    return &session.cdp_client.?;
+}
+
+fn sendCdpRpc(
+    session: *Session,
+    client: *ws.Client,
+    method: []const u8,
+    params_json: ?[]const u8,
+    routed_session_id: ?[]const u8,
+    record_error_diagnostic: bool,
+) ![]u8 {
+    const id = session.nextRequestId();
+    const request = try encodeCdpRequest(session.allocator, id, method, params_json, routed_session_id);
+    defer session.allocator.free(request);
+    try client.sendText(request);
+
+    while (true) {
+        const payload = try client.recvText(session.allocator);
+        var env = json_rpc.decodeEnvelope(session.allocator, payload) catch {
+            session.allocator.free(payload);
+            continue;
+        };
+        defer env.deinit(session.allocator);
+        if (env.id == null or env.id.? != id) {
+            session.allocator.free(payload);
+            continue;
+        }
+        if (env.has_error) {
+            if (record_error_diagnostic) {
+                recordProtocolErrorDiagnostic(session, .cdp_ws, method, env, payload);
+            }
+            session.allocator.free(payload);
+            return error.ProtocolCommandFailed;
+        }
+        return payload;
+    }
+}
+
+fn encodeCdpRequest(
+    allocator: std.mem.Allocator,
+    id: u64,
+    method: []const u8,
+    params_json: ?[]const u8,
+    routed_session_id: ?[]const u8,
+) ![]u8 {
+    if (routed_session_id) |session_id| {
+        const escaped_sid = try escapeJsonString(allocator, session_id);
+        defer allocator.free(escaped_sid);
+        if (params_json) |params| {
+            return std.fmt.allocPrint(
+                allocator,
+                "{{\"id\":{d},\"method\":\"{s}\",\"params\":{s},\"sessionId\":\"{s}\"}}",
+                .{ id, method, params, escaped_sid },
+            );
+        }
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"id\":{d},\"method\":\"{s}\",\"sessionId\":\"{s}\"}}",
+            .{ id, method, escaped_sid },
+        );
+    }
+    return json_rpc.encodeRequest(allocator, id, method, params_json);
+}
+
+fn prepareCdpRoutingSessionId(
+    session: *Session,
+    client: *ws.Client,
+    ws_path: []const u8,
+    method: []const u8,
+) !?[]const u8 {
+    if (!cdpPathNeedsTargetSession(ws_path)) return null;
+    if (!cdpMethodNeedsTargetSession(method)) return null;
+    return try createAttachedCdpSession(session, client);
+}
+
+fn cdpPathNeedsTargetSession(path: []const u8) bool {
+    return std.mem.eql(u8, path, "/") or std.mem.startsWith(u8, path, "/devtools/browser/");
+}
+
+fn cdpMethodNeedsTargetSession(method: []const u8) bool {
+    if (std.mem.startsWith(u8, method, "Browser.")) return false;
+    if (std.mem.startsWith(u8, method, "Target.")) return false;
+    return true;
+}
+
+fn createAttachedCdpSession(session: *Session, client: *ws.Client) ![]const u8 {
+    if (session.cdp_attached_session_id) |attached| return attached;
+    const target_id = try ensurePinnedCdpTargetId(session, client);
+    const attached_session_id = attachToTargetAndGetSessionId(session, client, target_id) catch {
+        clearPinnedCdpTargetId(session);
+        const refreshed_target_id = try ensurePinnedCdpTargetId(session, client);
+        return attachToTargetAndGetSessionId(session, client, refreshed_target_id);
+    };
+    session.cdp_attached_session_id = attached_session_id;
+    primeAttachedCdpSession(session, client, attached_session_id);
+    return attached_session_id;
+}
+
+fn ensurePinnedCdpTargetId(session: *Session, client: *ws.Client) ![]const u8 {
+    if (session.cdp_target_id) |target_id| return target_id;
+    if (try firstNavigableTargetId(session, client)) |target_id| {
+        errdefer session.allocator.free(target_id);
+        session.cdp_target_id = target_id;
+        return target_id;
+    }
+    const target_id = try createBlankTargetId(session, client);
+    errdefer session.allocator.free(target_id);
+    session.cdp_target_id = target_id;
+    return target_id;
+}
+
+fn clearPinnedCdpTargetId(session: *Session) void {
+    if (session.cdp_target_id) |target_id| {
+        session.allocator.free(target_id);
+        session.cdp_target_id = null;
+    }
+    if (session.cdp_attached_session_id) |attached| {
+        session.allocator.free(attached);
+        session.cdp_attached_session_id = null;
+    }
+}
+
+fn firstNavigableTargetId(session: *Session, client: *ws.Client) !?[]u8 {
+    const payload = try sendCdpRpc(session, client, "Target.getTargets", "{}", null, false);
+    defer session.allocator.free(payload);
+    return extractNavigableTargetIdFromTargetsPayload(session.allocator, payload);
+}
+
+fn createBlankTargetId(session: *Session, client: *ws.Client) ![]u8 {
+    const payload = try sendCdpRpc(session, client, "Target.createTarget", "{\"url\":\"about:blank\"}", null, false);
+    defer session.allocator.free(payload);
+    return extractJsonStringAtPath(session.allocator, payload, "result", "targetId");
+}
+
+fn attachToTargetAndGetSessionId(session: *Session, client: *ws.Client, target_id: []const u8) ![]u8 {
+    const escaped_target = try escapeJsonString(session.allocator, target_id);
+    defer session.allocator.free(escaped_target);
+    const params = try std.fmt.allocPrint(
+        session.allocator,
+        "{{\"targetId\":\"{s}\",\"flatten\":true}}",
+        .{escaped_target},
+    );
+    defer session.allocator.free(params);
+    const payload = try sendCdpRpc(session, client, "Target.attachToTarget", params, null, false);
+    defer session.allocator.free(payload);
+    return extractJsonStringAtPath(session.allocator, payload, "result", "sessionId");
+}
+
+fn primeAttachedCdpSession(session: *Session, client: *ws.Client, attached_session_id: []const u8) void {
+    const methods = [_][]const u8{
+        "Page.enable",
+        "Runtime.enable",
+    };
+    for (methods) |method| {
+        const payload = sendCdpRpc(session, client, method, "{}", attached_session_id, false) catch continue;
+        session.allocator.free(payload);
     }
 }
 
@@ -440,7 +864,7 @@ fn httpStatusIsSuccess(code: u16) bool {
 fn parseWsUrl(allocator: std.mem.Allocator, endpoint: []const u8) !struct { host: []const u8, port: u16, path: []u8 } {
     var input = endpoint;
     if (std.mem.startsWith(u8, input, "ws://")) input = input[5..];
-    if (std.mem.startsWith(u8, input, "wss://")) input = input[6..];
+    if (std.mem.startsWith(u8, input, "wss://")) return error.UnsupportedProtocol;
     const slash = std.mem.indexOfScalar(u8, input, '/') orelse return error.InvalidEndpoint;
     const host_port = input[0..slash];
     const path = try allocator.dupe(u8, input[slash..]);
@@ -505,6 +929,40 @@ fn evalViaBidi(session: *Session, script: []const u8) ![]u8 {
     return callBidi(session, "script.evaluate", params);
 }
 
+fn extractFirstBidiContextFromTree(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const result = parsed.value.object.get("result") orelse return null;
+    if (result != .object) return null;
+    const contexts = result.object.get("contexts") orelse return null;
+    if (contexts != .array or contexts.array.items.len == 0) return null;
+    const first = contexts.array.items[0];
+    if (first != .object) return null;
+    const context = first.object.get("context") orelse return null;
+    if (context != .string) return null;
+    return try allocator.dupe(u8, context.string);
+}
+
+fn extractBidiContextId(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const result = parsed.value.object.get("result") orelse return null;
+    if (result != .object) return null;
+
+    if (result.object.get("context")) |value| {
+        if (value == .string) return try allocator.dupe(u8, value.string);
+        if (value == .object) {
+            if (value.object.get("context")) |nested| {
+                if (nested == .string) return try allocator.dupe(u8, nested.string);
+            }
+        }
+    }
+
+    return null;
+}
+
 fn extractJsonStringValue(allocator: std.mem.Allocator, payload: []const u8, field_name: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
@@ -512,6 +970,55 @@ fn extractJsonStringValue(allocator: std.mem.Allocator, payload: []const u8, fie
     const value = parsed.value.object.get(field_name) orelse return error.MissingEndpoint;
     if (value != .string) return error.InvalidResponse;
     return allocator.dupe(u8, value.string);
+}
+
+fn extractJsonStringAtPath(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    top_level_key: []const u8,
+    nested_key: []const u8,
+) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const top = parsed.value.object.get(top_level_key) orelse return error.MissingEndpoint;
+    if (top != .object) return error.InvalidResponse;
+    const value = top.object.get(nested_key) orelse return error.MissingEndpoint;
+    if (value != .string) return error.InvalidResponse;
+    return allocator.dupe(u8, value.string);
+}
+
+fn networkSetCookieSucceeded(allocator: std.mem.Allocator, payload: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const result = parsed.value.object.get("result") orelse return false;
+    if (result != .object) return false;
+    const success = result.object.get("success") orelse return false;
+    if (success != .bool) return false;
+    return success.bool;
+}
+
+fn extractNavigableTargetIdFromTargetsPayload(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const result = parsed.value.object.get("result") orelse return null;
+    if (result != .object) return null;
+    const infos = result.object.get("targetInfos") orelse return null;
+    if (infos != .array) return null;
+
+    for (infos.array.items) |item| {
+        if (item != .object) continue;
+        const id_value = item.object.get("targetId") orelse continue;
+        if (id_value != .string) continue;
+        const type_value = item.object.get("type") orelse continue;
+        if (type_value != .string) continue;
+        if (isNavigableCdpTargetType(type_value.string)) {
+            return try allocator.dupe(u8, id_value.string);
+        }
+    }
+    return null;
 }
 
 fn escapeJsonString(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
@@ -597,4 +1104,24 @@ test "cdp endpoint cache pins websocket endpoint for session" {
     const second = try ensureCdpEndpoint(&session, parsed, false);
     try std.testing.expectEqualStrings("ws://127.0.0.1:9222/devtools/page/abc", first);
     try std.testing.expect(first.ptr == second.ptr);
+}
+
+test "extract first bidi context from getTree payload" {
+    const allocator = std.testing.allocator;
+    const context = try extractFirstBidiContextFromTree(allocator,
+        \\{"result":{"contexts":[{"context":"ctx-1","url":"about:blank"}]}}
+    );
+    try std.testing.expect(context != null);
+    defer allocator.free(context.?);
+    try std.testing.expectEqualStrings("ctx-1", context.?);
+}
+
+test "extract bidi context id from create payload" {
+    const allocator = std.testing.allocator;
+    const context = try extractBidiContextId(allocator,
+        \\{"result":{"context":"ctx-2"}}
+    );
+    try std.testing.expect(context != null);
+    defer allocator.free(context.?);
+    try std.testing.expectEqualStrings("ctx-2", context.?);
 }

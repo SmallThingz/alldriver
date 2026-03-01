@@ -143,8 +143,8 @@ pub fn installManagedBrowserWithOptions(
     defer allocator.free(version_dir);
     try std.fs.cwd().makePath(version_dir);
 
-    const filename = options.executable_name orelse inferFileName(download_url);
-    const staged_path = try std.fs.path.join(allocator, &.{ version_dir, filename });
+    const staged_filename = inferFileName(download_url);
+    const staged_path = try std.fs.path.join(allocator, &.{ version_dir, staged_filename });
     defer allocator.free(staged_path);
 
     const payload = try downloadToMemory(allocator, download_url);
@@ -156,7 +156,7 @@ pub fn installManagedBrowserWithOptions(
 
     try std.fs.cwd().writeFile(.{ .sub_path = staged_path, .data = payload });
 
-    const selected: SelectedExecutable = if (isArchiveFileName(filename))
+    const selected: SelectedExecutable = if (isArchiveFileName(staged_filename))
         try extractAndSelectExecutable(
             allocator,
             kind,
@@ -165,9 +165,12 @@ pub fn installManagedBrowserWithOptions(
             options.archive_executable_name,
         )
     else
-        SelectedExecutable{
-            .path = try allocator.dupe(u8, staged_path),
-            .basename = try allocator.dupe(u8, std.fs.path.basename(staged_path)),
+        blk: {
+            const base = std.fs.path.basename(options.executable_name orelse std.fs.path.basename(staged_path));
+            break :blk SelectedExecutable{
+                .path = try allocator.dupe(u8, staged_path),
+                .basename = try allocator.dupe(u8, base),
+            };
         };
     defer {
         allocator.free(selected.path);
@@ -176,13 +179,35 @@ pub fn installManagedBrowserWithOptions(
 
     const current_dir = try std.fs.path.join(allocator, &.{ kind_root, "current" });
     defer allocator.free(current_dir);
-    std.fs.cwd().deleteTree(current_dir) catch {};
-    try std.fs.cwd().makePath(current_dir);
+    const current_stage_dir = try std.fs.path.join(allocator, &.{ kind_root, ".current.new" });
+    defer allocator.free(current_stage_dir);
+    const current_prev_dir = try std.fs.path.join(allocator, &.{ kind_root, ".current.prev" });
+    defer allocator.free(current_prev_dir);
 
-    const current_file = try std.fs.path.join(allocator, &.{ current_dir, selected.basename });
-    defer allocator.free(current_file);
-    try std.fs.cwd().copyFile(selected.path, std.fs.cwd(), current_file, .{});
-    ensureExecutablePermissions(current_file);
+    std.fs.cwd().deleteTree(current_stage_dir) catch {};
+    std.fs.cwd().deleteTree(current_prev_dir) catch {};
+    try std.fs.cwd().makePath(current_stage_dir);
+
+    const staged_current_file = try std.fs.path.join(allocator, &.{ current_stage_dir, selected.basename });
+    defer allocator.free(staged_current_file);
+    try std.fs.cwd().copyFile(selected.path, std.fs.cwd(), staged_current_file, .{});
+    ensureExecutablePermissions(staged_current_file);
+
+    if (util.exists(current_dir)) {
+        std.fs.cwd().rename(current_dir, current_prev_dir) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+
+    std.fs.cwd().rename(current_stage_dir, current_dir) catch |err| {
+        if (util.exists(current_prev_dir) and !util.exists(current_dir)) {
+            std.fs.cwd().rename(current_prev_dir, current_dir) catch {};
+        }
+        return err;
+    };
+
+    std.fs.cwd().deleteTree(current_prev_dir) catch {};
 }
 
 fn downloadToMemory(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
@@ -214,8 +239,10 @@ fn inferFileName(url: []const u8) []const u8 {
         return std.fs.path.basename(local);
     }
 
-    if (std.mem.lastIndexOfScalar(u8, url, '/')) |idx| {
-        const name = url[idx + 1 ..];
+    const end = std.mem.indexOfAny(u8, url, "?#") orelse url.len;
+    const clean = url[0..end];
+    if (std.mem.lastIndexOfScalar(u8, clean, '/')) |idx| {
+        const name = clean[idx + 1 ..];
         if (name.len > 0) return name;
     }
 
@@ -275,7 +302,7 @@ fn findPathByBasename(
 
     while (try walker.next()) |entry| {
         switch (entry.kind) {
-            .file, .sym_link => {},
+            .file => {},
             else => continue,
         }
         if (!std.mem.eql(u8, std.fs.path.basename(entry.path), want_basename)) continue;
@@ -379,6 +406,7 @@ fn verifySha256(data: []const u8, expected_hex: []const u8) !void {
 test "infer file name" {
     try std.testing.expect(std.mem.eql(u8, inferFileName("http://example.com/path/browser"), "browser"));
     try std.testing.expect(std.mem.eql(u8, inferFileName("http://example.com/path/"), "browser.bin"));
+    try std.testing.expect(std.mem.eql(u8, inferFileName("https://example.com/download/browser.tar.gz?token=abc#frag"), "browser.tar.gz"));
 }
 
 test "archive file detection" {

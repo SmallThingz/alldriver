@@ -6,22 +6,11 @@ pub fn main() !void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    var installs = try driver.discover(allocator, .{
-        .kinds = &.{ .chrome, .edge, .firefox },
+    var launch_op = try driver.modern.launchAutoAsync(allocator, .{
+        .kinds = &.{ .chrome, .edge, .firefox, .lightpanda },
         .allow_managed_download = false,
-    }, .{});
-    defer installs.deinit();
-
-    if (installs.items.len == 0) {
-        std.debug.print("no browser install found\n", .{});
-        return;
-    }
-
-    var launch_op = try driver.modern.launchAsync(allocator, .{
-        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
-        .args = &.{},
     });
     defer launch_op.deinit();
     var session = try launch_op.await(30_000);

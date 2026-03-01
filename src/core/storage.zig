@@ -10,13 +10,34 @@ pub const CookieHeaderOptions = types.CookieHeaderOptions;
 
 pub fn setCookie(session: *Session, cookie: Cookie) !void {
     if (!session.supports(.dom)) return error.UnsupportedCapability;
-    try executor.setCookie(session, .{ .name = cookie.name, .value = cookie.value }, cookie.domain, cookie.path);
+    executor.setCookie(session, .{ .name = cookie.name, .value = cookie.value }, cookie.domain, cookie.path) catch |err| switch (err) {
+        error.ProtocolCommandFailed => try setCookieViaDocument(session, cookie),
+        else => return err,
+    };
     events.emit(session, .{
         .cookie_updated = .{
             .domain = cookie.domain,
             .name = cookie.name,
         },
     });
+}
+
+fn setCookieViaDocument(session: *Session, cookie: Cookie) !void {
+    const name = try escapeJsonString(session.allocator, cookie.name);
+    defer session.allocator.free(name);
+    const value = try escapeJsonString(session.allocator, cookie.value);
+    defer session.allocator.free(value);
+    const path = try escapeJsonString(session.allocator, cookie.path);
+    defer session.allocator.free(path);
+
+    const script = try std.fmt.allocPrint(
+        session.allocator,
+        "(function(){{document.cookie=\"{s}={s}; path={s}\"; return true;}})();",
+        .{ name, value, path },
+    );
+    defer session.allocator.free(script);
+    const result = try executor.evaluate(session, script);
+    defer session.allocator.free(result);
 }
 
 pub fn getCookies(session: *Session, allocator: std.mem.Allocator) ![]Cookie {
@@ -38,10 +59,22 @@ pub fn freeCookies(allocator: std.mem.Allocator, cookies: []Cookie) void {
 pub fn queryCookies(session: *Session, allocator: std.mem.Allocator, q: CookieQuery) ![]Cookie {
     const all = try getCookies(session, allocator);
     errdefer freeCookies(allocator, all);
+    session.state_lock.lock();
+    const current_url = if (session.current_url) |url|
+        allocator.dupe(u8, url) catch null
+    else
+        null;
+    session.state_lock.unlock();
+    defer if (current_url) |url| allocator.free(url);
+
+    const current_host = if (current_url) |url|
+        (parseUrl(url) orelse ParsedUrl{ .secure = false, .host = "", .path = "/" }).host
+    else
+        "";
 
     var matched_count: usize = 0;
     for (all) |cookie| {
-        if (matchesQuery(cookie, q)) matched_count += 1;
+        if (matchesQueryForSession(cookie, q, current_host)) matched_count += 1;
     }
 
     if (matched_count == all.len) return all;
@@ -49,7 +82,7 @@ pub fn queryCookies(session: *Session, allocator: std.mem.Allocator, q: CookieQu
     const out = try allocator.alloc(Cookie, matched_count);
     var out_index: usize = 0;
     for (all) |cookie| {
-        if (matchesQuery(cookie, q)) {
+        if (matchesQueryForSession(cookie, q, current_host)) {
             out[out_index] = cookie;
             out_index += 1;
         } else {
@@ -233,6 +266,7 @@ fn freeCookieFields(allocator: std.mem.Allocator, cookie: Cookie) void {
 
 fn isExpired(cookie: Cookie) bool {
     const expiry = cookie.expires_unix_seconds orelse return false;
+    if (expiry < 0) return false;
     return std.time.timestamp() >= expiry;
 }
 
@@ -245,6 +279,26 @@ fn matchesQuery(cookie: Cookie, q: CookieQuery) bool {
     }
     if (q.path) |path| {
         if (!pathMatches(cookie.path, path)) return false;
+    }
+    if (q.secure_only and !cookie.secure) return false;
+    if (!q.include_http_only and cookie.http_only) return false;
+    if (!q.include_expired and isExpired(cookie)) return false;
+    return true;
+}
+
+fn matchesQueryForSession(cookie: Cookie, q: CookieQuery, current_host: []const u8) bool {
+    if (q.domain) |domain| {
+        if (cookie.domain.len == 0) {
+            if (current_host.len == 0 or !domainMatches(domain, current_host)) return false;
+        } else if (!domainMatches(cookie.domain, domain)) {
+            return false;
+        }
+    }
+    if (q.path) |path| {
+        if (!pathMatches(cookie.path, path)) return false;
+    }
+    if (q.name) |name| {
+        if (!std.mem.eql(u8, cookie.name, name)) return false;
     }
     if (q.secure_only and !cookie.secure) return false;
     if (!q.include_http_only and cookie.http_only) return false;
@@ -267,8 +321,7 @@ fn parseUrl(url: []const u8) ?ParsedUrl {
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
     const host_port = rest[0..slash];
     if (host_port.len == 0) return null;
-    const colon = std.mem.indexOfScalar(u8, host_port, ':') orelse host_port.len;
-    const host = host_port[0..colon];
+    const host = normalizeDomainToken(host_port);
     if (host.len == 0) return null;
     const path = if (slash < rest.len) rest[slash..] else "/";
     return .{ .secure = secure, .host = host, .path = path };
@@ -276,11 +329,49 @@ fn parseUrl(url: []const u8) ?ParsedUrl {
 
 fn domainMatches(cookie_domain_raw: []const u8, host: []const u8) bool {
     if (cookie_domain_raw.len == 0 or host.len == 0) return false;
-    const cookie_domain = if (cookie_domain_raw[0] == '.') cookie_domain_raw[1..] else cookie_domain_raw;
-    if (std.ascii.eqlIgnoreCase(cookie_domain, host)) return true;
-    if (host.len <= cookie_domain.len) return false;
-    if (!std.ascii.eqlIgnoreCase(host[host.len - cookie_domain.len ..], cookie_domain)) return false;
-    return host[host.len - cookie_domain.len - 1] == '.';
+    const cookie_domain = normalizeDomainToken(cookie_domain_raw);
+    const host_domain = normalizeDomainToken(host);
+    if (cookie_domain.len == 0 or host_domain.len == 0) return false;
+    if (std.ascii.eqlIgnoreCase(cookie_domain, host_domain)) return true;
+    if (host_domain.len <= cookie_domain.len) return false;
+    if (!std.ascii.eqlIgnoreCase(host_domain[host_domain.len - cookie_domain.len ..], cookie_domain)) return false;
+    return host_domain[host_domain.len - cookie_domain.len - 1] == '.';
+}
+
+fn normalizeDomainToken(raw: []const u8) []const u8 {
+    if (raw.len == 0) return raw;
+    var token = raw;
+    if (std.mem.indexOf(u8, token, "://")) |scheme_sep| {
+        token = token[scheme_sep + 3 ..];
+    }
+    if (std.mem.indexOfAny(u8, token, "/?#")) |cut| {
+        token = token[0..cut];
+    }
+    if (token.len == 0) return token;
+
+    while (token.len > 0 and token[0] == '.') {
+        token = token[1..];
+    }
+    while (token.len > 0 and token[token.len - 1] == '.') {
+        token = token[0 .. token.len - 1];
+    }
+    if (token.len == 0) return token;
+
+    if (token[0] == '[') {
+        if (std.mem.indexOfScalar(u8, token, ']')) |close_idx| {
+            if (close_idx <= 1) return "";
+            return token[1..close_idx];
+        }
+    }
+
+    const first_colon = std.mem.indexOfScalar(u8, token, ':');
+    const last_colon = std.mem.lastIndexOfScalar(u8, token, ':');
+    if (first_colon) |idx| {
+        if (last_colon != null and idx == last_colon.?) {
+            token = token[0..idx];
+        }
+    }
+    return token;
 }
 
 fn pathMatches(cookie_path: []const u8, request_path: []const u8) bool {
@@ -329,6 +420,9 @@ test "cookie domain/path matching helpers" {
     try std.testing.expect(domainMatches("example.com", "example.com"));
     try std.testing.expect(domainMatches(".example.com", "www.example.com"));
     try std.testing.expect(!domainMatches("example.com", "evil-example.com"));
+    try std.testing.expect(domainMatches("127.0.0.1", "127.0.0.1:45123"));
+    try std.testing.expect(domainMatches("127.0.0.1:45123", "127.0.0.1"));
+    try std.testing.expect(domainMatches("http://127.0.0.1:45123/", "127.0.0.1"));
 
     try std.testing.expect(pathMatches("/", "/app/page"));
     try std.testing.expect(pathMatches("/app", "/app/page"));
@@ -374,5 +468,19 @@ test "cookie query filters secure and expired" {
         .name = "sid",
         .domain = "example.com",
         .include_expired = true,
+    }));
+
+    const session_cookie: Cookie = .{
+        .name = "sid",
+        .value = "session",
+        .domain = "example.com",
+        .path = "/",
+        .secure = false,
+        .expires_unix_seconds = -1,
+    };
+    try std.testing.expect(matchesQuery(session_cookie, .{
+        .name = "sid",
+        .domain = "example.com",
+        .include_expired = false,
     }));
 }

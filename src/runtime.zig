@@ -7,6 +7,7 @@ const session_mod = @import("core/session.zig");
 const common = @import("protocol/common.zig");
 const cdp = @import("protocol/cdp/adapter.zig");
 const bidi = @import("protocol/bidi/adapter.zig");
+const executor = @import("protocol/executor.zig");
 const http_client = @import("transport/http_client.zig");
 const logging = @import("logging.zig");
 const extensions = @import("extensions/api.zig");
@@ -62,21 +63,28 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     }
 
     try raw_args.append(allocator, opts.install.path);
-    if (shouldIncludeLightpandaBrowserSubcommand(opts)) {
-        try raw_args.append(allocator, "browser");
-    }
-
     const debug_port = try reserveLocalPort();
-    try appendDefaultArgs(
-        allocator,
-        &raw_args,
-        &temp_owned_strings,
-        opts,
-        effective_ignore_tls_errors,
-        adapter_kind,
-        debug_port,
-    );
-    try appendProfileArgs(allocator, &raw_args, &temp_owned_strings, opts.install.engine, effective_profile_dir);
+    if (opts.install.kind == .lightpanda) {
+        try appendLightpandaArgs(
+            allocator,
+            &raw_args,
+            &temp_owned_strings,
+            opts,
+            effective_ignore_tls_errors,
+            debug_port,
+        );
+    } else {
+        try appendDefaultArgs(
+            allocator,
+            &raw_args,
+            &temp_owned_strings,
+            opts,
+            effective_ignore_tls_errors,
+            adapter_kind,
+            debug_port,
+        );
+        try appendProfileArgs(allocator, &raw_args, &temp_owned_strings, opts.install.engine, effective_profile_dir);
+    }
     try appendUserArgs(allocator, &raw_args, opts.args);
 
     const final_args = try extensions.applyLaunchArgs(allocator, opts, raw_args.items);
@@ -124,7 +132,7 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         break :blk effective_profile_dir;
     } else null;
 
-    const session = Session{
+    var session = Session{
         .allocator = allocator,
         .id = id,
         .mode = .browser,
@@ -141,33 +149,46 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         .owned_argv = final_args,
         .ephemeral_profile_dir = ephemeral_profile_dir,
     };
+    errdefer session.deinit();
+    const attach_timeout_ms = (opts.timeout_policy orelse types.TimeoutPolicy{}).attach_ms;
+    try executor.waitUntilReady(&session, attach_timeout_ms);
 
     extensions.notifySessionInit(session.id);
     return session;
 }
 
 pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
-    var adapter_kind: common.AdapterKind = undefined;
-    var engine: types.EngineKind = .unknown;
-    var kind: types.BrowserKind = .chrome;
-
-    if (std.mem.startsWith(u8, endpoint, "cdp://") or
-        std.mem.startsWith(u8, endpoint, "ws://") or
-        std.mem.startsWith(u8, endpoint, "wss://"))
-    {
-        adapter_kind = .cdp;
-        engine = .chromium;
-        kind = .chrome;
-    } else if (std.mem.startsWith(u8, endpoint, "bidi://")) {
-        adapter_kind = .bidi;
-        engine = .gecko;
-        kind = .firefox;
-    } else {
+    if (std.mem.startsWith(u8, endpoint, "wss://")) {
+        // TLS WebSocket transport is not implemented in ws_client yet.
         return error.UnsupportedProtocol;
     }
 
+    if (std.mem.startsWith(u8, endpoint, "cdp://")) {
+        return attachWithAdapter(allocator, endpoint, .cdp, .chromium, .chrome);
+    }
+    if (std.mem.startsWith(u8, endpoint, "bidi://")) {
+        return attachWithAdapter(allocator, endpoint, .bidi, .gecko, .firefox);
+    }
+    if (std.mem.startsWith(u8, endpoint, "ws://")) {
+        // Generic websocket endpoint may be CDP or BiDi. Try CDP first, then BiDi.
+        return attachWithAdapter(allocator, endpoint, .cdp, .chromium, .chrome) catch |cdp_err| {
+            return attachWithAdapter(allocator, endpoint, .bidi, .gecko, .firefox) catch {
+                return cdp_err;
+            };
+        };
+    }
+    return error.UnsupportedProtocol;
+}
+
+fn attachWithAdapter(
+    allocator: std.mem.Allocator,
+    endpoint: []const u8,
+    adapter_kind: common.AdapterKind,
+    engine: types.EngineKind,
+    kind: types.BrowserKind,
+) !Session {
     const capability_set = capabilitiesFor(engine, adapter_kind);
-    return Session{
+    var session = Session{
         .allocator = allocator,
         .id = session_mod.nextSessionId(),
         .mode = .browser,
@@ -188,6 +209,9 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
         .child = null,
         .owned_argv = null,
     };
+    errdefer session.deinit();
+    try executor.waitUntilReady(&session, (types.TimeoutPolicy{}).attach_ms);
+    return session;
 }
 
 pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOptions) !Session {
@@ -195,7 +219,7 @@ pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOpti
     const engine = webview_discovery.engineForWebView(opts.kind);
     const capability_set = capabilitiesFor(engine, adapter_kind);
 
-    return Session{
+    var session = Session{
         .allocator = allocator,
         .id = session_mod.nextSessionId(),
         .mode = .webview,
@@ -216,6 +240,9 @@ pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOpti
         .child = null,
         .owned_argv = null,
     };
+    errdefer session.deinit();
+    try executor.waitUntilReady(&session, (types.TimeoutPolicy{}).attach_ms);
+    return session;
 }
 
 pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunchOptions) !Session {
@@ -253,7 +280,7 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
     else
         try allocator.dupe(u8, "cdp://127.0.0.1:9222/");
 
-    return Session{
+    var session = Session{
         .allocator = allocator,
         .id = session_mod.nextSessionId(),
         .mode = .webview,
@@ -274,6 +301,9 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         .child = child,
         .owned_argv = argv,
     };
+    errdefer session.deinit();
+    try executor.waitUntilReady(&session, (types.TimeoutPolicy{}).attach_ms);
+    return session;
 }
 
 pub fn attachAndroidWebView(allocator: std.mem.Allocator, opts: types.AndroidWebViewAttachOptions) !Session {
@@ -331,13 +361,19 @@ fn appendDefaultArgs(
     adapter: common.AdapterKind,
     debug_port: u16,
 ) !void {
-    if (effective_ignore_tls_errors and opts.install.engine == .chromium) {
+    if (effective_ignore_tls_errors and opts.install.engine == .chromium and opts.install.kind != .lightpanda) {
         try args.append(allocator, "--ignore-certificate-errors");
     }
 
     if (opts.headless) {
         switch (opts.install.engine) {
-            .chromium => try args.append(allocator, "--headless=new"),
+            .chromium => {
+                if (opts.install.kind == .lightpanda) {
+                    try args.append(allocator, "--headless");
+                } else {
+                    try args.append(allocator, "--headless=new");
+                }
+            },
             .gecko => try args.append(allocator, "-headless"),
             else => {},
         }
@@ -397,6 +433,35 @@ fn shouldIncludeLightpandaBrowserSubcommand(opts: types.LaunchOptions) bool {
     if (std.ascii.eqlIgnoreCase(exe_name, "lightpanda-browser")) return false;
     if (std.ascii.eqlIgnoreCase(exe_name, "lightpanda-browser.exe")) return false;
     return true;
+}
+
+fn appendLightpandaArgs(
+    allocator: std.mem.Allocator,
+    args: *std.ArrayList([]const u8),
+    temp_owned_strings: *std.ArrayList([]u8),
+    opts: types.LaunchOptions,
+    effective_ignore_tls_errors: bool,
+    debug_port: u16,
+) !void {
+    if (shouldIncludeLightpandaBrowserSubcommand(opts)) {
+        try args.append(allocator, "browser");
+        const debug_flag = try std.fmt.allocPrint(allocator, "--remote-debugging-port={d}", .{debug_port});
+        try temp_owned_strings.append(allocator, debug_flag);
+        try args.append(allocator, debug_flag);
+        return;
+    }
+
+    try args.append(allocator, "serve");
+    try args.append(allocator, "--host");
+    try args.append(allocator, "127.0.0.1");
+    try args.append(allocator, "--port");
+    const port_arg = try std.fmt.allocPrint(allocator, "{d}", .{debug_port});
+    try temp_owned_strings.append(allocator, port_arg);
+    try args.append(allocator, port_arg);
+
+    if (effective_ignore_tls_errors) {
+        try args.append(allocator, "--insecure_disable_tls_host_verification");
+    }
 }
 
 fn isTlsAliasArg(arg: []const u8) bool {
@@ -522,9 +587,10 @@ fn capabilitiesFor(engine: types.EngineKind, adapter: common.AdapterKind) types.
 }
 
 fn buildEndpoint(allocator: std.mem.Allocator, adapter: common.AdapterKind, session_id: u64, debug_port: u16) ![]u8 {
+    _ = session_id;
     return switch (adapter) {
         .cdp => std.fmt.allocPrint(allocator, "cdp://127.0.0.1:{d}/", .{debug_port}),
-        .bidi => std.fmt.allocPrint(allocator, "bidi://127.0.0.1:{d}/session/{d}", .{ debug_port, session_id }),
+        .bidi => std.fmt.allocPrint(allocator, "bidi://127.0.0.1:{d}/", .{debug_port}),
     };
 }
 
@@ -607,28 +673,15 @@ fn logHardLaunchError(
     });
 }
 
-test "attach supports cdp and bidi endpoints only" {
+test "attach rejects unsupported protocol schemes" {
     const allocator = std.testing.allocator;
-    var cdp_session = try attach(allocator, "cdp://127.0.0.1:9222/");
-    defer cdp_session.deinit();
-    try std.testing.expectEqual(common.TransportKind.cdp_ws, cdp_session.transport);
-
-    var bidi_session = try attach(allocator, "bidi://127.0.0.1:9223/session/1");
-    defer bidi_session.deinit();
-    try std.testing.expectEqual(common.TransportKind.bidi_ws, bidi_session.transport);
-
     try std.testing.expectError(error.UnsupportedProtocol, attach(allocator, "http://127.0.0.1:4444/session/1"));
 }
 
-test "attachWebView is cdp-only for modern kinds" {
-    const allocator = std.testing.allocator;
-    var session = try attachWebView(allocator, .{
-        .kind = .electron,
-        .endpoint = "cdp://127.0.0.1:9222/",
-    });
-    defer session.deinit();
-    try std.testing.expectEqual(common.AdapterKind.cdp, session.adapter_kind);
-    try std.testing.expectEqual(common.TransportKind.cdp_ws, session.transport);
+test "webview adapter mapping is cdp-only for modern kinds" {
+    try std.testing.expectEqual(common.AdapterKind.cdp, adapterForWebViewKind(.electron));
+    try std.testing.expectEqual(common.AdapterKind.cdp, adapterForWebViewKind(.webview2));
+    try std.testing.expectEqual(common.AdapterKind.cdp, adapterForWebViewKind(.android_webview));
 }
 
 test "tls aliases are consumed and not forwarded as raw args" {
@@ -704,7 +757,62 @@ test "chromium tls ignore uses supported certificate flag" {
     try std.testing.expect(!containsArg(args.items, "--no-tls"));
 }
 
-test "lightpanda browser subcommand is enabled by default and can be disabled" {
+test "lightpanda skips chromium tls ignore flag" {
+    const allocator = std.testing.allocator;
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    var temps: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temps.items) |buf| allocator.free(buf);
+        temps.deinit(allocator);
+    }
+
+    const opts: types.LaunchOptions = .{
+        .install = .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .path = "/usr/bin/lightpanda",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .headless = true,
+        .args = &.{},
+    };
+
+    try appendDefaultArgs(allocator, &args, &temps, opts, true, .cdp, 9222);
+    try std.testing.expect(!containsArg(args.items, "--ignore-certificate-errors"));
+}
+
+test "lightpanda uses compatible headless flag" {
+    const allocator = std.testing.allocator;
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    var temps: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temps.items) |buf| allocator.free(buf);
+        temps.deinit(allocator);
+    }
+
+    const opts: types.LaunchOptions = .{
+        .install = .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .path = "/usr/bin/lightpanda",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .headless = true,
+        .args = &.{},
+    };
+
+    try appendDefaultArgs(allocator, &args, &temps, opts, false, .cdp, 9222);
+    try std.testing.expect(containsArg(args.items, "--headless"));
+    try std.testing.expect(!containsArg(args.items, "--headless=new"));
+}
+
+test "lightpanda browser subcommand is opt-in" {
     const opts_default: types.LaunchOptions = .{
         .install = .{
             .kind = .lightpanda,
@@ -716,15 +824,15 @@ test "lightpanda browser subcommand is enabled by default and can be disabled" {
         .profile_mode = .ephemeral,
         .args = &.{},
     };
-    try std.testing.expect(shouldIncludeLightpandaBrowserSubcommand(opts_default));
+    try std.testing.expect(!shouldIncludeLightpandaBrowserSubcommand(opts_default));
 
-    const opts_disabled: types.LaunchOptions = .{
+    const opts_enabled: types.LaunchOptions = .{
         .install = opts_default.install,
         .profile_mode = .ephemeral,
-        .include_lightpanda_browser = false,
+        .include_lightpanda_browser = true,
         .args = &.{},
     };
-    try std.testing.expect(!shouldIncludeLightpandaBrowserSubcommand(opts_disabled));
+    try std.testing.expect(shouldIncludeLightpandaBrowserSubcommand(opts_enabled));
 
     const opts_explicit: types.LaunchOptions = .{
         .install = opts_default.install,
@@ -742,9 +850,44 @@ test "lightpanda browser subcommand is enabled by default and can be disabled" {
             .source = .explicit,
         },
         .profile_mode = .ephemeral,
+        .include_lightpanda_browser = true,
         .args = &.{},
     };
     try std.testing.expect(!shouldIncludeLightpandaBrowserSubcommand(opts_browser_binary));
+}
+
+test "lightpanda serve args are used by default" {
+    const allocator = std.testing.allocator;
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    var temps: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temps.items) |buf| allocator.free(buf);
+        temps.deinit(allocator);
+    }
+
+    const opts: types.LaunchOptions = .{
+        .install = .{
+            .kind = .lightpanda,
+            .engine = .chromium,
+            .path = "/usr/bin/lightpanda",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .ignore_tls_errors = true,
+        .include_lightpanda_browser = false,
+        .args = &.{},
+    };
+
+    try appendLightpandaArgs(allocator, &args, &temps, opts, true, 9333);
+    try std.testing.expectEqual(@as(usize, 6), args.items.len);
+    try std.testing.expectEqualStrings("serve", args.items[0]);
+    try std.testing.expectEqualStrings("--host", args.items[1]);
+    try std.testing.expectEqualStrings("127.0.0.1", args.items[2]);
+    try std.testing.expectEqualStrings("--port", args.items[3]);
+    try std.testing.expectEqualStrings("9333", args.items[4]);
+    try std.testing.expectEqualStrings("--insecure_disable_tls_host_verification", args.items[5]);
 }
 
 fn containsArg(args: []const []const u8, want: []const u8) bool {

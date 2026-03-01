@@ -42,6 +42,7 @@ pub fn AsyncResult(comptime T: type) type {
             canceler: ?Canceler,
         ) !*Self {
             const self = try allocator.create(Self);
+            errdefer allocator.destroy(self);
             self.* = .{
                 .allocator = allocator,
                 .runner = runner,
@@ -49,6 +50,7 @@ pub fn AsyncResult(comptime T: type) type {
                 .canceler = canceler,
                 .ctx = ctx,
             };
+            errdefer destroyer(allocator, ctx);
 
             self.thread = try std.Thread.spawn(.{}, worker, .{self});
             return self;

@@ -46,7 +46,7 @@ pub fn discover(
         const expanded = try util.expandEnvTemplates(allocator, path);
         defer allocator.free(expanded);
 
-        if (!util.exists(expanded)) {
+        if (!util.exists(expanded) or !util.isLaunchable(expanded)) {
             return error.InvalidExplicitPath;
         }
 
@@ -127,7 +127,7 @@ pub fn discover(
             for (hints.known_paths) |raw_path| {
                 const expanded = try util.expandEnvTemplates(allocator, raw_path);
                 defer allocator.free(expanded);
-                if (!util.exists(expanded)) continue;
+                if (!util.exists(expanded) or !util.isLaunchable(expanded)) continue;
 
                 try appendCandidate(
                     allocator,
@@ -284,6 +284,11 @@ fn appendCandidate(
     new_candidate: Candidate,
 ) !void {
     var candidate = new_candidate;
+    if (!util.isLaunchable(candidate.install.path)) {
+        allocator.free(candidate.install.path);
+        if (candidate.install.version) |v| allocator.free(v);
+        return;
+    }
     candidate.score += extensions.scoreInstall(candidate.install);
 
     const norm = try util.normalizePathForKey(allocator, candidate.install.path);
@@ -468,6 +473,11 @@ test "discover returns explicit path and infers kind" {
         .sub_path = "firefox",
         .data = "#!/bin/sh\nexit 0\n",
     });
+    if (@import("builtin").os.tag != .windows) {
+        const file = try tmp.dir.openFile("firefox", .{});
+        defer file.close();
+        try file.chmod(0o755);
+    }
 
     const explicit_path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "firefox" });
     defer allocator.free(explicit_path);
@@ -502,6 +512,11 @@ test "discover managed cache candidate even when managed download is disabled" {
         .sub_path = "chrome/current/google-chrome",
         .data = "stub\n",
     });
+    if (@import("builtin").os.tag != .windows) {
+        const file = try tmp.dir.openFile("chrome/current/google-chrome", .{});
+        defer file.close();
+        try file.chmod(0o755);
+    }
 
     const cache_root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer allocator.free(cache_root);
@@ -535,6 +550,11 @@ test "discover deduplicates same path preferring explicit over managed cache" {
         .sub_path = "chrome/current/google-chrome",
         .data = "stub\n",
     });
+    if (@import("builtin").os.tag != .windows) {
+        const file = try tmp.dir.openFile("chrome/current/google-chrome", .{});
+        defer file.close();
+        try file.chmod(0o755);
+    }
 
     const cache_root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer allocator.free(cache_root);

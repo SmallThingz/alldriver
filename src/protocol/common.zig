@@ -86,13 +86,15 @@ pub fn parseEndpoint(endpoint: []const u8, default_adapter: AdapterKind) !Endpoi
     }
 
     var adapter = default_adapter;
-    if (std.mem.eql(u8, scheme, "cdp") or
-        std.mem.eql(u8, scheme, "ws") or
-        std.mem.eql(u8, scheme, "wss"))
-    {
+    if (std.mem.eql(u8, scheme, "cdp")) {
         adapter = .cdp;
     } else if (std.mem.eql(u8, scheme, "bidi")) {
         adapter = .bidi;
+    } else if (std.mem.eql(u8, scheme, "ws")) {
+        adapter = default_adapter;
+    } else if (std.mem.eql(u8, scheme, "wss")) {
+        // TLS WebSocket transport is not implemented in ws_client yet.
+        return error.UnsupportedProtocol;
     } else {
         return error.UnsupportedProtocol;
     }
@@ -133,5 +135,14 @@ test "parse endpoint rejects unsupported schemes" {
     try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("http://127.0.0.1:4444/session", .cdp));
     try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("https://127.0.0.1/session", .cdp));
     try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("webdriver://127.0.0.1/session", .cdp));
+    try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("wss://127.0.0.1:9222/devtools/page/1", .cdp));
     try std.testing.expectError(error.UnsupportedProtocol, parseEndpoint("foo://127.0.0.1:9222", .cdp));
+}
+
+test "parse endpoint ws uses default adapter for cdp and bidi" {
+    const cdp_parsed = try parseEndpoint("ws://127.0.0.1:9222/devtools/page/1", .cdp);
+    try std.testing.expectEqual(AdapterKind.cdp, cdp_parsed.adapter);
+
+    const bidi_parsed = try parseEndpoint("ws://127.0.0.1:9222/session", .bidi);
+    try std.testing.expectEqual(AdapterKind.bidi, bidi_parsed.adapter);
 }

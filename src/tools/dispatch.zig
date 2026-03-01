@@ -264,7 +264,6 @@ fn writeFile(path: []const u8, contents: []const u8) !void {
 }
 
 fn envOrDefault(name: []const u8, fallback: []const u8) []const u8 {
-    if (builtin.os.tag == .windows) return fallback;
     return std.posix.getenv(name) orelse fallback;
 }
 
@@ -428,8 +427,9 @@ fn listReports(allocator: Allocator, matrix_root: []const u8) !std.ArrayList([]u
 
 fn lineValue(allocator: Allocator, data: []const u8, prefix: []const u8) ![]u8 {
     var it = std.mem.splitScalar(u8, data, '\n');
-    while (it.next()) |line| {
-        if (std.mem.startsWith(u8, std.mem.trim(u8, line, " \t\r"), prefix)) {
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (std.mem.startsWith(u8, line, prefix)) {
             const raw = std.mem.trim(u8, line[prefix.len..], " \t\r");
             return try allocator.dupe(u8, raw);
         }
@@ -552,8 +552,9 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         var status = try lineValue(allocator, report_data, "OVERALL:");
         defer allocator.free(status);
         if (status.len == 0) {
+            const unknown = try allocator.dupe(u8, "UNKNOWN");
             allocator.free(status);
-            status = try allocator.dupe(u8, "UNKNOWN");
+            status = unknown;
         }
 
         if (!std.mem.eql(u8, status, "PASS")) overall_pass = false;
@@ -667,15 +668,15 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
     try writeFile(out, content.items);
 
     if (!overall_pass) {
-        std.debug.print("matrix summary failed: {s}\n", .{out});
+        if (!builtin.is_test) std.debug.print("matrix summary failed: {s}\n", .{out});
         return ToolError.VerificationFailed;
     }
     if (strict_ga and !strict_overall) {
-        std.debug.print("strict GA matrix summary failed: {s}\n", .{out});
+        if (!builtin.is_test) std.debug.print("strict GA matrix summary failed: {s}\n", .{out});
         return ToolError.VerificationFailed;
     }
 
-    std.debug.print("matrix summary: {s}\n", .{out});
+    if (!builtin.is_test) std.debug.print("matrix summary: {s}\n", .{out});
 }
 
 fn cmdTestBehavioral(allocator: Allocator, root: []const u8, _: []const []const u8) !void {
@@ -880,8 +881,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     defer freeStringMap(allocator, &flags);
 
     const allow_missing_browser = std.mem.eql(u8, mapGetOr(&flags, "allow-missing-browser", "0"), "1");
-    const soft_verification = allow_missing_browser;
-    const allow_launch_probe_failures = allow_missing_browser or
+    const soft_verification = std.mem.eql(u8, mapGetOr(&flags, "soft-verification", "0"), "1");
+    const allow_launch_probe_failures = soft_verification or
         std.mem.eql(u8, mapGetOr(&flags, "allow-launch-probe-failures", "0"), "1");
     const expectation: GateExpectation = if (std.mem.eql(u8, mapGetOr(&flags, "expect-detected", "0"), "1"))
         .detected
@@ -1050,15 +1051,6 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         }
 
         const runtime = runtime_opt.?;
-        if (!isRuntimeProbeReachable(runtime)) {
-            totals.skipped += 1;
-            try report.writer(allocator).print(
-                "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=bridge_endpoint_unreachable\n",
-                .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform) },
-            );
-            continue;
-        }
-
         totals.discovered += 1;
         if (api_tier == .modern) totals.modern_discovered += 1;
 
@@ -1351,20 +1343,6 @@ fn launchOrAttachWebViewForProbe(allocator: Allocator, runtime: driver.WebViewRu
     }
 }
 
-fn isRuntimeProbeReachable(runtime: driver.WebViewRuntime) bool {
-    return switch (runtime.kind) {
-        .android_webview => tcpEndpointReachable("127.0.0.1", 9222),
-        else => true,
-    };
-}
-
-fn tcpEndpointReachable(host: []const u8, port: u16) bool {
-    const address = std.net.Address.parseIp(host, port) catch return false;
-    const stream = std.net.tcpConnectToAddress(address) catch return false;
-    stream.close();
-    return true;
-}
-
 fn inferAndroidBridgeKind(path: ?[]const u8) driver.AndroidBridgeKind {
     const p = path orelse return .adb;
     if (containsIgnoreCase(p, "shizuku")) return .shizuku;
@@ -1401,24 +1379,57 @@ fn probeSessionForSignals(
     // Every discovered target must prove it can actually navigate and leave about:blank.
     // This prevents false PASS results when a runtime launches but never commits navigation.
     if (!session.supports(.dom)) return error.UnsupportedCapability;
-    navigateAndWaitForProbe(session) catch |err| {
-        return err;
-    };
+    try retryProbeStep(session, navigateAndWaitForProbe);
 
     if (session.supports(.js_eval)) {
-        const href_payload = try session.evaluate("location.href");
+        const href_payload = try retryProbeEvaluate(session, "location.href");
         defer allocator.free(href_payload);
         if (!isNavigationCommitted(href_payload)) return error.NavigationNotCommitted;
     }
 
     if (require_js_eval) {
         if (!session.supports(.js_eval)) return error.UnsupportedCapability;
-        const js_payload = try session.evaluate(adversarial_probe_script);
+        const js_payload = try retryProbeEvaluate(session, adversarial_probe_script);
         defer allocator.free(js_payload);
         applyJsSignalTokens(&signals, js_payload);
     }
 
     return classifySignals(signals);
+}
+
+fn retryProbeStep(session: *driver.Session, comptime step: fn (*driver.Session) anyerror!void) !void {
+    var attempts: usize = 0;
+    while (true) : (attempts += 1) {
+        step(session) catch |err| {
+            if (attempts >= 9 or !isTransientProbeError(err)) return err;
+            std.Thread.sleep(150 * std.time.ns_per_ms);
+            continue;
+        };
+        return;
+    }
+}
+
+fn retryProbeEvaluate(session: *driver.Session, script: []const u8) ![]u8 {
+    var attempts: usize = 0;
+    while (true) : (attempts += 1) {
+        const payload = session.evaluate(script) catch |err| {
+            if (attempts >= 9 or !isTransientProbeError(err)) return err;
+            std.Thread.sleep(150 * std.time.ns_per_ms);
+            continue;
+        };
+        return payload;
+    }
+}
+
+fn isTransientProbeError(err: anyerror) bool {
+    return err == error.ConnectionRefused or
+        err == error.ConnectionResetByPeer or
+        err == error.ConnectionClosed or
+        err == error.ConnectionTimedOut or
+        err == error.ConnectionAborted or
+        err == error.BrokenPipe or
+        err == error.SessionNotReady or
+        err == error.Timeout;
 }
 
 fn navigateAndWaitForProbe(session: *driver.Session) !void {
@@ -1501,11 +1512,14 @@ fn containsToken(payload: []const u8, token: []const u8) bool {
     return std.mem.indexOf(u8, payload, token) != null;
 }
 
-fn cmdReleaseGate(allocator: Allocator, root: []const u8, _: []const []const u8) !void {
+fn cmdReleaseGate(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
+    var flags = try parseFlags(allocator, args);
+    defer freeStringMap(allocator, &flags);
+
     var env = try setDefaultZigGlobalCache(allocator, root);
     defer env.deinit();
 
-    const strict_ga = std.mem.eql(u8, env.get("STRICT_GA") orelse "0", "1");
+    const strict_ga = strictGaEnabled(&flags, env.get("STRICT_GA") orelse "0");
 
     try runInherit(allocator, &.{ "zig", "build", "test" }, root, &env);
     try runInherit(allocator, &.{ "zig", "build", "test" }, root, &env);
@@ -2994,7 +3008,7 @@ fn cmdVmImageSources(allocator: Allocator, _: []const u8, args: []const []const 
 
     const arch = mapGetOr(&flags, "arch", "amd64");
     if (!(std.mem.eql(u8, arch, "amd64") or std.mem.eql(u8, arch, "arm64"))) {
-        std.debug.print("--arch must be amd64 or arm64\n", .{});
+        if (!builtin.is_test) std.debug.print("--arch must be amd64 or arm64\n", .{});
         return ToolError.InvalidArgs;
     }
 
@@ -3233,6 +3247,19 @@ test "parseFlags parses --key=value syntax" {
     try std.testing.expect(std.mem.eql(u8, flags.get("strict-ga").?, "0"));
 }
 
+test "lineValue handles indented report lines" {
+    const allocator = std.testing.allocator;
+    const data =
+        \\ Matrix Report
+        \\   OVERALL: PASS
+        \\   platform: linux
+        \\
+    ;
+    const overall = try lineValue(allocator, data, "OVERALL:");
+    defer allocator.free(overall);
+    try std.testing.expectEqualStrings("PASS", overall);
+}
+
 test "strictGaEnabled honors env default and explicit override" {
     const allocator = std.testing.allocator;
 
@@ -3464,8 +3491,29 @@ test "navigation commit helper rejects about blank" {
 
 test "collectSessionSignals captures endpoint and launch argument markers" {
     const allocator = std.testing.allocator;
-    var modern = try driver.modern.attach(allocator, "cdp://127.0.0.1:9222/devtools/page/1");
-    var session = modern.intoBase();
+    var session = driver.Session{
+        .allocator = allocator,
+        .id = 1,
+        .mode = .browser,
+        .transport = .cdp_ws,
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, "/usr/bin/chrome"),
+            .version = null,
+            .source = .explicit,
+        },
+        .capability_set = .{
+            .dom = true,
+            .js_eval = true,
+            .network_intercept = true,
+            .tracing = true,
+            .downloads = true,
+            .bidi_events = false,
+        },
+        .adapter_kind = .cdp,
+        .endpoint = try allocator.dupe(u8, "cdp://127.0.0.1:9222/devtools/page/1"),
+    };
     defer session.deinit();
 
     const argv = try allocator.alloc([]const u8, 4);

@@ -63,8 +63,11 @@ pub fn requestJsonWithOptions(
     const status_code = parseStatusCode(first_line) catch return error.InvalidResponse;
 
     const maybe_content_length = parseContentLength(header_bytes);
-    const response_body = if (maybe_content_length) |content_length|
-        try readFixedBody(allocator, &stream, content_length)
+    const is_chunked = hasChunkedTransferEncoding(header_bytes);
+    const response_body = if (is_chunked)
+        try readChunkedBody(allocator, &stream, options.max_body_bytes)
+    else if (maybe_content_length) |content_length|
+        try readFixedBody(allocator, &stream, content_length, options.max_body_bytes)
     else
         try readBodyUntilClose(allocator, &stream, options.max_body_bytes);
 
@@ -129,7 +132,31 @@ fn parseContentLength(header_bytes: []const u8) ?usize {
     return null;
 }
 
-fn readFixedBody(allocator: std.mem.Allocator, stream: *std.net.Stream, content_length: usize) ![]u8 {
+fn hasChunkedTransferEncoding(header_bytes: []const u8) bool {
+    var it = std.mem.splitSequence(u8, header_bytes, "\r\n");
+    while (it.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        var enc_it = std.mem.splitScalar(u8, value, ',');
+        while (enc_it.next()) |enc_raw| {
+            const enc = std.mem.trim(u8, enc_raw, " \t");
+            if (std.ascii.eqlIgnoreCase(enc, "chunked")) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+fn readFixedBody(
+    allocator: std.mem.Allocator,
+    stream: *std.net.Stream,
+    content_length: usize,
+    max_body_bytes: usize,
+) ![]u8 {
+    if (content_length > max_body_bytes) return error.BodyTooLarge;
     var body = try allocator.alloc(u8, content_length);
     errdefer allocator.free(body);
 
@@ -141,6 +168,42 @@ fn readFixedBody(allocator: std.mem.Allocator, stream: *std.net.Stream, content_
     }
 
     return body;
+}
+
+fn readChunkedBody(allocator: std.mem.Allocator, stream: *std.net.Stream, max_body_bytes: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    while (true) {
+        const line = try readHttpLine(allocator, stream, 8 * 1024);
+        defer allocator.free(line);
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (trimmed.len == 0) continue;
+
+        const semi = std.mem.indexOfScalar(u8, trimmed, ';') orelse trimmed.len;
+        const size_hex = std.mem.trim(u8, trimmed[0..semi], " \t");
+        const size = std.fmt.parseInt(usize, size_hex, 16) catch return error.InvalidResponse;
+        if (size == 0) {
+            // Consume trailers until blank line.
+            while (true) {
+                const trailer = try readHttpLine(allocator, stream, 8 * 1024);
+                defer allocator.free(trailer);
+                if (std.mem.trim(u8, trailer, " \t").len == 0) break;
+            }
+            break;
+        }
+
+        if (out.items.len + size > max_body_bytes) return error.BodyTooLarge;
+        const offset = out.items.len;
+        try out.resize(allocator, offset + size);
+        try readExact(stream, out.items[offset .. offset + size]);
+
+        var crlf: [2]u8 = undefined;
+        try readExact(stream, &crlf);
+        if (!(crlf[0] == '\r' and crlf[1] == '\n')) return error.InvalidResponse;
+    }
+
+    return out.toOwnedSlice(allocator);
 }
 
 fn readBodyUntilClose(allocator: std.mem.Allocator, stream: *std.net.Stream, max_body_bytes: usize) ![]u8 {
@@ -159,6 +222,34 @@ fn readBodyUntilClose(allocator: std.mem.Allocator, stream: *std.net.Stream, max
     return out.toOwnedSlice(allocator);
 }
 
+fn readHttpLine(allocator: std.mem.Allocator, stream: *std.net.Stream, max_line_bytes: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const n = try stream.read(&byte);
+        if (n == 0) return error.ConnectionClosed;
+        if (byte[0] == '\n') {
+            if (out.items.len > 0 and out.items[out.items.len - 1] == '\r') {
+                _ = out.pop();
+            }
+            return out.toOwnedSlice(allocator);
+        }
+        if (out.items.len >= max_line_bytes) return error.HeaderTooLarge;
+        try out.append(allocator, byte[0]);
+    }
+}
+
+fn readExact(stream: *std.net.Stream, buf: []u8) !void {
+    var read_total: usize = 0;
+    while (read_total < buf.len) {
+        const n = try stream.read(buf[read_total..]);
+        if (n == 0) return error.ConnectionClosed;
+        read_total += n;
+    }
+}
+
 test "parse status code" {
     try std.testing.expectEqual(@as(u16, 200), try parseStatusCode("HTTP/1.1 200 OK"));
 }
@@ -170,4 +261,10 @@ test "parse status code invalid" {
 test "parse content length" {
     const raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n";
     try std.testing.expectEqual(@as(?usize, 12), parseContentLength(raw));
+}
+
+test "parse transfer encoding chunked" {
+    const raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try std.testing.expect(hasChunkedTransferEncoding(raw));
+    try std.testing.expect(!hasChunkedTransferEncoding("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"));
 }

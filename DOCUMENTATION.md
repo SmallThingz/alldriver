@@ -19,16 +19,9 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn run(allocator: std.mem.Allocator) !void {
-    var installs = try driver.modern.discover(allocator, .{
+    var session = try driver.modern.launchAuto(allocator, .{
         .kinds = &.{ .chrome, .firefox, .lightpanda },
         .allow_managed_download = false,
-    }, .{});
-    defer installs.deinit();
-
-    if (installs.items.len == 0) return error.NoBrowserFound;
-
-    var session = try driver.modern.launch(allocator, .{
-        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = true,
     });
@@ -47,10 +40,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
 - `discover(...) -> BrowserInstallList`
 - `discoverWebViews(...) -> WebViewRuntimeList`
 - Caller owns the returned lists and must call `.deinit()`.
+- `launchAuto(...)` / `launchAutoAsync(...)` run discovery with sane defaults and return a fully ready session.
 
 ### Modern session domains
 
 - `page()`, `runtime()`, `network()`, `input()`, `log()`, `storage()`, `contexts()`, `targets()`
+- `launch`, `launchAuto`, `attach`, and webview attach/launch all wait for protocol readiness; no manual CDP/BiDi session bootstrap is required.
 
 ### Waits and cancellation
 

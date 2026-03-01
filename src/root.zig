@@ -142,11 +142,3 @@ test "discoverWebViews root API" {
 
     try std.testing.expectEqual(@as(usize, 0), runtimes.items.len);
 }
-
-test "platform matrix contracts" {
-    _ = @import("tests/platform_matrix.zig");
-}
-
-test "behavioral matrix contracts" {
-    _ = @import("tests/behavioral_matrix.zig");
-}

@@ -10,6 +10,7 @@ const events = @import("events.zig");
 const cancel = @import("cancel.zig");
 const async_mod = @import("async.zig");
 const logging = @import("../logging.zig");
+const ws_client = @import("../transport/ws_client.zig");
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -21,10 +22,15 @@ pub const Session = struct {
     adapter_kind: common.AdapterKind,
     endpoint: ?[]u8,
     cdp_ws_endpoint: ?[]u8 = null,
+    cdp_target_id: ?[]u8 = null,
+    cdp_attached_session_id: ?[]u8 = null,
+    cdp_client: ?ws_client.Client = null,
     current_url: ?[]u8 = null,
+    state_lock: std.Thread.Mutex = .{},
     browsing_context_id: ?[]u8 = null,
     request_id: u64 = 0,
     request_id_lock: std.Thread.Mutex = .{},
+    protocol_lock: std.Thread.Mutex = .{},
     timeout_policy: types.TimeoutPolicy = .{},
     last_diagnostic_value: ?types.Diagnostic = null,
 
@@ -35,6 +41,7 @@ pub const Session = struct {
     rules: std.ArrayList(types.NetworkRule) = .empty,
     on_request: ?*const fn (types.RequestEvent) void = null,
     on_response: ?*const fn (types.ResponseEvent) void = null,
+    event_lock: std.Thread.Mutex = .{},
     event_subscriptions: std.ArrayList(events.EventSubscription) = .empty,
     next_event_subscription_id: u64 = 1,
     challenge_active: bool = false,
@@ -47,6 +54,9 @@ pub const Session = struct {
         if (self.current_url) |url| self.allocator.free(url);
         if (self.endpoint) |ep| self.allocator.free(ep);
         if (self.cdp_ws_endpoint) |ep| self.allocator.free(ep);
+        if (self.cdp_target_id) |target_id| self.allocator.free(target_id);
+        if (self.cdp_attached_session_id) |attached| self.allocator.free(attached);
+        if (self.cdp_client) |*client| client.deinit();
         if (self.browsing_context_id) |ctx| self.allocator.free(ctx);
 
         if (self.owned_argv) |args| {
@@ -113,8 +123,7 @@ pub const Session = struct {
             return err;
         };
         self.clearDiagnostic();
-        const final_url = self.current_url orelse url;
-        events.emit(self, .{ .navigation_completed = .{ .url = final_url } });
+        events.emit(self, .{ .navigation_completed = .{ .url = url } });
     }
 
     pub fn reload(self: *Session) !void {

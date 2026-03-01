@@ -108,7 +108,24 @@ fn waitUrlContainsStep(session: *Session, needle: []const u8) !bool {
 fn waitCookieStep(session: *Session, query: types.CookieQuery) !bool {
     const cookies = try storage.queryCookies(session, session.allocator, query);
     defer storage.freeCookies(session.allocator, cookies);
-    return cookies.len > 0;
+    if (cookies.len > 0) return true;
+
+    if (query.name) |cookie_name| {
+        if (!session.supports(.js_eval)) return false;
+        const escaped = try escapeJsString(session.allocator, cookie_name);
+        defer session.allocator.free(escaped);
+        const script = try std.fmt.allocPrint(
+            session.allocator,
+            "(function(){{return document.cookie.indexOf(\"{s}=\") !== -1;}})();",
+            .{escaped},
+        );
+        defer session.allocator.free(script);
+        const payload = try session.evaluate(script);
+        defer session.allocator.free(payload);
+        return payloadContainsTruthy(payload);
+    }
+
+    return false;
 }
 
 fn waitStorageKeyStep(session: *Session, query: types.StorageKeyQuery) !bool {
@@ -148,11 +165,43 @@ fn waitJsTruthyStep(session: *Session, script: []const u8) !bool {
 }
 
 fn payloadContainsTruthy(payload: []const u8) bool {
-    if (std.mem.indexOf(u8, payload, "true") != null) return true;
-    if (std.mem.indexOf(u8, payload, "\"true\"") != null) return true;
-    if (std.mem.indexOf(u8, payload, ":1") != null) return true;
-    if (std.mem.indexOf(u8, payload, "\"1\"") != null) return true;
-    return false;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch return false;
+    defer parsed.deinit();
+
+    const value = extractEvaluationValue(parsed.value) orelse parsed.value;
+    return jsonValueTruthy(value);
+}
+
+fn extractEvaluationValue(value: std.json.Value) ?std.json.Value {
+    if (value != .object) return null;
+    const result = value.object.get("result") orelse return null;
+    if (result == .object) {
+        if (result.object.get("result")) |nested| {
+            if (nested == .object) {
+                if (nested.object.get("value")) |raw| return raw;
+            }
+        }
+        if (result.object.get("value")) |raw| return raw;
+    }
+    if (value.object.get("value")) |raw| return raw;
+    return null;
+}
+
+fn jsonValueTruthy(value: std.json.Value) bool {
+    return switch (value) {
+        .null => false,
+        .bool => value.bool,
+        .integer => value.integer != 0,
+        .float => value.float != 0 and std.math.isFinite(value.float),
+        .number_string => std.mem.eql(u8, value.number_string, "1"),
+        .string => std.mem.eql(u8, value.string, "true") or std.mem.eql(u8, value.string, "1"),
+        // JS objects/arrays are truthy.
+        .object, .array => true,
+    };
 }
 
 fn maybeEmitChallengeSignals(session: *Session) !void {
@@ -193,6 +242,8 @@ fn currentUrl(session: *Session) ![]u8 {
         const payload = try session.evaluate("location.href");
         return payload;
     }
+    session.state_lock.lock();
+    defer session.state_lock.unlock();
     if (session.current_url) |url| return session.allocator.dupe(u8, url);
     return session.allocator.dupe(u8, "");
 }
@@ -227,12 +278,13 @@ fn escapeJsString(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
 }
 
 test "payloadContainsTruthy recognizes common encodings" {
-    try std.testing.expect(payloadContainsTruthy("true"));
-    try std.testing.expect(payloadContainsTruthy("{\"value\":true}"));
-    try std.testing.expect(payloadContainsTruthy("{\"ok\":\"true\"}"));
-    try std.testing.expect(payloadContainsTruthy("{\"v\":1}"));
+    try std.testing.expect(payloadContainsTruthy("{\"result\":{\"result\":{\"value\":true}}}"));
+    try std.testing.expect(payloadContainsTruthy("{\"result\":{\"result\":{\"value\":1}}}"));
+    try std.testing.expect(payloadContainsTruthy("{\"result\":{\"value\":\"true\"}}"));
+    try std.testing.expect(payloadContainsTruthy("{\"result\":{\"result\":{\"value\":{}}}}"));
     try std.testing.expect(!payloadContainsTruthy("false"));
-    try std.testing.expect(!payloadContainsTruthy("{\"value\":0}"));
+    try std.testing.expect(!payloadContainsTruthy("{\"id\":1,\"result\":{\"result\":{\"value\":false}}}"));
+    try std.testing.expect(!payloadContainsTruthy("{\"id\":1,\"result\":{\"result\":{\"value\":0}}}"));
 }
 
 test "escapeJsString escapes control characters" {

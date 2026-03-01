@@ -186,7 +186,8 @@ fn scoreAsset(name: []const u8, url: []const u8, os: NativeOs, arch: NativeArch)
     const lower_url = url;
 
     if (util_strings.containsIgnoreCase(lower_name, "sha256") or
-        util_strings.containsIgnoreCase(lower_name, "checksum"))
+        util_strings.containsIgnoreCase(lower_name, "checksum") or
+        looksSignatureAsset(lower_name))
     {
         return -1;
     }
@@ -232,13 +233,26 @@ fn endsWithArchiveOrBinary(s: []const u8) bool {
 
 fn looksRunnableAsset(name: []const u8, url: []const u8) bool {
     if (endsWithArchiveOrBinary(name) or endsWithArchiveOrBinary(url)) return true;
-    return util_strings.containsIgnoreCase(name, "lightpanda") or
-        util_strings.containsIgnoreCase(url, "lightpanda");
+    if (looksSignatureAsset(name) or looksSignatureAsset(url)) return false;
+    const base = std.fs.path.basename(name);
+    if (std.ascii.eqlIgnoreCase(base, "lightpanda") or std.ascii.eqlIgnoreCase(base, "lightpanda.exe")) return true;
+    const url_base = std.fs.path.basename(url);
+    if (std.ascii.eqlIgnoreCase(url_base, "lightpanda") or std.ascii.eqlIgnoreCase(url_base, "lightpanda.exe")) return true;
+    return false;
+}
+
+fn looksSignatureAsset(s: []const u8) bool {
+    return std.mem.endsWith(u8, s, ".sig") or
+        std.mem.endsWith(u8, s, ".asc") or
+        std.mem.endsWith(u8, s, ".pem") or
+        std.mem.endsWith(u8, s, ".sha") or
+        std.mem.endsWith(u8, s, ".sha256") or
+        std.mem.endsWith(u8, s, ".sha512");
 }
 
 fn osTokens(os: NativeOs) []const []const u8 {
     return switch (os) {
-        .windows => &.{ "windows", "win" },
+        .windows => &.{ "windows", "win32", "pc-windows", "mingw", "msvc" },
         .macos => &.{ "macos", "darwin", "osx", "apple" },
         .linux => &.{"linux"},
     };
@@ -270,6 +284,11 @@ test "select asset for linux amd64" {
     try std.testing.expectEqualStrings("lightpanda-linux-amd64.tar.gz", selected.name);
 }
 
+test "windows token matching does not accept darwin assets" {
+    try std.testing.expect(!hasAny("lightpanda-darwin-arm64.zip", osTokens(.windows)));
+    try std.testing.expect(hasAny("lightpanda-windows-amd64.zip", osTokens(.windows)));
+}
+
 test "select asset fails when no compatible target exists" {
     const allocator = std.testing.allocator;
     const json =
@@ -297,4 +316,17 @@ test "select asset accepts extensionless direct binary" {
         allocator.free(selected.download_url);
     }
     try std.testing.expectEqualStrings("lightpanda-x86_64-linux", selected.name);
+}
+
+test "signature assets are rejected" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "assets": [
+        \\    {"name":"lightpanda-linux-amd64.tar.gz.asc","browser_download_url":"https://example/lightpanda-linux-amd64.tar.gz.asc"},
+        \\    {"name":"lightpanda-linux-amd64.sig","browser_download_url":"https://example/lightpanda-linux-amd64.sig"}
+        \\  ]
+        \\}
+    ;
+    try std.testing.expectError(error.NoCompatibleAsset, selectAssetForTarget(allocator, json, .linux, .amd64));
 }

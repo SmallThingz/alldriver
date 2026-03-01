@@ -6,6 +6,16 @@ pub fn exists(path: []const u8) bool {
     return true;
 }
 
+pub fn isLaunchable(path: []const u8) bool {
+    const st = std.fs.cwd().statFile(path) catch return false;
+    if (st.kind == .directory) {
+        if (builtin.os.tag == .macos and std.mem.endsWith(u8, path, ".app")) return true;
+        return false;
+    }
+    if (builtin.os.tag == .windows) return true;
+    return (st.mode & 0o111) != 0;
+}
+
 pub fn normalizePathForKey(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (builtin.os.tag == .windows) {
         return std.ascii.allocLowerString(allocator, path);

@@ -228,6 +228,7 @@ fn parseEntry(allocator: std.mem.Allocator, payload: []const u8) !types.SessionC
     const obj = parsed.value.object;
 
     const schema = getIntField(obj, "schema_version") orelse return error.CorruptEntry;
+    if (schema < 0 or schema > std.math.maxInt(u32)) return error.IncompatibleSchema;
     if (schema != schema_version) return error.IncompatibleSchema;
 
     var entry: types.SessionCacheEntry = .{
@@ -245,8 +246,8 @@ fn parseEntry(allocator: std.mem.Allocator, payload: []const u8) !types.SessionC
             try allocator.alloc(types.StorageValue, 0),
         .current_url = if (getStringField(obj, "current_url")) |url| try allocator.dupe(u8, url) else null,
         .extra_headers = if (obj.get("extra_headers")) |value| try parseHeaders(allocator, value) else try allocator.alloc(types.Header, 0),
-        .captured_at_ms = @intCast(getIntField(obj, "captured_at_ms") orelse 0),
-        .expires_at_ms = if (getIntField(obj, "expires_at_ms")) |expires| @intCast(expires) else null,
+        .captured_at_ms = intFieldAsU64(obj, "captured_at_ms") orelse 0,
+        .expires_at_ms = intFieldAsU64(obj, "expires_at_ms"),
         .schema_version = @intCast(schema),
     };
     errdefer deinitEntry(allocator, &entry);
@@ -314,9 +315,7 @@ fn parseExpiresFromPayload(allocator: std.mem.Allocator, payload: []const u8) !?
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return null;
-    const raw = getIntField(parsed.value.object, "expires_at_ms") orelse return null;
-    if (raw < 0) return null;
-    return @intCast(raw);
+    return intFieldAsU64(parsed.value.object, "expires_at_ms");
 }
 
 fn nowMs() u64 {
@@ -335,9 +334,25 @@ fn getIntField(obj: std.json.ObjectMap, key: []const u8) ?i64 {
     const value = obj.get(key) orelse return null;
     return switch (value) {
         .integer => |n| n,
-        .float => |n| @intFromFloat(n),
+        .float => |n| blk: {
+            if (!std.math.isFinite(n)) break :blk null;
+            const truncated = @trunc(n);
+            if (truncated != n) break :blk null;
+            if (truncated < @as(f64, @floatFromInt(std.math.minInt(i64))) or
+                truncated > @as(f64, @floatFromInt(std.math.maxInt(i64))))
+            {
+                break :blk null;
+            }
+            break :blk @intFromFloat(truncated);
+        },
         else => null,
     };
+}
+
+fn intFieldAsU64(obj: std.json.ObjectMap, key: []const u8) ?u64 {
+    const raw = getIntField(obj, key) orelse return null;
+    if (raw < 0) return null;
+    return std.math.cast(u64, raw);
 }
 
 fn getBoolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
@@ -473,8 +488,18 @@ fn parseHeaders(allocator: std.mem.Allocator, value: std.json.Value) ![]types.He
 }
 
 fn cloneCookies(allocator: std.mem.Allocator, src: []const types.Cookie) ![]types.Cookie {
-    var out = try allocator.alloc(types.Cookie, src.len);
-    errdefer allocator.free(out);
+    const out = try allocator.alloc(types.Cookie, src.len);
+    var initialized: usize = 0;
+    errdefer {
+        var idx: usize = 0;
+        while (idx < initialized) : (idx += 1) {
+            allocator.free(out[idx].name);
+            allocator.free(out[idx].value);
+            allocator.free(out[idx].domain);
+            allocator.free(out[idx].path);
+        }
+        allocator.free(out);
+    }
     for (src, 0..) |cookie, idx| {
         out[idx] = .{
             .name = try allocator.dupe(u8, cookie.name),
@@ -486,30 +511,49 @@ fn cloneCookies(allocator: std.mem.Allocator, src: []const types.Cookie) ![]type
             .expires_unix_seconds = cookie.expires_unix_seconds,
             .same_site = cookie.same_site,
         };
+        initialized += 1;
     }
     return out;
 }
 
 fn cloneStorageValues(allocator: std.mem.Allocator, src: []const types.StorageValue) ![]types.StorageValue {
-    var out = try allocator.alloc(types.StorageValue, src.len);
-    errdefer allocator.free(out);
+    const out = try allocator.alloc(types.StorageValue, src.len);
+    var initialized: usize = 0;
+    errdefer {
+        var idx: usize = 0;
+        while (idx < initialized) : (idx += 1) {
+            allocator.free(out[idx].key);
+            allocator.free(out[idx].value);
+        }
+        allocator.free(out);
+    }
     for (src, 0..) |item, idx| {
         out[idx] = .{
             .key = try allocator.dupe(u8, item.key),
             .value = try allocator.dupe(u8, item.value),
         };
+        initialized += 1;
     }
     return out;
 }
 
 fn cloneHeaders(allocator: std.mem.Allocator, src: []const types.Header) ![]types.Header {
-    var out = try allocator.alloc(types.Header, src.len);
-    errdefer allocator.free(out);
+    const out = try allocator.alloc(types.Header, src.len);
+    var initialized: usize = 0;
+    errdefer {
+        var idx: usize = 0;
+        while (idx < initialized) : (idx += 1) {
+            allocator.free(out[idx].name);
+            allocator.free(out[idx].value);
+        }
+        allocator.free(out);
+    }
     for (src, 0..) |h, idx| {
         out[idx] = .{
             .name = try allocator.dupe(u8, h.name),
             .value = try allocator.dupe(u8, h.value),
         };
+        initialized += 1;
     }
     return out;
 }

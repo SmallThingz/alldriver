@@ -33,7 +33,8 @@ pub fn removeInterceptRule(session: *Session, rule_id: []const u8) !bool {
     while (i < session.rules.items.len) : (i += 1) {
         if (std.mem.eql(u8, session.rules.items[i].id, rule_id)) {
             const removed = session.rules.swapRemove(i);
-            freeRule(session.allocator, removed);
+            defer freeRule(session.allocator, removed);
+            try syncRemoteRules(session);
             return true;
         }
     }
@@ -209,4 +210,17 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+fn syncRemoteRules(session: *Session) !void {
+    if (!session.supports(.network_intercept)) return;
+    executor.disableNetworkInterception(session) catch |err| switch (err) {
+        error.UnsupportedProtocol => return,
+        else => return err,
+    };
+    if (session.rules.items.len == 0) return;
+    try executor.enableNetworkInterception(session);
+    for (session.rules.items) |rule| {
+        try executor.addNetworkRule(session, rule);
+    }
 }

@@ -12,6 +12,27 @@ pub const ModernWebViewRuntime = types.WebViewRuntime;
 pub const HardErrorLog = logging.HardErrorLog;
 pub const HardErrorLogger = logging.HardErrorLogger;
 
+const default_browser_kinds = [_]types.BrowserKind{
+    .chrome,  .edge, .firefox, .brave,    .vivaldi, .duckduckgo, .lightpanda, .librewolf,
+    .mullvad, .tor,  .operagx, .sidekick, .shift,   .epic,       .arc,        .palemoon,
+};
+
+pub const AutoLaunchOptions = struct {
+    kinds: []const types.BrowserKind = default_browser_kinds[0..],
+    explicit_path: ?[]const u8 = null,
+    allow_managed_download: bool = false,
+    managed_cache_dir: ?[]const u8 = null,
+    discovery: types.DiscoveryOptions = .{},
+    profile_mode: types.ProfileMode = .ephemeral,
+    profile_dir: ?[]const u8 = null,
+    headless: bool = true,
+    ignore_tls_errors: bool = false,
+    include_lightpanda_browser: bool = false,
+    gecko_stealth_prefs: bool = true,
+    timeout_policy: ?types.TimeoutPolicy = null,
+    args: []const []const u8 = &.{},
+};
+
 pub fn setHardErrorLogger(callback: ?*const HardErrorLogger) void {
     logging.setHardErrorLogger(callback);
 }
@@ -26,6 +47,30 @@ pub fn discover(
 
 pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !ModernSession {
     return runtime.launch(allocator, opts);
+}
+
+pub fn launchAuto(allocator: std.mem.Allocator, opts: AutoLaunchOptions) !ModernSession {
+    var installs = try runtime.discover(allocator, .{
+        .kinds = opts.kinds,
+        .explicit_path = opts.explicit_path,
+        .allow_managed_download = opts.allow_managed_download,
+        .managed_cache_dir = opts.managed_cache_dir,
+    }, opts.discovery);
+    defer installs.deinit();
+
+    if (installs.items.len == 0) return error.NoBrowserFound;
+
+    return runtime.launch(allocator, .{
+        .install = installs.items[0],
+        .profile_mode = opts.profile_mode,
+        .profile_dir = opts.profile_dir,
+        .headless = opts.headless,
+        .ignore_tls_errors = opts.ignore_tls_errors,
+        .include_lightpanda_browser = opts.include_lightpanda_browser,
+        .gecko_stealth_prefs = opts.gecko_stealth_prefs,
+        .timeout_policy = opts.timeout_policy,
+        .args = opts.args,
+    });
 }
 
 pub fn launchAsync(
@@ -48,6 +93,33 @@ pub fn launchAsync(
         fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
             const c: *Ctx = @ptrCast(@alignCast(p));
             freeLaunchOptions(a, &c.opts);
+            a.destroy(c);
+        }
+    };
+
+    return async_mod.AsyncResult(ModernSession).spawn(allocator, ctx, Runner.run, Runner.destroy);
+}
+
+pub fn launchAutoAsync(
+    allocator: std.mem.Allocator,
+    opts: AutoLaunchOptions,
+) !*async_mod.AsyncResult(ModernSession) {
+    const Ctx = struct {
+        opts: AutoLaunchOptions,
+    };
+    const ctx = try allocator.create(Ctx);
+    errdefer allocator.destroy(ctx);
+    ctx.* = .{ .opts = try cloneAutoLaunchOptions(allocator, opts) };
+
+    const Runner = struct {
+        fn run(a: std.mem.Allocator, p: *anyopaque) anyerror!ModernSession {
+            const c: *Ctx = @ptrCast(@alignCast(p));
+            return launchAuto(a, c.opts);
+        }
+
+        fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
+            const c: *Ctx = @ptrCast(@alignCast(p));
+            freeAutoLaunchOptions(a, &c.opts);
             a.destroy(c);
         }
     };
@@ -216,6 +288,70 @@ fn freeElectronLaunchOptions(allocator: std.mem.Allocator, opts: *types.Electron
     allocator.free(opts.args);
 }
 
+fn cloneArgSlice(allocator: std.mem.Allocator, args: []const []const u8) ![]const []const u8 {
+    var out = try allocator.alloc([]const u8, args.len);
+    var copied: usize = 0;
+    errdefer {
+        for (out[0..copied]) |arg| allocator.free(arg);
+        allocator.free(out);
+    }
+
+    for (args) |arg| {
+        out[copied] = try allocator.dupe(u8, arg);
+        copied += 1;
+    }
+    return out;
+}
+
+fn freeArgSlice(allocator: std.mem.Allocator, args: []const []const u8) void {
+    for (args) |arg| allocator.free(arg);
+    allocator.free(args);
+}
+
+fn cloneKindSlice(allocator: std.mem.Allocator, kinds: []const types.BrowserKind) ![]const types.BrowserKind {
+    const out = try allocator.alloc(types.BrowserKind, kinds.len);
+    @memcpy(out, kinds);
+    return out;
+}
+
+fn cloneAutoLaunchOptions(
+    allocator: std.mem.Allocator,
+    opts: AutoLaunchOptions,
+) !AutoLaunchOptions {
+    const args = try cloneArgSlice(allocator, opts.args);
+    errdefer freeArgSlice(allocator, args);
+
+    var out: AutoLaunchOptions = .{
+        .kinds = try cloneKindSlice(allocator, opts.kinds),
+        .explicit_path = null,
+        .allow_managed_download = opts.allow_managed_download,
+        .managed_cache_dir = null,
+        .discovery = opts.discovery,
+        .profile_mode = opts.profile_mode,
+        .profile_dir = null,
+        .headless = opts.headless,
+        .ignore_tls_errors = opts.ignore_tls_errors,
+        .include_lightpanda_browser = opts.include_lightpanda_browser,
+        .gecko_stealth_prefs = opts.gecko_stealth_prefs,
+        .timeout_policy = opts.timeout_policy,
+        .args = args,
+    };
+    errdefer freeAutoLaunchOptions(allocator, &out);
+
+    if (opts.explicit_path) |path| out.explicit_path = try allocator.dupe(u8, path);
+    if (opts.managed_cache_dir) |path| out.managed_cache_dir = try allocator.dupe(u8, path);
+    if (opts.profile_dir) |path| out.profile_dir = try allocator.dupe(u8, path);
+    return out;
+}
+
+fn freeAutoLaunchOptions(allocator: std.mem.Allocator, opts: *AutoLaunchOptions) void {
+    allocator.free(opts.kinds);
+    if (opts.explicit_path) |path| allocator.free(path);
+    if (opts.managed_cache_dir) |path| allocator.free(path);
+    if (opts.profile_dir) |path| allocator.free(path);
+    freeArgSlice(allocator, opts.args);
+}
+
 test "launchAsync propagates launch errors" {
     const allocator = std.testing.allocator;
     var op = try launchAsync(allocator, .{
@@ -232,4 +368,22 @@ test "launchAsync propagates launch errors" {
     });
     defer op.deinit();
     try std.testing.expectError(error.UnsupportedEngine, op.await(5_000));
+}
+
+test "launchAuto validates explicit path before launch" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidExplicitPath, launchAuto(allocator, .{
+        .kinds = &.{.chrome},
+        .explicit_path = "/definitely/not/a/browser",
+    }));
+}
+
+test "launchAutoAsync propagates discovery errors" {
+    const allocator = std.testing.allocator;
+    var op = try launchAutoAsync(allocator, .{
+        .kinds = &.{.chrome},
+        .explicit_path = "/definitely/not/a/browser",
+    });
+    defer op.deinit();
+    try std.testing.expectError(error.InvalidExplicitPath, op.await(5_000));
 }

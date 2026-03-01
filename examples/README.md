@@ -13,7 +13,7 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 ## Example Index
 
 - `01_discover.zig`: discover installed browsers and print scored candidates.
-- `02_launch_and_navigate.zig`: launch a browser and navigate/wait/evaluate.
+- `02_launch_and_navigate.zig`: auto-discover and launch with sane defaults, then navigate/wait/evaluate.
 - `03_attach_existing_endpoint.zig`: attach to an existing CDP/BiDi endpoint.
 - `04_dom_interactions_and_waits.zig`: DOM interaction flow using target-based waits (`dom_ready`, `selector_visible`).
 - `05_network_interception.zig`: register request/response observers and interception rules.

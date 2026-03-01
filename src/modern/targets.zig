@@ -1,7 +1,6 @@
 const std = @import("std");
 const session_mod = @import("session.zig");
-const common = @import("../protocol/common.zig");
-const http_client = @import("../transport/http_client.zig");
+const executor = @import("../protocol/executor.zig");
 
 pub const TargetInfo = struct {
     id: []const u8,
@@ -12,11 +11,12 @@ pub const TargetsClient = struct {
     session: *session_mod.ModernSession,
 
     pub fn list(self: *TargetsClient, allocator: std.mem.Allocator) ![]TargetInfo {
-        const parsed = try parseCdpEndpoint(self.session);
-        const response = try http_client.getJson(allocator, parsed.host, parsed.port, "/json/list");
-        defer allocator.free(response.body);
-        if (response.status_code < 200 or response.status_code >= 300) return error.InvalidResponse;
-        return parseTargetList(allocator, response.body);
+        const payload = try executor.cdpGetTargets(&self.session.base);
+        defer self.session.base.allocator.free(payload);
+        const targets = try parseTargetList(allocator, payload);
+        if (targets.len > 0) return targets;
+        allocator.free(targets);
+        return self.synthesizeTargetList(allocator);
     }
 
     pub fn freeList(self: *TargetsClient, allocator: std.mem.Allocator, targets: []TargetInfo) void {
@@ -29,38 +29,87 @@ pub const TargetsClient = struct {
     }
 
     pub fn attach(self: *TargetsClient, target_id: []const u8) !void {
-        const parsed = try parseCdpEndpoint(self.session);
-        const response = try http_client.getJson(self.session.base.allocator, parsed.host, parsed.port, "/json/list");
-        defer self.session.base.allocator.free(response.body);
-        if (response.status_code < 200 or response.status_code >= 300) return error.InvalidResponse;
-        const endpoint = try endpointForTargetId(self.session.base.allocator, response.body, target_id);
-        replaceEndpoint(self.session, endpoint);
+        const payload = try executor.cdpAttachToTarget(&self.session.base, target_id, true);
+        defer self.session.base.allocator.free(payload);
+        const attached_session_id = try extractAttachedSessionId(self.session.base.allocator, payload);
+        if (self.session.base.cdp_target_id) |current| self.session.base.allocator.free(current);
+        self.session.base.cdp_target_id = try self.session.base.allocator.dupe(u8, target_id);
+        if (self.session.base.cdp_attached_session_id) |attached| {
+            self.session.base.allocator.free(attached);
+        }
+        self.session.base.cdp_attached_session_id = attached_session_id;
     }
 
     pub fn detach(self: *TargetsClient, target_id: []const u8) !void {
-        _ = target_id;
-        const parsed = try parseCdpEndpoint(self.session);
-        const root_endpoint = try std.fmt.allocPrint(
-            self.session.base.allocator,
-            "cdp://{s}:{d}/",
-            .{ parsed.host, parsed.port },
-        );
-        replaceEndpoint(self.session, root_endpoint);
+        const attached_session_id = blk: {
+            if (self.session.base.cdp_attached_session_id) |existing| {
+                if (self.session.base.cdp_target_id) |current| {
+                    if (std.mem.eql(u8, current, target_id)) break :blk try self.session.base.allocator.dupe(u8, existing);
+                }
+            }
+            const attach_payload = try executor.cdpAttachToTarget(&self.session.base, target_id, true);
+            defer self.session.base.allocator.free(attach_payload);
+            break :blk try extractAttachedSessionId(self.session.base.allocator, attach_payload);
+        };
+        defer self.session.base.allocator.free(attached_session_id);
+
+        const detach_payload = try executor.cdpDetachFromTarget(&self.session.base, attached_session_id);
+        defer self.session.base.allocator.free(detach_payload);
+        const detached_current_target = blk: {
+            if (self.session.base.cdp_target_id) |current| {
+                break :blk std.mem.eql(u8, current, target_id);
+            }
+            break :blk false;
+        };
+        if (self.session.base.cdp_target_id) |current| {
+            if (std.mem.eql(u8, current, target_id)) {
+                self.session.base.allocator.free(current);
+                self.session.base.cdp_target_id = null;
+            }
+        }
+        if (detached_current_target) {
+            if (self.session.base.cdp_attached_session_id) |attached| {
+                self.session.base.allocator.free(attached);
+                self.session.base.cdp_attached_session_id = null;
+            }
+        }
+    }
+
+    fn synthesizeTargetList(self: *TargetsClient, allocator: std.mem.Allocator) ![]TargetInfo {
+        const target_id = try self.ensureCurrentTargetId();
+        const out = try allocator.alloc(TargetInfo, 1);
+        errdefer allocator.free(out);
+        out[0] = .{
+            .id = try allocator.dupe(u8, target_id),
+            .kind = try allocator.dupe(u8, "page"),
+        };
+        return out;
+    }
+
+    fn ensureCurrentTargetId(self: *TargetsClient) ![]const u8 {
+        if (self.session.base.cdp_target_id) |target_id| return target_id;
+
+        const payload = try executor.cdpCreateTarget(&self.session.base, "about:blank");
+        defer self.session.base.allocator.free(payload);
+        const target_id = try parseCreatedTargetId(self.session.base.allocator, payload);
+        errdefer self.session.base.allocator.free(target_id);
+        self.session.base.cdp_target_id = target_id;
+        if (self.session.base.cdp_attached_session_id) |attached| {
+            self.session.base.allocator.free(attached);
+            self.session.base.cdp_attached_session_id = null;
+        }
+        return self.session.base.cdp_target_id.?;
     }
 };
-
-fn parseCdpEndpoint(session: *session_mod.ModernSession) !common.EndpointParts {
-    if (session.base.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const endpoint = session.base.endpoint orelse return error.MissingEndpoint;
-    const parsed = try common.parseEndpoint(endpoint, .cdp);
-    if (parsed.adapter != .cdp) return error.UnsupportedProtocol;
-    return parsed;
-}
 
 fn parseTargetList(allocator: std.mem.Allocator, payload: []const u8) ![]TargetInfo {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
-    if (parsed.value != .array) return error.InvalidResponse;
+    if (parsed.value != .object) return error.InvalidResponse;
+    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+    if (result != .object) return error.InvalidResponse;
+    const target_infos = result.object.get("targetInfos") orelse return error.InvalidResponse;
+    if (target_infos != .array) return error.InvalidResponse;
 
     var out: std.ArrayList(TargetInfo) = .empty;
     errdefer {
@@ -71,9 +120,9 @@ fn parseTargetList(allocator: std.mem.Allocator, payload: []const u8) ![]TargetI
         out.deinit(allocator);
     }
 
-    for (parsed.value.array.items) |item| {
+    for (target_infos.array.items) |item| {
         if (item != .object) continue;
-        const id_value = item.object.get("id") orelse continue;
+        const id_value = item.object.get("targetId") orelse continue;
         const type_value = item.object.get("type") orelse continue;
         if (id_value != .string or type_value != .string) continue;
         try out.append(allocator, .{
@@ -84,52 +133,35 @@ fn parseTargetList(allocator: std.mem.Allocator, payload: []const u8) ![]TargetI
     return out.toOwnedSlice(allocator);
 }
 
-fn endpointForTargetId(allocator: std.mem.Allocator, payload: []const u8, target_id: []const u8) ![]u8 {
+fn extractAttachedSessionId(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
-    if (parsed.value != .array) return error.InvalidResponse;
-
-    for (parsed.value.array.items) |item| {
-        if (item != .object) continue;
-        const id_value = item.object.get("id") orelse continue;
-        if (id_value != .string or !std.mem.eql(u8, id_value.string, target_id)) continue;
-        const ws_value = item.object.get("webSocketDebuggerUrl") orelse continue;
-        if (ws_value != .string) continue;
-        return endpointFromWsUrl(allocator, ws_value.string);
-    }
-    return error.MissingEndpoint;
+    if (parsed.value != .object) return error.InvalidResponse;
+    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+    if (result != .object) return error.InvalidResponse;
+    const session_id = result.object.get("sessionId") orelse return error.InvalidResponse;
+    if (session_id != .string) return error.InvalidResponse;
+    return allocator.dupe(u8, session_id.string);
 }
 
-fn endpointFromWsUrl(allocator: std.mem.Allocator, ws_url: []const u8) ![]u8 {
-    var input = ws_url;
-    if (std.mem.startsWith(u8, input, "ws://")) input = input[5..];
-    if (std.mem.startsWith(u8, input, "wss://")) input = input[6..];
-    const slash = std.mem.indexOfScalar(u8, input, '/') orelse return error.InvalidEndpoint;
-    const host_port = input[0..slash];
-    const path = input[slash..];
-
-    const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.InvalidEndpoint;
-    const host = host_port[0..colon];
-    const port = try std.fmt.parseInt(u16, host_port[colon + 1 ..], 10);
-    return std.fmt.allocPrint(allocator, "cdp://{s}:{d}{s}", .{ host, port, path });
+fn parseCreatedTargetId(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+    if (result != .object) return error.InvalidResponse;
+    const id_value = result.object.get("targetId") orelse return error.InvalidResponse;
+    if (id_value != .string) return error.InvalidResponse;
+    return allocator.dupe(u8, id_value.string);
 }
 
-fn replaceEndpoint(session: *session_mod.ModernSession, endpoint: []u8) void {
-    if (session.base.endpoint) |old| session.base.allocator.free(old);
-    session.base.endpoint = endpoint;
-    if (session.base.cdp_ws_endpoint) |old| {
-        session.base.allocator.free(old);
-        session.base.cdp_ws_endpoint = null;
-    }
-}
-
-test "parse target list returns protocol-backed targets" {
+test "parse target list handles Target.getTargets payload" {
     const allocator = std.testing.allocator;
     const targets = try parseTargetList(allocator,
-        \\[
-        \\  {"id":"target-1","type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/target-1"},
-        \\  {"id":"target-2","type":"service_worker","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/target-2"}
-        \\]
+        \\{"id":1,"result":{"targetInfos":[
+        \\  {"targetId":"target-1","type":"page"},
+        \\  {"targetId":"target-2","type":"service_worker"}
+        \\]}}
     );
     defer {
         for (targets) |target| {
@@ -143,14 +175,16 @@ test "parse target list returns protocol-backed targets" {
     try std.testing.expectEqualStrings("page", targets[0].kind);
 }
 
-test "endpoint for target id maps websocket url to cdp endpoint" {
+test "extract attached session id from Target.attachToTarget payload" {
     const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"target-1","type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/target-1"}
-        \\]
-    ;
-    const endpoint = try endpointForTargetId(allocator, payload, "target-1");
-    defer allocator.free(endpoint);
-    try std.testing.expectEqualStrings("cdp://127.0.0.1:9222/devtools/page/target-1", endpoint);
+    const session_id = try extractAttachedSessionId(allocator, "{\"id\":4,\"result\":{\"sessionId\":\"sid-123\"}}");
+    defer allocator.free(session_id);
+    try std.testing.expectEqualStrings("sid-123", session_id);
+}
+
+test "parse created target id from Target.createTarget payload" {
+    const allocator = std.testing.allocator;
+    const target_id = try parseCreatedTargetId(allocator, "{\"id\":9,\"result\":{\"targetId\":\"target-9\"}}");
+    defer allocator.free(target_id);
+    try std.testing.expectEqualStrings("target-9", target_id);
 }
