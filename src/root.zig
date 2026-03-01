@@ -78,7 +78,6 @@ pub const modern = modern_api;
 pub const support_tier = support_tier_catalog;
 pub const strings = @import("util/strings.zig");
 pub const path = @import("util/path.zig");
-pub const process = @import("util/process.zig");
 
 pub const extension_hooks = extensions;
 pub const async_api = @import("core/async.zig");

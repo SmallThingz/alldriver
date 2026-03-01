@@ -117,7 +117,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
 - Optional Lightpanda support via `-Dinclude_lightpanda_browser=true`.
 - Webview/runtime binaries as applicable: `msedgewebview2`, `electron`.
 - Mobile bridge tooling: `adb`, `shizuku` (or `rish`) for Android WebView.
-- Managed cache tooling (only when using managed downloads): `curl` for `https://` payloads, `tar`/`unzip` for archive payload extraction.
 
 ### Tooling / matrix / release (`zig build tools -- ...`)
 

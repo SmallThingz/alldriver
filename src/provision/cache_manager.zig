@@ -3,8 +3,6 @@ const catalog = @import("../catalog/browser_kind.zig");
 const path_table = @import("../catalog/path_table.zig");
 const types = @import("../types.zig");
 const util = @import("../discovery/util.zig");
-const http = @import("../transport/http_client.zig");
-const process_util = @import("../util/process.zig");
 
 pub const ManagedHit = struct {
     kind: types.BrowserKind,
@@ -127,7 +125,7 @@ pub fn installManagedBrowserWithOptions(
 
     try std.fs.cwd().writeFile(.{ .sub_path = staged_path, .data = payload });
 
-    const selected = if (isArchiveFileName(filename))
+    const selected: SelectedExecutable = if (isArchiveFileName(filename))
         try extractAndSelectExecutable(
             allocator,
             kind,
@@ -136,7 +134,7 @@ pub fn installManagedBrowserWithOptions(
             options.archive_executable_name,
         )
     else
-        .{
+        SelectedExecutable{
             .path = try allocator.dupe(u8, staged_path),
             .basename = try allocator.dupe(u8, std.fs.path.basename(staged_path)),
         };
@@ -157,67 +155,26 @@ pub fn installManagedBrowserWithOptions(
 }
 
 fn downloadToMemory(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
-    const parsed = try parseDownloadUrl(url);
-    return switch (parsed.scheme) {
-        .file => std.fs.cwd().readFileAlloc(allocator, parsed.path, 1024 * 1024 * 256),
-        .http => blk: {
-            const resp = try http.getJson(allocator, parsed.host, parsed.port, parsed.path);
-            if (resp.status_code < 200 or resp.status_code >= 300) {
-                allocator.free(resp.body);
-                return error.DownloadFailed;
-            }
-            break :blk resp.body;
-        },
-        .https => downloadHttpsWithCurl(allocator, url),
-    };
-}
-
-const DownloadScheme = enum {
-    file,
-    http,
-    https,
-};
-
-const ParsedUrl = struct {
-    scheme: DownloadScheme,
-    host: []const u8,
-    port: u16,
-    path: []const u8,
-};
-
-fn parseDownloadUrl(url: []const u8) !ParsedUrl {
     if (std.mem.startsWith(u8, url, "file://")) {
         const local = url[7..];
         if (local.len == 0) return error.InvalidUrl;
-        return .{
-            .scheme = .file,
-            .host = "",
-            .port = 0,
-            .path = local,
-        };
+        return std.fs.cwd().readFileAlloc(allocator, local, 1024 * 1024 * 256);
     }
 
-    const scheme_and_default_port: struct { scheme: DownloadScheme, port: u16, prefix_len: usize } = blk: {
-        if (std.mem.startsWith(u8, url, "http://")) break :blk .{ .scheme = .http, .port = 80, .prefix_len = 7 };
-        if (std.mem.startsWith(u8, url, "https://")) break :blk .{ .scheme = .https, .port = 443, .prefix_len = 8 };
-        return error.UnsupportedUrlScheme;
-    };
-    const rest = url[scheme_and_default_port.prefix_len..];
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
 
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
-    const host_port = rest[0..slash];
-    const path = if (slash < rest.len) rest[slash..] else "/";
+    var collecting_writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer collecting_writer.deinit();
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &collecting_writer.writer,
+        .keep_alive = false,
+    });
 
-    const colon = std.mem.lastIndexOfScalar(u8, host_port, ':');
-    const host = if (colon) |idx| host_port[0..idx] else host_port;
-    if (host.len == 0) return error.InvalidUrl;
-
-    const port: u16 = if (colon) |idx|
-        try std.fmt.parseInt(u16, host_port[idx + 1 ..], 10)
-    else
-        scheme_and_default_port.port;
-
-    return .{ .scheme = scheme_and_default_port.scheme, .host = host, .port = port, .path = path };
+    if (result.status.class() != .success) return error.DownloadFailed;
+    var collected = collecting_writer.toArrayList();
+    return collected.toOwnedSlice(allocator);
 }
 
 fn inferFileName(url: []const u8) []const u8 {
@@ -306,48 +263,73 @@ fn isArchiveFileName(name: []const u8) bool {
 }
 
 fn extractArchive(allocator: std.mem.Allocator, archive_path: []const u8, dest_dir: []const u8) !void {
+    var dest = try std.fs.cwd().openDir(dest_dir, .{});
+    defer dest.close();
+
     if (std.mem.endsWith(u8, archive_path, ".zip")) {
-        const res = try process_util.runCollect(allocator, &.{ "unzip", "-o", archive_path, "-d", dest_dir }, null, null);
-        defer allocator.free(res.stdout);
-        defer allocator.free(res.stderr);
-        if (!res.ok) return error.ArchiveExtractFailed;
+        var file = try std.fs.cwd().openFile(archive_path, .{});
+        defer file.close();
+
+        var file_reader_buffer: [8192]u8 = undefined;
+        var file_reader = file.reader(&file_reader_buffer);
+        try std.zip.extract(dest, &file_reader, .{});
         return;
     }
 
-    if (std.mem.endsWith(u8, archive_path, ".tar") or
-        std.mem.endsWith(u8, archive_path, ".tar.gz") or
-        std.mem.endsWith(u8, archive_path, ".tgz") or
-        std.mem.endsWith(u8, archive_path, ".tar.xz") or
-        std.mem.endsWith(u8, archive_path, ".txz"))
-    {
-        const res = try process_util.runCollect(allocator, &.{ "tar", "-xf", archive_path, "-C", dest_dir }, null, null);
-        defer allocator.free(res.stdout);
-        defer allocator.free(res.stderr);
-        if (!res.ok) return error.ArchiveExtractFailed;
+    if (std.mem.endsWith(u8, archive_path, ".tar")) {
+        var file = try std.fs.cwd().openFile(archive_path, .{});
+        defer file.close();
+
+        var file_reader_buffer: [8192]u8 = undefined;
+        var file_reader = file.reader(&file_reader_buffer);
+        try std.tar.pipeToFileSystem(dest, &file_reader.interface, .{});
+        return;
+    }
+
+    if (std.mem.endsWith(u8, archive_path, ".tar.gz") or std.mem.endsWith(u8, archive_path, ".tgz")) {
+        var file = try std.fs.cwd().openFile(archive_path, .{});
+        defer file.close();
+
+        var file_reader_buffer: [8192]u8 = undefined;
+        var file_reader = file.reader(&file_reader_buffer);
+        var inflate_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+        var gzip_reader = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &inflate_buffer);
+        try std.tar.pipeToFileSystem(dest, &gzip_reader.reader, .{});
+        return;
+    }
+
+    if (std.mem.endsWith(u8, archive_path, ".tar.xz") or std.mem.endsWith(u8, archive_path, ".txz")) {
+        const compressed = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
+        defer allocator.free(compressed);
+
+        var in_stream = std.io.fixedBufferStream(compressed);
+        var xz = try std.compress.xz.decompress(allocator, in_stream.reader());
+        defer xz.deinit();
+
+        var tar_bytes: std.ArrayList(u8) = .empty;
+        defer tar_bytes.deinit(allocator);
+
+        var xz_reader = xz.reader();
+        var decode_buffer: [8192]u8 = undefined;
+        while (true) {
+            const n = try xz_reader.read(&decode_buffer);
+            if (n == 0) break;
+            try tar_bytes.appendSlice(allocator, decode_buffer[0..n]);
+        }
+
+        var tar_reader: std.Io.Reader = .fixed(tar_bytes.items);
+        try std.tar.pipeToFileSystem(dest, &tar_reader, .{});
         return;
     }
 
     return error.UnsupportedArchiveFormat;
 }
 
-fn downloadHttpsWithCurl(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
-    const res = try process_util.runCollect(
-        allocator,
-        &.{ "curl", "--fail", "--location", "--silent", "--show-error", url },
-        null,
-        null,
-    );
-    defer allocator.free(res.stderr);
-    if (!res.ok) {
-        allocator.free(res.stdout);
-        return error.DownloadFailed;
-    }
-    return res.stdout;
-}
-
 fn ensureExecutablePermissions(path: []const u8) void {
     if (@import("builtin").os.tag == .windows) return;
-    std.fs.cwd().chmod(path, 0o755) catch {};
+    const file = std.fs.cwd().openFile(path, .{}) catch return;
+    defer file.close();
+    file.chmod(0o755) catch {};
 }
 
 fn verifySha256(data: []const u8, expected_hex: []const u8) !void {
@@ -368,29 +350,6 @@ test "infer file name" {
     try std.testing.expect(std.mem.eql(u8, inferFileName("http://example.com/path/"), "browser.bin"));
 }
 
-test "parse download url defaults ports" {
-    const parsed_http = try parseDownloadUrl("http://example.com/path");
-    try std.testing.expectEqual(DownloadScheme.http, parsed_http.scheme);
-    try std.testing.expect(std.mem.eql(u8, parsed_http.host, "example.com"));
-    try std.testing.expectEqual(@as(u16, 80), parsed_http.port);
-    try std.testing.expect(std.mem.eql(u8, parsed_http.path, "/path"));
-
-    const parsed_https = try parseDownloadUrl("https://example.com/path");
-    try std.testing.expectEqual(DownloadScheme.https, parsed_https.scheme);
-    try std.testing.expect(std.mem.eql(u8, parsed_https.host, "example.com"));
-    try std.testing.expectEqual(@as(u16, 443), parsed_https.port);
-    try std.testing.expect(std.mem.eql(u8, parsed_https.path, "/path"));
-
-    const parsed_file = try parseDownloadUrl("file:///tmp/browser");
-    try std.testing.expectEqual(DownloadScheme.file, parsed_file.scheme);
-    try std.testing.expectEqual(@as(u16, 0), parsed_file.port);
-    try std.testing.expect(std.mem.eql(u8, parsed_file.path, "/tmp/browser"));
-}
-
-test "parse download url rejects unsupported scheme" {
-    try std.testing.expectError(error.UnsupportedUrlScheme, parseDownloadUrl("ftp://example.com/file"));
-}
-
 test "archive file detection" {
     try std.testing.expect(isArchiveFileName("browser.zip"));
     try std.testing.expect(isArchiveFileName("browser.tar.gz"));
@@ -399,14 +358,100 @@ test "archive file detection" {
     try std.testing.expect(!isArchiveFileName("browser.bin"));
 }
 
-test "parse download url host and path" {
-    const parsed = try parseDownloadUrl("http://example.com/path");
-    try std.testing.expectEqual(DownloadScheme.http, parsed.scheme);
-    try std.testing.expect(std.mem.eql(u8, parsed.host, "example.com"));
-    try std.testing.expectEqual(@as(u16, 80), parsed.port);
-    try std.testing.expect(std.mem.eql(u8, parsed.path, "/path"));
-}
-
 test "verify sha256 detects mismatch" {
     try std.testing.expectError(error.HashMismatch, verifySha256("abc", "0000000000000000000000000000000000000000000000000000000000000000"));
+}
+
+const zip_fixture_hex =
+    "504b0304140000000000079f615c56abff5e09000000090000000b00000062696e2f62726f7773657268656c6c6f2d7a6970504b01021403140000000000079f615c56abff5e09000000090000000b000000000000000000000080010000000062696e2f62726f77736572504b0506000000000100010039000000320000000000";
+
+const OneShotHttpServer = struct {
+    server: std.net.Server,
+    body: []const u8,
+    failed: bool = false,
+
+    fn port(self: *const OneShotHttpServer) u16 {
+        const real = self.server.listen_address.in.sa;
+        return std.mem.bigToNative(u16, real.port);
+    }
+};
+
+fn runOneShotHttpServer(ctx: *OneShotHttpServer) void {
+    defer ctx.server.deinit();
+    const conn = ctx.server.accept() catch {
+        ctx.failed = true;
+        return;
+    };
+    defer conn.stream.close();
+
+    var req_buf: [2048]u8 = undefined;
+    _ = conn.stream.read(&req_buf) catch {
+        ctx.failed = true;
+        return;
+    };
+
+    var head_buf: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(
+        &head_buf,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+        .{ctx.body.len},
+    ) catch {
+        ctx.failed = true;
+        return;
+    };
+
+    conn.stream.writeAll(head) catch {
+        ctx.failed = true;
+        return;
+    };
+    conn.stream.writeAll(ctx.body) catch {
+        ctx.failed = true;
+    };
+}
+
+test "managed install downloads over HTTP and extracts zip without external tools" {
+    const allocator = std.testing.allocator;
+
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const cache_dir = try temp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(cache_dir);
+
+    const zip_bytes = try decodeHexAlloc(allocator, zip_fixture_hex);
+    defer allocator.free(zip_bytes);
+
+    var addr = try std.net.Address.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+
+    var ctx = OneShotHttpServer{
+        .server = server,
+        .body = zip_bytes,
+    };
+    const thread = try std.Thread.spawn(.{}, runOneShotHttpServer, .{&ctx});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/browser.zip", .{ctx.port()});
+    defer allocator.free(url);
+
+    try installManagedBrowserWithOptions(allocator, .chrome, cache_dir, url, .{
+        .archive_executable_name = "browser",
+    });
+    thread.join();
+    joined = true;
+    try std.testing.expect(!ctx.failed);
+
+    const installed = try std.fs.path.join(allocator, &.{ cache_dir, "chrome", "current", "browser" });
+    defer allocator.free(installed);
+    const installed_bytes = try std.fs.cwd().readFileAlloc(allocator, installed, 1024);
+    defer allocator.free(installed_bytes);
+    try std.testing.expectEqualStrings("hello-zip", installed_bytes);
+}
+
+fn decodeHexAlloc(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
+    if (hex.len % 2 != 0) return error.InvalidHex;
+    const out = try allocator.alloc(u8, hex.len / 2);
+    errdefer allocator.free(out);
+    _ = try std.fmt.hexToBytes(out, hex);
+    return out;
 }

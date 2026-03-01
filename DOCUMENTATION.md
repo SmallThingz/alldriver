@@ -146,8 +146,7 @@ Managed install supports:
 
 Notes:
 
-- `https://` downloads currently use `curl`.
-- Archive extraction currently uses `tar`/`unzip`.
+- Managed downloads and extraction are implemented with Zig stdlib (`std.http`, `std.zip`, `std.tar`, `std.compress`).
 
 ## Compile-Time Extensions
 
@@ -222,7 +221,6 @@ Official upstream pages:
 - Optional Lightpanda integration: `-Dinclude_lightpanda_browser=true`
 - Webview runtimes as needed: `msedgewebview2`, `electron`
 - Android bridge tools: `adb`, `shizuku` (or `rish`)
-- Managed cache tooling (when used): `curl`, `tar`, `unzip`
 
 ### Tooling / matrix / release
 
