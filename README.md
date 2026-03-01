@@ -4,11 +4,10 @@
 
 [![zig](https://img.shields.io/badge/Zig-0.15.x-orange)](#)
 [![platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#)
-[![protocols](https://img.shields.io/badge/Protocols-CDP%20%7C%20BiDi%20%7C%20WebDriver-green)](#)
+[![protocols](https://img.shields.io/badge/Protocols-CDP%20%7C%20BiDi-green)](#)
 
-`alldriver` is a desktop-first automation framework with explicit modern/legacy API tiers:
+`alldriver` is a desktop-first automation framework with a modern protocol surface:
 - `modern`: CDP + BiDi (`cdp_ws`, `bidi_ws`)
-- `legacy`: WebDriver-only (`webdriver_http`)
 
 ## Why alldriver
 - One library for major desktop browsers + webviews.
@@ -28,7 +27,7 @@ const driver = @import("alldriver");
 
 pub fn run(allocator: std.mem.Allocator) !void {
     var installs = try driver.discover(allocator, .{
-        .kinds = &.{ .chrome, .firefox, .safari },
+        .kinds = &.{ .chrome, .firefox, .lightpanda },
         .allow_managed_download = false,
     }, .{});
     defer installs.deinit();
@@ -36,28 +35,18 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (installs.items.len == 0) return error.NoBrowserFound;
 
     const install = installs.items[0];
-    if (driver.support_tier.browserTier(install.kind) == .modern) {
-        var s = try driver.modern.launch(allocator, .{
-            .install = install,
-            .profile_mode = .ephemeral,
-            .headless = true,
-        });
-        defer s.deinit();
+    if (driver.support_tier.browserTier(install.kind) != .modern) return error.UnsupportedEngine;
 
-        var page = s.page();
-        try page.navigate("https://example.com");
-        _ = try s.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
-    } else {
-        var s = try driver.legacy.launch(allocator, .{
-            .install = install,
-            .profile_mode = .ephemeral,
-            .headless = true,
-        });
-        defer s.deinit();
+    var s = try driver.modern.launch(allocator, .{
+        .install = install,
+        .profile_mode = .ephemeral,
+        .headless = true,
+    });
+    defer s.deinit();
 
-        try s.navigate("https://example.com");
-        _ = try s.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
-    }
+    var page = s.page();
+    try page.navigate("https://example.com");
+    _ = try s.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
 }
 ```
 
@@ -68,10 +57,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
 - `discoverWebViews(...) -> WebViewRuntimeList`
 - Caller releases with `.deinit()`.
 
-### Namespace split
+### Namespace
 - `driver.modern.*` for Chromium/Gecko + CDP-capable webviews.
-- `driver.legacy.*` for WebDriver-only browser/webview paths.
-- Compatibility facades and root launch/attach shims are removed.
+- Legacy WebDriver namespace was removed.
 
 ### Modern domains
 - `page()`, `runtime()`, `network()`, `input()`, `log()`, `storage()`, `contexts()`, `targets()`
@@ -79,7 +67,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 ### Wait / events / cache primitives
 - `Session.waitFor(target, opts)` and `Session.waitForAsync(target, opts)` support:
   `dom_ready`, `network_idle`, `selector_visible`, `url_contains`, `cookie_present`, `storage_key_present`, `js_truthy`.
-- Compatibility wait helpers were removed; use `waitFor(.{ .selector_visible = "..." }, ...)` instead of legacy selector-specific helpers.
+- Compatibility wait helpers were removed; use `waitFor(.{ .selector_visible = "..." }, ...)`.
 - `CancelToken` enables cooperative cancellation for sync/async waits.
 - Lifecycle hooks:
   `onEvent(filter, callback)` / `offEvent(id)` with event kinds:
@@ -103,20 +91,19 @@ pub fn run(allocator: std.mem.Allocator) !void {
 ## Browser / WebView Coverage
 
 ### Browser tiers
-- Tier 1: Chromium family + Firefox + Safari (platform dependent).
-- Tier 2: Tor, Mullvad, LibreWolf, Pale Moon, SigmaOS (strict scope depends on runtime exposure).
+- Tier 1: Chromium family + Firefox (platform dependent).
+- Tier 2: Tor, Mullvad, LibreWolf, Pale Moon, SigmaOS (runtime exposure dependent).
 
 ### Webviews
-- `webview2`, `electron`, `android_webview` (modern)
-- `wkwebview`, `webkitgtk`, `ios_wkwebview` (legacy)
+- `webview2`, `electron`, `android_webview`
 
 ## External Binary Dependencies
 
 ### Core runtime
 - Browser binaries (at least one target installed): Chrome/Chromium, Edge, Safari, Firefox, Brave, Tor Browser, DuckDuckGo Browser, Mullvad Browser, LibreWolf, Epic, Arc, Vivaldi, SigmaOS, Sidekick, Shift, Opera GX, Pale Moon.
 - Optional Lightpanda support via `-Dinclude_lightpanda_browser=true`.
-- Webview/runtime binaries as applicable: `msedgewebview2`, `safaridriver`, `WebKitWebDriver`, `MiniBrowser`, `electron`.
-- Mobile bridges: `adb`, `shizuku` (or `rish`), `ios_webkit_debug_proxy`, `tidevice`.
+- Webview/runtime binaries as applicable: `msedgewebview2`, `electron`.
+- Mobile bridges: `adb`, `shizuku` (or `rish`) for Android WebView.
 
 ### Tooling / matrix / release (`zig build tools -- ...`)
 - Base tooling: `zig`, `git`, `bash`, `tar`, `date`, `which` (or `where` on Windows), `chmod`.

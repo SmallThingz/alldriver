@@ -112,17 +112,16 @@ test "retain-by-tier webview list deinitializes dropped entries" {
         .version = try allocator.dupe(u8, "1"),
     };
     list.items[1] = .{
-        .kind = .wkwebview,
-        .engine = .webkit,
-        .platform = .macos,
-        .runtime_path = try allocator.dupe(u8, "WKWebView"),
+        .kind = .webview2,
+        .engine = .chromium,
+        .platform = .windows,
+        .runtime_path = try allocator.dupe(u8, "msedgewebview2"),
         .bridge_tool_path = null,
         .source = .system_framework,
         .version = try allocator.dupe(u8, "2"),
     };
     defer list.deinit();
 
-    list.retainByTier(.legacy);
-    try std.testing.expectEqual(@as(usize, 1), list.items.len);
-    try std.testing.expectEqual(types.WebViewKind.wkwebview, list.items[0].kind);
+    list.retainByTier(.modern);
+    try std.testing.expectEqual(@as(usize, 2), list.items.len);
 }

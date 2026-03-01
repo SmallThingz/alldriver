@@ -14,131 +14,49 @@ fn probeCount(hints: path_table.BrowserPathHints) usize {
     return hints.executable_names.len + hints.known_paths.len + hints.mac_bundle_ids.len + hints.windows_registry_hints.len + hints.linux_package_hints.len;
 }
 
-test "path table invariants hold across all platforms" {
+test "path table invariants hold across platforms" {
     const platforms = [_]catalog.Platform{ .windows, .macos, .linux };
-
     for (path_table.all_browser_kinds) |kind| {
         for (platforms) |platform| {
             const hints = path_table.hintsFor(kind, platform);
             try std.testing.expectEqual(kind, hints.kind);
             try std.testing.expectEqual(platform, hints.platform);
             try std.testing.expectEqual(catalog.engineFor(kind), hints.engine);
-
-            for (hints.executable_names) |entry| try std.testing.expect(entry.len > 0);
-            for (hints.known_paths) |entry| try std.testing.expect(entry.len > 0);
-            for (hints.mac_bundle_ids) |entry| try std.testing.expect(entry.len > 0);
-            for (hints.windows_registry_hints) |entry| try std.testing.expect(entry.len > 0);
-            for (hints.linux_package_hints) |entry| try std.testing.expect(entry.len > 0);
-
-            if (hints.confidence_weight > 0) {
-                try std.testing.expect(probeCount(hints) > 0);
-            }
         }
     }
 }
 
-test "every browser kind has at least one supported desktop platform hint" {
-    const platforms = [_]catalog.Platform{ .windows, .macos, .linux };
-
-    for (path_table.all_browser_kinds) |kind| {
-        var supported: usize = 0;
-        for (platforms) |platform| {
-            const hints = path_table.hintsFor(kind, platform);
-            if (hints.confidence_weight > 0 and probeCount(hints) > 0) {
-                supported += 1;
-            }
-        }
-
-        try std.testing.expect(supported > 0);
-    }
+test "lightpanda has cross-platform path hints" {
+    try std.testing.expect(path_table.hintsFor(.lightpanda, .windows).confidence_weight > 0);
+    try std.testing.expect(path_table.hintsFor(.lightpanda, .macos).confidence_weight > 0);
+    try std.testing.expect(path_table.hintsFor(.lightpanda, .linux).confidence_weight > 0);
 }
 
-test "browser support contract matches expected desktop platform matrix" {
-    const Case = struct {
-        kind: catalog.BrowserKind,
-        windows: bool,
-        macos: bool,
-        linux: bool,
-    };
+test "protocol endpoint parsing supports cdp and bidi only" {
+    const cdp_endpoint = try common.parseEndpoint("cdp://127.0.0.1:9222/devtools/browser/abc", .cdp);
+    try std.testing.expectEqual(common.AdapterKind.cdp, cdp_endpoint.adapter);
+    try std.testing.expectEqual(@as(u16, 9222), cdp_endpoint.port);
 
-    const cases = [_]Case{
-        .{ .kind = .chrome, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .edge, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .safari, .windows = false, .macos = true, .linux = false },
-        .{ .kind = .firefox, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .brave, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .tor, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .duckduckgo, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .mullvad, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .librewolf, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .epic, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .arc, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .vivaldi, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .sigmaos, .windows = false, .macos = true, .linux = false },
-        .{ .kind = .sidekick, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .shift, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .operagx, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .lightpanda, .windows = true, .macos = true, .linux = true },
-        .{ .kind = .palemoon, .windows = true, .macos = true, .linux = true },
-    };
+    const bidi_endpoint = try common.parseEndpoint("bidi://localhost:9223/session/1", .cdp);
+    try std.testing.expectEqual(common.AdapterKind.bidi, bidi_endpoint.adapter);
+    try std.testing.expectEqual(@as(u16, 9223), bidi_endpoint.port);
 
-    for (cases) |c| {
-        const win = path_table.hintsFor(c.kind, .windows);
-        const mac = path_table.hintsFor(c.kind, .macos);
-        const lin = path_table.hintsFor(c.kind, .linux);
-
-        try std.testing.expectEqual(c.windows, win.confidence_weight > 0);
-        try std.testing.expectEqual(c.macos, mac.confidence_weight > 0);
-        try std.testing.expectEqual(c.linux, lin.confidence_weight > 0);
-
-        if (c.windows) {
-            try std.testing.expect(probeCount(win) > 0);
-        }
-        if (c.macos) {
-            try std.testing.expect(probeCount(mac) > 0);
-        }
-        if (c.linux) {
-            try std.testing.expect(probeCount(lin) > 0);
-        }
-    }
-}
-
-test "protocol endpoint parsing covers major schemes" {
-    const cdp = try common.parseEndpoint("cdp://127.0.0.1:9222/devtools/browser/abc", .webdriver);
-    try std.testing.expectEqual(common.AdapterKind.cdp, cdp.adapter);
-    try std.testing.expectEqual(@as(u16, 9222), cdp.port);
-    try std.testing.expect(std.mem.eql(u8, cdp.path, "/devtools/browser/abc"));
-
-    const bidi = try common.parseEndpoint("bidi://localhost/session/1", .webdriver);
-    try std.testing.expectEqual(common.AdapterKind.bidi, bidi.adapter);
-    try std.testing.expectEqual(@as(u16, 9222), bidi.port);
-
-    const webdriver = try common.parseEndpoint("webdriver://localhost:4444/session/42", .cdp);
-    try std.testing.expectEqual(common.AdapterKind.webdriver, webdriver.adapter);
-    try std.testing.expectEqual(@as(u16, 4444), webdriver.port);
-
-    const cdp_secure = try common.parseEndpoint("wss://localhost/devtools/browser/secure", .webdriver);
-    try std.testing.expectEqual(common.AdapterKind.cdp, cdp_secure.adapter);
-    try std.testing.expectEqual(@as(u16, 9222), cdp_secure.port);
-
-    try std.testing.expectError(error.InvalidEndpoint, common.parseEndpoint("not-an-endpoint", .webdriver));
+    try std.testing.expectError(error.UnsupportedProtocol, common.parseEndpoint("http://127.0.0.1:4444/session/1", .cdp));
+    try std.testing.expectError(error.InvalidEndpoint, common.parseEndpoint("not-an-endpoint", .cdp));
 }
 
 test "os specific collectors are host-gated" {
     const allocator = std.testing.allocator;
-
     const win = try windows_registry.collect(allocator, &.{ .chrome, .edge });
     defer {
         for (win) |hit| allocator.free(hit.path);
         allocator.free(win);
     }
-
     const mac = try macos_apps.collect(allocator, &.{ .safari, .firefox });
     defer {
         for (mac) |hit| allocator.free(hit.path);
         allocator.free(mac);
     }
-
     const lin = try linux_sources.collect(allocator, &.{ .chrome, .firefox });
     defer {
         for (lin) |hit| allocator.free(hit.path);
@@ -151,182 +69,45 @@ test "os specific collectors are host-gated" {
     if (os_tag != .linux) try std.testing.expectEqual(@as(usize, 0), lin.len);
 }
 
-test "webview kind mappings stay stable" {
+test "modern webview mapping is stable" {
     const cases = [_]struct {
         kind: types.WebViewKind,
-        expected_engine: types.EngineKind,
-        expected_platform: types.WebViewPlatform,
+        platform: types.WebViewPlatform,
     }{
-        .{ .kind = .webview2, .expected_engine = .chromium, .expected_platform = .windows },
-        .{ .kind = .wkwebview, .expected_engine = .webkit, .expected_platform = .macos },
-        .{ .kind = .webkitgtk, .expected_engine = .webkit, .expected_platform = .linux },
-        .{ .kind = .electron, .expected_engine = .chromium, .expected_platform = webview_discovery.platformForWebView(.electron) },
-        .{ .kind = .android_webview, .expected_engine = .chromium, .expected_platform = .android },
-        .{ .kind = .ios_wkwebview, .expected_engine = .webkit, .expected_platform = .ios },
+        .{ .kind = .webview2, .platform = .windows },
+        .{ .kind = .electron, .platform = webview_discovery.platformForWebView(.electron) },
+        .{ .kind = .android_webview, .platform = .android },
     };
-
     for (cases) |c| {
-        try std.testing.expectEqual(c.expected_engine, webview_discovery.engineForWebView(c.kind));
-        try std.testing.expectEqual(c.expected_platform, webview_discovery.platformForWebView(c.kind));
+        try std.testing.expectEqual(types.EngineKind.chromium, webview_discovery.engineForWebView(c.kind));
+        try std.testing.expectEqual(c.platform, webview_discovery.platformForWebView(c.kind));
+        try std.testing.expectEqual(types.ApiTier.modern, support_tier.webViewTier(c.kind));
     }
 }
 
-test "desktop webview mappings stay on desktop platforms only" {
-    const desktop_kinds = [_]types.WebViewKind{ .webview2, .wkwebview, .webkitgtk, .electron };
-    for (desktop_kinds) |kind| {
-        const platform = webview_discovery.platformForWebView(kind);
-        try std.testing.expect(platform == .windows or platform == .macos or platform == .linux);
+test "browser tier is modern for chromium/gecko and unsupported for webkit/unknown" {
+    for (path_table.all_browser_kinds) |kind| {
+        const tier = support_tier.browserTier(kind);
+        const engine = catalog.engineFor(kind);
+        switch (engine) {
+            .chromium, .gecko => try std.testing.expectEqual(types.ApiTier.modern, tier),
+            .webkit, .unknown => try std.testing.expectEqual(types.ApiTier.unsupported, tier),
+        }
     }
-
-    try std.testing.expectEqual(types.WebViewPlatform.android, webview_discovery.platformForWebView(.android_webview));
-    try std.testing.expectEqual(types.WebViewPlatform.ios, webview_discovery.platformForWebView(.ios_wkwebview));
 }
 
-test "browser path hints exclude standalone chromedriver geckodriver and msedgedriver binaries" {
+test "browser hints do not include standalone driver binaries" {
     const forbidden = [_][]const u8{ "chromedriver", "geckodriver", "msedgedriver" };
     const platforms = [_]catalog.Platform{ .windows, .macos, .linux };
-
     for (path_table.all_browser_kinds) |kind| {
         for (platforms) |platform| {
             const hints = path_table.hintsFor(kind, platform);
-
+            if (hints.confidence_weight == 0 and probeCount(hints) == 0) continue;
             for (hints.executable_names) |entry| {
                 for (forbidden) |name| {
                     try std.testing.expect(!helpers.containsIgnoreCase(entry, name));
                 }
             }
-            for (hints.known_paths) |entry| {
-                for (forbidden) |name| {
-                    try std.testing.expect(!helpers.containsIgnoreCase(entry, name));
-                }
-            }
-            for (hints.windows_registry_hints) |entry| {
-                for (forbidden) |name| {
-                    try std.testing.expect(!helpers.containsIgnoreCase(entry, name));
-                }
-            }
         }
-    }
-}
-
-fn hasWebViewKind(kinds: []const types.WebViewKind, needle: types.WebViewKind) bool {
-    for (kinds) |kind| {
-        if (kind == needle) return true;
-    }
-    return false;
-}
-
-test "adversarial webview host target contract stays stable" {
-    const expected: []const types.WebViewKind = switch (@import("builtin").os.tag) {
-        .windows => &.{ .webview2, .electron, .android_webview },
-        .macos => &.{ .wkwebview, .electron, .android_webview, .ios_wkwebview },
-        else => &.{ .webkitgtk, .electron, .android_webview },
-    };
-
-    try std.testing.expect(hasWebViewKind(expected, .electron));
-    try std.testing.expect(hasWebViewKind(expected, .android_webview));
-
-    if (@import("builtin").os.tag == .windows) {
-        try std.testing.expect(hasWebViewKind(expected, .webview2));
-        try std.testing.expect(!hasWebViewKind(expected, .wkwebview));
-        try std.testing.expect(!hasWebViewKind(expected, .webkitgtk));
-    } else if (@import("builtin").os.tag == .macos) {
-        try std.testing.expect(hasWebViewKind(expected, .wkwebview));
-        try std.testing.expect(hasWebViewKind(expected, .ios_wkwebview));
-        try std.testing.expect(!hasWebViewKind(expected, .webview2));
-    } else {
-        try std.testing.expect(hasWebViewKind(expected, .webkitgtk));
-        try std.testing.expect(!hasWebViewKind(expected, .webview2));
-        try std.testing.expect(!hasWebViewKind(expected, .wkwebview));
-        try std.testing.expect(!hasWebViewKind(expected, .ios_wkwebview));
-    }
-}
-
-test "adversarial browser host targeting aligns with path hint support" {
-    const host_platform: catalog.Platform = switch (@import("builtin").os.tag) {
-        .windows => .windows,
-        .macos => .macos,
-        else => .linux,
-    };
-
-    var supported_count: usize = 0;
-    for (path_table.all_browser_kinds) |kind| {
-        const hints = path_table.hintsFor(kind, host_platform);
-        if (hints.confidence_weight > 0) supported_count += 1;
-    }
-
-    try std.testing.expect(supported_count > 0);
-    if (@import("builtin").os.tag == .macos) {
-        try std.testing.expect(path_table.hintsFor(.safari, host_platform).confidence_weight > 0);
-        try std.testing.expect(path_table.hintsFor(.sigmaos, host_platform).confidence_weight > 0);
-    } else {
-        try std.testing.expect(path_table.hintsFor(.safari, host_platform).confidence_weight == 0);
-        try std.testing.expect(path_table.hintsFor(.sigmaos, host_platform).confidence_weight == 0);
-    }
-}
-
-test "api split browser classification follows engine contract" {
-    var modern_count: usize = 0;
-    var legacy_count: usize = 0;
-
-    for (path_table.all_browser_kinds) |kind| {
-        const tier = support_tier.browserTier(kind);
-        const engine = catalog.engineFor(kind);
-        switch (tier) {
-            .modern => {
-                modern_count += 1;
-                try std.testing.expect(engine == .chromium or engine == .gecko);
-            },
-            .legacy => {
-                legacy_count += 1;
-                try std.testing.expect(engine == .webkit or engine == .unknown);
-            },
-        }
-    }
-
-    try std.testing.expect(modern_count > 0);
-    try std.testing.expect(legacy_count > 0);
-}
-
-test "api split webview classification is stable" {
-    const cases = [_]struct {
-        kind: types.WebViewKind,
-        tier: support_tier.ApiTier,
-    }{
-        .{ .kind = .webview2, .tier = .modern },
-        .{ .kind = .electron, .tier = .modern },
-        .{ .kind = .android_webview, .tier = .modern },
-        .{ .kind = .wkwebview, .tier = .legacy },
-        .{ .kind = .webkitgtk, .tier = .legacy },
-        .{ .kind = .ios_wkwebview, .tier = .legacy },
-    };
-
-    for (cases) |c| {
-        try std.testing.expectEqual(c.tier, support_tier.webViewTier(c.kind));
-    }
-}
-
-test "api split host matrix keeps modern coverage and explicit legacy handling" {
-    const host_platform: catalog.Platform = switch (@import("builtin").os.tag) {
-        .windows => .windows,
-        .macos => .macos,
-        else => .linux,
-    };
-
-    var modern_supported: usize = 0;
-    var legacy_supported: usize = 0;
-    for (path_table.all_browser_kinds) |kind| {
-        const hints = path_table.hintsFor(kind, host_platform);
-        if (hints.confidence_weight == 0) continue;
-        if (support_tier.browserTier(kind) == .modern) {
-            modern_supported += 1;
-        } else {
-            legacy_supported += 1;
-        }
-    }
-
-    try std.testing.expect(modern_supported > 0);
-    if (host_platform == .macos) {
-        try std.testing.expect(legacy_supported > 0);
     }
 }

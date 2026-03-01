@@ -9,7 +9,6 @@ const extensions = @import("extensions/api.zig");
 const errors = @import("errors.zig");
 const support_tier_catalog = @import("catalog/support_tier.zig");
 const modern_api = @import("modern/api.zig");
-const legacy_api = @import("legacy/api.zig");
 
 pub const BrowserKind = types.BrowserKind;
 pub const EngineKind = types.EngineKind;
@@ -60,10 +59,6 @@ pub const WebViewAttachOptions = types.WebViewAttachOptions;
 pub const WebViewLaunchOptions = types.WebViewLaunchOptions;
 pub const AndroidBridgeKind = types.AndroidBridgeKind;
 pub const AndroidWebViewAttachOptions = types.AndroidWebViewAttachOptions;
-pub const IosWebViewAttachOptions = types.IosWebViewAttachOptions;
-pub const WebKitGtkWebViewAttachOptions = types.WebKitGtkWebViewAttachOptions;
-pub const WebKitGtkBrowserTarget = types.WebKitGtkBrowserTarget;
-pub const WebKitGtkWebViewLaunchOptions = types.WebKitGtkWebViewLaunchOptions;
 pub const ElectronWebViewAttachOptions = types.ElectronWebViewAttachOptions;
 pub const ElectronWebViewLaunchOptions = types.ElectronWebViewLaunchOptions;
 
@@ -80,7 +75,6 @@ pub const SessionCacheStore = @import("session_cache/store.zig").SessionCacheSto
 pub const session_cache = @import("session_cache/store.zig");
 
 pub const modern = modern_api;
-pub const legacy = legacy_api;
 pub const support_tier = support_tier_catalog;
 pub const strings = @import("util/strings.zig");
 pub const path = @import("util/path.zig");
@@ -115,7 +109,7 @@ pub fn bufferedPrint() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("alldriver ready. Use modern/legacy namespaced APIs.\n", .{});
+    try stdout.print("alldriver ready. Use modern CDP/BiDi APIs.\n", .{});
     try stdout.flush();
 }
 
@@ -148,8 +142,4 @@ test "platform matrix contracts" {
 
 test "behavioral matrix contracts" {
     _ = @import("tests/behavioral_matrix.zig");
-}
-
-test "api split contracts" {
-    _ = @import("tests/api_split.zig");
 }

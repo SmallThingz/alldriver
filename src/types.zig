@@ -8,7 +8,7 @@ pub const Platform = catalog.Platform;
 pub const CancelToken = cancel_mod.CancelToken;
 pub const ApiTier = enum {
     modern,
-    legacy,
+    unsupported,
 };
 pub const WebViewPlatform = enum {
     windows,
@@ -20,11 +20,8 @@ pub const WebViewPlatform = enum {
 
 pub const WebViewKind = enum {
     webview2,
-    wkwebview,
-    webkitgtk,
     electron,
     android_webview,
-    ios_wkwebview,
 };
 
 pub const ProfileMode = enum {
@@ -418,42 +415,6 @@ pub const AndroidWebViewAttachOptions = struct {
     endpoint: ?[]const u8 = null,
 };
 
-pub const IosWebViewAttachOptions = struct {
-    udid: []const u8,
-    app_bundle_id: ?[]const u8 = null,
-    page_id: ?[]const u8 = null,
-    endpoint: ?[]const u8 = null,
-};
-
-pub const WebKitGtkWebViewAttachOptions = struct {
-    endpoint: ?[]const u8 = null,
-    host: []const u8 = "127.0.0.1",
-    port: u16 = 4444,
-    session_id: ?[]const u8 = null,
-};
-
-pub const WebKitGtkBrowserTarget = enum {
-    auto,
-    minibrowser,
-    custom_binary,
-};
-
-pub const WebKitGtkWebViewLaunchOptions = struct {
-    driver_executable_path: ?[]const u8 = null,
-    host: []const u8 = "127.0.0.1",
-    port: ?u16 = null,
-    replace_on_new_session: bool = true,
-    profile_mode: ProfileMode = .ephemeral,
-    profile_dir: ?[]const u8 = null,
-    ignore_tls_errors: bool = false,
-    driver_args: []const []const u8 = &.{},
-    browser_target: WebKitGtkBrowserTarget = .auto,
-    browser_binary_path: ?[]const u8 = null,
-    browser_args: []const []const u8 = &.{},
-    session_create_timeout_ms: u32 = 30_000,
-    session_capabilities_json: ?[]const u8 = null,
-};
-
 pub const ElectronWebViewAttachOptions = struct {
     endpoint: ?[]const u8 = null,
     host: []const u8 = "127.0.0.1",
@@ -487,13 +448,12 @@ pub const LaunchError = error{
 fn browserTierForKind(kind: BrowserKind) ApiTier {
     return switch (catalog.engineFor(kind)) {
         .chromium, .gecko => .modern,
-        .webkit, .unknown => .legacy,
+        .webkit, .unknown => .unsupported,
     };
 }
 
 fn webViewTierForKind(kind: WebViewKind) ApiTier {
     return switch (kind) {
         .webview2, .electron, .android_webview => .modern,
-        .wkwebview, .webkitgtk, .ios_wkwebview => .legacy,
     };
 }

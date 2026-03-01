@@ -468,15 +468,11 @@ fn parseAdversarialTierCounts(allocator: Allocator, report_path: []const u8) !Ad
         if (!std.mem.startsWith(u8, line, "target=")) continue;
 
         const is_modern = std.mem.indexOf(u8, line, "api=modern") != null;
-        const is_legacy = std.mem.indexOf(u8, line, "api=legacy") != null;
         const is_fail = std.mem.indexOf(u8, line, "status=FAIL") != null;
 
         if (is_modern) {
             counts.modern_targets += 1;
             if (is_fail) counts.modern_failures += 1;
-        } else if (is_legacy) {
-            counts.legacy_targets += 1;
-            if (is_fail) counts.legacy_failures += 1;
         }
     }
 
@@ -581,11 +577,8 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         const adversarial_pass = containsLine(report_data, "- adversarial_detection_gate: PASS");
         const adversarial_modern_targets = parseUsizeLineValue(report_data, "adversarial_modern_targets:");
         const adversarial_modern_failures = parseUsizeLineValue(report_data, "adversarial_modern_failures:");
-        const adversarial_legacy_targets = parseUsizeLineValue(report_data, "adversarial_legacy_targets:");
-        const adversarial_legacy_failures = parseUsizeLineValue(report_data, "adversarial_legacy_failures:");
         const adversarial_tier_ok = adversarial_modern_targets > 0 and
-            adversarial_modern_failures == 0 and
-            (adversarial_legacy_targets == 0 or adversarial_legacy_failures == 0);
+            adversarial_modern_failures == 0;
         const android_bridge_ok = containsPrefixNonNotFound(report_data, "adb=") or
             containsPrefixNonNotFound(report_data, "shizuku=") or
             containsPrefixNonNotFound(report_data, "rish=");
@@ -619,7 +612,7 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         }
 
         try content.writer(allocator).print(
-            "run: {s}\nreport: {s}\nplatform: {s}\nstatus: {s}\nsignature: {s}\nstrict_report_ok: {d}\nbehavioral_pass: {d}\nadversarial_pass: {d}\nadversarial_tier_ok: {d}\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\nadversarial_legacy_targets: {d}\nadversarial_legacy_failures: {d}\nandroid_bridge_tool_present: {d}\nios_bridge_tool_present: {d}\n\n",
+            "run: {s}\nreport: {s}\nplatform: {s}\nstatus: {s}\nsignature: {s}\nstrict_report_ok: {d}\nbehavioral_pass: {d}\nadversarial_pass: {d}\nadversarial_tier_ok: {d}\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\nandroid_bridge_tool_present: {d}\nios_bridge_tool_present: {d}\n\n",
             .{
                 platform_run,
                 report,
@@ -632,8 +625,6 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
                 @intFromBool(adversarial_tier_ok),
                 adversarial_modern_targets,
                 adversarial_modern_failures,
-                adversarial_legacy_targets,
-                adversarial_legacy_failures,
                 @intFromBool(android_bridge_ok),
                 @intFromBool(ios_ok),
             },
@@ -711,16 +702,11 @@ const GateTotals = struct {
     modern_targeted: usize = 0,
     modern_discovered: usize = 0,
     modern_failed: usize = 0,
-    legacy_targeted: usize = 0,
-    legacy_discovered: usize = 0,
-    legacy_failed: usize = 0,
 };
 
 const AdversarialTierCounts = struct {
     modern_targets: usize = 0,
     modern_failures: usize = 0,
-    legacy_targets: usize = 0,
-    legacy_failures: usize = 0,
 };
 
 const browser_targets_windows = [_]driver.BrowserKind{
@@ -738,8 +724,8 @@ const browser_targets_linux = [_]driver.BrowserKind{
 };
 
 const webview_targets_windows = [_]driver.WebViewKind{ .webview2, .electron, .android_webview };
-const webview_targets_macos = [_]driver.WebViewKind{ .wkwebview, .electron, .android_webview, .ios_wkwebview };
-const webview_targets_linux = [_]driver.WebViewKind{ .webkitgtk, .electron, .android_webview };
+const webview_targets_macos = [_]driver.WebViewKind{ .electron, .android_webview };
+const webview_targets_linux = [_]driver.WebViewKind{ .electron, .android_webview };
 const adversarial_probe_url = "data:text/html,<html><head><title>gate</title></head><body>gate</body></html>";
 
 const adversarial_probe_script =
@@ -784,7 +770,6 @@ const DetectionSignals = struct {
     endpoint_webview: bool = false,
 
     transport_cdp: bool = false,
-    transport_webdriver: bool = false,
     transport_bidi: bool = false,
 
     launch_arg_remote_debugging: bool = false,
@@ -795,16 +780,11 @@ const DetectionSignals = struct {
     profile_ephemeral_dir: bool = false,
 
     runtime_msedgewebview2: bool = false,
-    runtime_safaridriver: bool = false,
-    runtime_webkitwebdriver: bool = false,
-    runtime_minibrowser: bool = false,
     runtime_electron: bool = false,
 
     bridge_adb: bool = false,
     bridge_shizuku: bool = false,
     bridge_rish: bool = false,
-    bridge_ios_webkit_debug_proxy: bool = false,
-    bridge_tidevice: bool = false,
     webview_mobile_runtime: bool = false,
 
     fn signalCount(self: DetectionSignals) usize {
@@ -937,9 +917,14 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     for (target_browser_kinds) |kind| {
         const api_tier = driver.support_tier.browserTier(kind);
         totals.targeted += 1;
-        switch (api_tier) {
-            .modern => totals.modern_targeted += 1,
-            .legacy => totals.legacy_targeted += 1,
+        if (api_tier == .modern) totals.modern_targeted += 1;
+        if (api_tier == .unsupported) {
+            totals.skipped += 1;
+            try report.writer(allocator).print(
+                "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=unsupported_api\n",
+                .{ apiTierName(api_tier), @tagName(kind), @tagName(driver.engineFor(kind)), host_platform },
+            );
+            continue;
         }
         const install_opt = firstInstallForKind(installs.items, kind);
         if (install_opt == null) {
@@ -953,42 +938,10 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
 
         const install = install_opt.?;
         totals.discovered += 1;
-        switch (api_tier) {
-            .modern => totals.modern_discovered += 1,
-            .legacy => totals.legacy_discovered += 1,
-        }
+        if (api_tier == .modern) totals.modern_discovered += 1;
 
         var session = blk: {
-            if (api_tier == .modern) {
-                var modern_session = driver.modern.launch(allocator, .{
-                    .install = install,
-                    .profile_mode = .ephemeral,
-                    .headless = true,
-                    .gecko_stealth_prefs = true,
-                    .args = &.{},
-                }) catch |err| {
-                    if (allow_launch_probe_failures) {
-                        totals.skipped += 1;
-                        try report.writer(allocator).print(
-                            "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error_ignored error={s}\n",
-                            .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
-                        );
-                    } else {
-                        totals.failed += 1;
-                        switch (api_tier) {
-                            .modern => totals.modern_failed += 1,
-                            .legacy => totals.legacy_failed += 1,
-                        }
-                        try report.writer(allocator).print(
-                            "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
-                            .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
-                        );
-                    }
-                    continue;
-                };
-                break :blk modern_session.intoBase();
-            }
-            var legacy_session = driver.legacy.launch(allocator, .{
+            var modern_session = driver.modern.launch(allocator, .{
                 .install = install,
                 .profile_mode = .ephemeral,
                 .headless = true,
@@ -1003,10 +956,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                     );
                 } else {
                     totals.failed += 1;
-                    switch (api_tier) {
-                        .modern => totals.modern_failed += 1,
-                        .legacy => totals.legacy_failed += 1,
-                    }
+                    totals.modern_failed += 1;
                     try report.writer(allocator).print(
                         "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
                         .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
@@ -1014,7 +964,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 }
                 continue;
             };
-            break :blk legacy_session.intoBase();
+            break :blk modern_session.intoBase();
         };
         defer session.deinit();
 
@@ -1036,10 +986,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 );
             } else {
                 totals.failed += 1;
-                switch (api_tier) {
-                    .modern => totals.modern_failed += 1,
-                    .legacy => totals.legacy_failed += 1,
-                }
+                totals.modern_failed += 1;
                 try report.writer(allocator).print(
                     "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
                     .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
@@ -1057,10 +1004,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 totals.skipped += 1;
             } else {
                 totals.failed += 1;
-                switch (api_tier) {
-                    .modern => totals.modern_failed += 1,
-                    .legacy => totals.legacy_failed += 1,
-                }
+                totals.modern_failed += 1;
             }
         }
 
@@ -1085,10 +1029,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     for (target_webview_kinds) |kind| {
         const api_tier = driver.support_tier.webViewTier(kind);
         totals.targeted += 1;
-        switch (api_tier) {
-            .modern => totals.modern_targeted += 1,
-            .legacy => totals.legacy_targeted += 1,
-        }
+        if (api_tier == .modern) totals.modern_targeted += 1;
         const runtime_opt = bestWebViewRuntimeForKind(webview_runtimes.items, kind);
         if (runtime_opt == null) {
             totals.skipped += 1;
@@ -1110,10 +1051,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         }
 
         totals.discovered += 1;
-        switch (api_tier) {
-            .modern => totals.modern_discovered += 1,
-            .legacy => totals.legacy_discovered += 1,
-        }
+        if (api_tier == .modern) totals.modern_discovered += 1;
 
         var probe_session = launchOrAttachWebViewForProbe(allocator, runtime) catch |err| {
             if (allow_launch_probe_failures) {
@@ -1124,10 +1062,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 );
             } else {
                 totals.failed += 1;
-                switch (api_tier) {
-                    .modern => totals.modern_failed += 1,
-                    .legacy => totals.legacy_failed += 1,
-                }
+                totals.modern_failed += 1;
                 try report.writer(allocator).print(
                     "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_or_attach_error error={s}\n",
                     .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
@@ -1162,10 +1097,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 );
             } else {
                 totals.failed += 1;
-                switch (api_tier) {
-                    .modern => totals.modern_failed += 1,
-                    .legacy => totals.legacy_failed += 1,
-                }
+                totals.modern_failed += 1;
                 try report.writer(allocator).print(
                     "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
                     .{
@@ -1190,10 +1122,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                 totals.skipped += 1;
             } else {
                 totals.failed += 1;
-                switch (api_tier) {
-                    .modern => totals.modern_failed += 1,
-                    .legacy => totals.legacy_failed += 1,
-                }
+                totals.modern_failed += 1;
             }
         }
 
@@ -1243,7 +1172,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     }
 
     try report.writer(allocator).print(
-        "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d} modern_targeted={d} modern_discovered={d} modern_failed={d} legacy_targeted={d} legacy_discovered={d} legacy_failed={d}\n",
+        "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d} modern_targeted={d} modern_discovered={d} modern_failed={d}\n",
         .{
             totals.targeted,
             totals.discovered,
@@ -1255,9 +1184,6 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             totals.modern_targeted,
             totals.modern_discovered,
             totals.modern_failed,
-            totals.legacy_targeted,
-            totals.legacy_discovered,
-            totals.legacy_failed,
         },
     );
 
@@ -1286,7 +1212,7 @@ fn expectationSatisfied(expectation: GateExpectation, detected: bool) bool {
 fn apiTierName(tier: driver.support_tier.ApiTier) []const u8 {
     return switch (tier) {
         .modern => "modern",
-        .legacy => "legacy",
+        .unsupported => "unsupported",
     };
 }
 
@@ -1337,19 +1263,13 @@ fn webviewRuntimeScore(runtime: driver.WebViewRuntime) i32 {
 
     if (runtime.runtime_path) |path| {
         if (containsIgnoreCase(path, "msedgewebview2")) score += 40;
-        if (containsIgnoreCase(path, "safaridriver")) score += 40;
-        if (containsIgnoreCase(path, "webkitwebdriver")) score += 40;
-        if (containsIgnoreCase(path, "minibrowser")) score += 20;
         if (containsIgnoreCase(path, "electron")) score += 40;
-        if (containsIgnoreCase(path, ".framework")) score -= 50;
     }
 
     if (runtime.bridge_tool_path) |path| {
         if (containsIgnoreCase(path, "shizuku")) score += 30;
         if (containsIgnoreCase(path, "rish")) score += 30;
         if (containsIgnoreCase(path, "adb")) score += 30;
-        if (containsIgnoreCase(path, "ios_webkit_debug_proxy")) score += 30;
-        if (containsIgnoreCase(path, "tidevice")) score += 30;
     }
 
     return score;
@@ -1382,22 +1302,6 @@ fn launchOrAttachWebViewForProbe(allocator: Allocator, runtime: driver.WebViewRu
             });
             return .{ .session = modern.intoBase(), .launched = true };
         },
-        .webkitgtk => {
-            var opts: driver.WebKitGtkWebViewLaunchOptions = .{
-                .profile_mode = .ephemeral,
-                .browser_args = &.{"about:blank"},
-            };
-            if (runtime.runtime_path) |path| {
-                if (containsIgnoreCase(path, "webkitwebdriver")) {
-                    opts.driver_executable_path = path;
-                } else if (containsIgnoreCase(path, "minibrowser")) {
-                    opts.browser_target = .custom_binary;
-                    opts.browser_binary_path = path;
-                }
-            }
-            var legacy = try driver.legacy.launchWebKitGtkWebView(allocator, opts);
-            return .{ .session = legacy.intoBase(), .launched = true };
-        },
         .webview2 => {
             const executable = runtime.runtime_path orelse return error.InvalidExplicitPath;
             var modern = try driver.modern.launchWebViewHost(allocator, .{
@@ -1408,15 +1312,6 @@ fn launchOrAttachWebViewForProbe(allocator: Allocator, runtime: driver.WebViewRu
             });
             return .{ .session = modern.intoBase(), .launched = true };
         },
-        .wkwebview => {
-            const executable = runtime.runtime_path orelse return error.InvalidExplicitPath;
-            var legacy = try driver.legacy.launchWebViewHost(allocator, .{
-                .kind = .wkwebview,
-                .host_executable = executable,
-                .endpoint = "webdriver://127.0.0.1:4444/session/adversarial-gate",
-            });
-            return .{ .session = legacy.intoBase(), .launched = true };
-        },
         .android_webview => {
             var modern = try driver.modern.attachAndroidWebView(allocator, .{
                 .device_id = "adversarial-gate",
@@ -1425,20 +1320,12 @@ fn launchOrAttachWebViewForProbe(allocator: Allocator, runtime: driver.WebViewRu
             });
             return .{ .session = modern.intoBase(), .launched = false };
         },
-        .ios_wkwebview => {
-            var legacy = try driver.legacy.attachIosWebView(allocator, .{
-                .udid = "adversarial-gate",
-                .page_id = "1",
-            });
-            return .{ .session = legacy.intoBase(), .launched = false };
-        },
     }
 }
 
 fn isRuntimeProbeReachable(runtime: driver.WebViewRuntime) bool {
     return switch (runtime.kind) {
         .android_webview => tcpEndpointReachable("127.0.0.1", 9222),
-        .ios_wkwebview => tcpEndpointReachable("127.0.0.1", 9221),
         else => true,
     };
 }
@@ -1460,18 +1347,14 @@ fn inferAndroidBridgeKind(path: ?[]const u8) driver.AndroidBridgeKind {
 fn webviewEngineForKind(kind: driver.WebViewKind) driver.EngineKind {
     return switch (kind) {
         .webview2, .electron, .android_webview => .chromium,
-        .wkwebview, .webkitgtk, .ios_wkwebview => .webkit,
     };
 }
 
 fn webViewPlatformName(kind: driver.WebViewKind, host_platform: []const u8) []const u8 {
     return switch (kind) {
         .webview2 => "windows",
-        .wkwebview => "macos",
-        .webkitgtk => "linux",
         .electron => host_platform,
         .android_webview => "android",
-        .ios_wkwebview => "ios",
     };
 }
 
@@ -1491,12 +1374,7 @@ fn probeSessionForSignals(
     // This prevents false PASS results when a runtime launches but never commits navigation.
     if (!session.supports(.dom)) return error.UnsupportedCapability;
     navigateAndWaitForProbe(session) catch |err| {
-        if (session.transport == .webdriver_http and err == error.ProtocolCommandFailed) {
-            std.Thread.sleep(250 * std.time.ns_per_ms);
-            try navigateAndWaitForProbe(session);
-        } else {
-            return err;
-        }
+        return err;
     };
 
     if (session.supports(.js_eval)) {
@@ -1551,7 +1429,6 @@ fn collectSessionSignals(signals: *DetectionSignals, session: *const driver.Sess
     }
 
     signals.transport_cdp = session.transport == .cdp_ws;
-    signals.transport_webdriver = session.transport == .webdriver_http;
     signals.transport_bidi = session.transport == .bidi_ws;
 
     if (session.owned_argv) |argv| {
@@ -1575,9 +1452,6 @@ fn collectRuntimeSignals(
 ) void {
     if (runtime_path) |path| {
         if (containsIgnoreCase(path, "msedgewebview2")) signals.runtime_msedgewebview2 = true;
-        if (containsIgnoreCase(path, "safaridriver")) signals.runtime_safaridriver = true;
-        if (containsIgnoreCase(path, "webkitwebdriver")) signals.runtime_webkitwebdriver = true;
-        if (containsIgnoreCase(path, "minibrowser")) signals.runtime_minibrowser = true;
         if (containsIgnoreCase(path, "electron")) signals.runtime_electron = true;
     }
 
@@ -1585,13 +1459,11 @@ fn collectRuntimeSignals(
         if (containsIgnoreCase(path, "adb")) signals.bridge_adb = true;
         if (containsIgnoreCase(path, "shizuku")) signals.bridge_shizuku = true;
         if (containsIgnoreCase(path, "rish")) signals.bridge_rish = true;
-        if (containsIgnoreCase(path, "ios_webkit_debug_proxy")) signals.bridge_ios_webkit_debug_proxy = true;
-        if (containsIgnoreCase(path, "tidevice")) signals.bridge_tidevice = true;
     }
 
     if (webview_kind) |kind| {
         switch (kind) {
-            .android_webview, .ios_wkwebview => signals.webview_mobile_runtime = true,
+            .android_webview => signals.webview_mobile_runtime = true,
             else => {},
         }
     }
@@ -2021,8 +1893,6 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         "librewolf --version",
         "tor-browser --version",
         "electron --version",
-        "WebKitWebDriver --version",
-        "MiniBrowser --version",
     };
 
     for (browser_cmds) |cmd| {
@@ -2110,12 +1980,10 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
 
     const adversarial_counts = parseAdversarialTierCounts(allocator, adversarial_report_path) catch AdversarialTierCounts{};
     try rpt.writer(allocator).print(
-        "\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\nadversarial_legacy_targets: {d}\nadversarial_legacy_failures: {d}\n",
+        "\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\n",
         .{
             adversarial_counts.modern_targets,
             adversarial_counts.modern_failures,
-            adversarial_counts.legacy_targets,
-            adversarial_counts.legacy_failures,
         },
     );
 
@@ -3380,8 +3248,6 @@ test "matrix collect non-strict pass with single report" {
         \\- adversarial_detection_gate: PASS
         \\adversarial_modern_targets: 1
         \\adversarial_modern_failures: 0
-        \\adversarial_legacy_targets: 0
-        \\adversarial_legacy_failures: 0
         \\OVERALL: PASS
         \\adb=/usr/bin/adb
         \\ios_webkit_debug_proxy=NOT_FOUND
@@ -3499,7 +3365,7 @@ test "adversarial classification marks webdriver signal as detected" {
 
 test "adversarial classification requires threshold when no high confidence signals" {
     var signals: DetectionSignals = .{};
-    signals.runtime_minibrowser = true;
+    signals.runtime_msedgewebview2 = true;
     signals.runtime_electron = true;
     signals.launch_arg_profile = true;
 

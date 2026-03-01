@@ -31,15 +31,4 @@ pub fn main() !void {
     defer shizuku_session.deinit();
 
     std.debug.print("shizuku android webview attached: endpoint={s}\n", .{shizuku_session.base.endpoint.?});
-
-    var ios_session = driver.legacy.attachIosWebView(allocator, .{
-        .udid = "ios-simulator-udid",
-        .page_id = "1",
-    }) catch |err| {
-        std.debug.print("ios attach failed (expected without ios bridge): {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer ios_session.deinit();
-
-    std.debug.print("ios webview attached: endpoint={s}\n", .{ios_session.base.endpoint.?});
 }

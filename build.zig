@@ -183,7 +183,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "example-12-managed-cache-and-profile-modes", .path = "examples/12_managed_cache_and_profile_modes.zig" },
         .{ .name = "example-13-capability-aware-flow", .path = "examples/13_capability_aware_flow.zig" },
         .{ .name = "example-14-electron-webview", .path = "examples/14_electron_webview.zig" },
-        .{ .name = "example-15-legacy-webkitgtk-webview", .path = "examples/15_legacy_webkitgtk_webview.zig" },
         .{ .name = "example-16-wait-targets", .path = "examples/16_wait_targets.zig" },
         .{ .name = "example-17-event-hooks", .path = "examples/17_event_hooks.zig" },
         .{ .name = "example-18-cookie-header-export", .path = "examples/18_cookie_header_export.zig" },

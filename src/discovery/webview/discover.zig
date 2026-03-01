@@ -11,26 +11,8 @@ const Candidate = struct {
 
 const all_kinds = [_]types.WebViewKind{
     .webview2,
-    .wkwebview,
-    .webkitgtk,
     .electron,
     .android_webview,
-    .ios_wkwebview,
-};
-
-const linux_webkitgtk_known_runtime_candidates = [_]struct {
-    path: []const u8,
-    source: types.WebViewRuntimeSource,
-    score: i32,
-}{
-    .{ .path = "/usr/bin/WebKitWebDriver", .source = .known_path, .score = 140 },
-    .{ .path = "/usr/local/bin/WebKitWebDriver", .source = .known_path, .score = 140 },
-    .{ .path = "/usr/lib/webkitgtk-6.0/MiniBrowser", .source = .known_path, .score = 125 },
-    .{ .path = "/usr/bin/MiniBrowser", .source = .known_path, .score = 120 },
-    .{ .path = "/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0", .source = .package_db, .score = 90 },
-    .{ .path = "/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.0.so.37", .source = .package_db, .score = 90 },
-    .{ .path = "/usr/lib/aarch64-linux-gnu/libwebkit2gtk-4.1.so.0", .source = .package_db, .score = 90 },
-    .{ .path = "/usr/lib64/libwebkit2gtk-4.1.so.0", .source = .package_db, .score = 90 },
 };
 
 pub fn discover(
@@ -142,47 +124,6 @@ fn appendKnownPaths(
                     });
                 }
             },
-            .wkwebview => if (native_os == .macos) {
-                const known = [_][]const u8{
-                    "/System/Library/Frameworks/WebKit.framework",
-                    "/usr/bin/safaridriver",
-                };
-                for (known) |path| {
-                    if (!util.exists(path)) continue;
-
-                    try appendCandidate(allocator, candidates, dedup, keys, .{
-                        .runtime = .{
-                            .kind = .wkwebview,
-                            .engine = .webkit,
-                            .platform = .macos,
-                            .runtime_path = try allocator.dupe(u8, path),
-                            .bridge_tool_path = null,
-                            .source = if (std.mem.endsWith(u8, path, ".framework")) .system_framework else .known_path,
-                            .version = null,
-                        },
-                        .score = 120,
-                    });
-                }
-            },
-            .webkitgtk => if (native_os == .linux) {
-                for (linux_webkitgtk_known_runtime_candidates) |entry| {
-                    const path = entry.path;
-                    if (!util.exists(path)) continue;
-
-                    try appendCandidate(allocator, candidates, dedup, keys, .{
-                        .runtime = .{
-                            .kind = .webkitgtk,
-                            .engine = .webkit,
-                            .platform = .linux,
-                            .runtime_path = try allocator.dupe(u8, path),
-                            .bridge_tool_path = null,
-                            .source = entry.source,
-                            .version = null,
-                        },
-                        .score = entry.score,
-                    });
-                }
-            },
             .electron => {
                 const known: []const []const u8 = switch (native_os) {
                     .windows => &.{
@@ -216,7 +157,7 @@ fn appendKnownPaths(
                     });
                 }
             },
-            .android_webview, .ios_wkwebview => {},
+            .android_webview => {},
         }
     }
 }
@@ -234,10 +175,8 @@ fn appendPathEnv(
 
         const names = switch (kind) {
             .webview2 => &[_][]const u8{ "msedgewebview2", "msedgewebview2.exe" },
-            .wkwebview => &[_][]const u8{"safaridriver"},
-            .webkitgtk => &[_][]const u8{ "WebKitWebDriver", "webkitwebdriver", "MiniBrowser" },
             .electron => &[_][]const u8{ "electron", "electron.exe" },
-            .android_webview, .ios_wkwebview => &[_][]const u8{},
+            .android_webview => &[_][]const u8{},
         };
 
         for (names) |name| {
@@ -255,12 +194,6 @@ fn appendPathEnv(
                     .version = null,
                 },
                 .score = switch (kind) {
-                    .webkitgtk => blk: {
-                        const base = std.fs.path.basename(found);
-                        if (string_util.containsIgnoreCase(base, "webkitwebdriver")) break :blk 130;
-                        if (string_util.containsIgnoreCase(base, "minibrowser")) break :blk 110;
-                        break :blk 95;
-                    },
                     else => 100,
                 },
             });
@@ -305,40 +238,7 @@ fn appendMobileBridgeCandidates(
                     });
                 }
             },
-            .ios_wkwebview => {
-                const ios_proxy = findInPath(allocator, "ios_webkit_debug_proxy") catch null;
-                if (ios_proxy) |path| {
-                    defer allocator.free(path);
-                    try appendCandidate(allocator, candidates, dedup, keys, .{
-                        .runtime = .{
-                            .kind = .ios_wkwebview,
-                            .engine = .webkit,
-                            .platform = .ios,
-                            .runtime_path = null,
-                            .bridge_tool_path = try allocator.dupe(u8, path),
-                            .source = .bridge_tool,
-                            .version = null,
-                        },
-                        .score = 90,
-                    });
-                } else {
-                    const tidevice = findInPath(allocator, "tidevice") catch continue;
-                    defer allocator.free(tidevice);
-                    try appendCandidate(allocator, candidates, dedup, keys, .{
-                        .runtime = .{
-                            .kind = .ios_wkwebview,
-                            .engine = .webkit,
-                            .platform = .ios,
-                            .runtime_path = null,
-                            .bridge_tool_path = try allocator.dupe(u8, tidevice),
-                            .source = .bridge_tool,
-                            .version = null,
-                        },
-                        .score = 85,
-                    });
-                }
-            },
-            .webview2, .wkwebview, .webkitgtk, .electron => {},
+            .webview2, .electron => {},
         }
     }
 }
@@ -403,11 +303,8 @@ fn inferKindFromPath(path: []const u8, allowed: []const types.WebViewKind) types
     for (allowed) |kind| {
         switch (kind) {
             .webview2 => if (string_util.containsIgnoreCase(base, "webview2")) return .webview2,
-            .wkwebview => if (string_util.containsIgnoreCase(base, "webkit") or string_util.containsIgnoreCase(base, "safari")) return .wkwebview,
-            .webkitgtk => if (string_util.containsIgnoreCase(base, "webkitwebdriver") or string_util.containsIgnoreCase(base, "webkit2gtk") or string_util.containsIgnoreCase(base, "minibrowser")) return .webkitgtk,
             .electron => if (string_util.containsIgnoreCase(base, "electron")) return .electron,
             .android_webview => if (string_util.containsIgnoreCase(base, "adb") or string_util.containsIgnoreCase(base, "shizuku") or string_util.containsIgnoreCase(base, "rish")) return .android_webview,
-            .ios_wkwebview => if (string_util.containsIgnoreCase(base, "ios_webkit_debug_proxy") or string_util.containsIgnoreCase(base, "tidevice")) return .ios_wkwebview,
         }
     }
 
@@ -434,22 +331,18 @@ fn findInPath(allocator: std.mem.Allocator, exe_name: []const u8) ![]u8 {
 pub fn engineForWebView(kind: types.WebViewKind) types.EngineKind {
     return switch (kind) {
         .webview2, .electron, .android_webview => .chromium,
-        .wkwebview, .webkitgtk, .ios_wkwebview => .webkit,
     };
 }
 
 pub fn platformForWebView(kind: types.WebViewKind) types.WebViewPlatform {
     return switch (kind) {
         .webview2 => .windows,
-        .wkwebview => .macos,
-        .webkitgtk => .linux,
         .electron => switch (builtin.os.tag) {
             .windows => .windows,
             .macos => .macos,
             else => .linux,
         },
         .android_webview => .android,
-        .ios_wkwebview => .ios,
     };
 }
 
@@ -499,7 +392,7 @@ test "webview discover can skip mobile bridge probing" {
     const allocator = std.testing.allocator;
 
     const runtimes = try discover(allocator, .{
-        .kinds = &.{ .android_webview, .ios_wkwebview },
+        .kinds = &.{.android_webview},
         .include_path_env = false,
         .include_known_paths = false,
         .include_mobile_bridges = false,
@@ -537,34 +430,6 @@ test "webview discover explicit path infers electron kind" {
     try std.testing.expectEqual(platformForWebView(.electron), runtimes[0].platform);
 }
 
-test "webview discover explicit path infers webkitgtk kind from WebKitWebDriver" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(.{
-        .sub_path = "WebKitWebDriver",
-        .data = "stub\n",
-    });
-
-    const explicit = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "WebKitWebDriver" });
-    defer allocator.free(explicit);
-
-    const runtimes = try discover(allocator, .{
-        .kinds = &.{.webkitgtk},
-        .explicit_runtime_path = explicit,
-        .include_path_env = false,
-        .include_known_paths = false,
-        .include_mobile_bridges = false,
-    });
-    defer freeRuntimes(allocator, runtimes);
-
-    try std.testing.expectEqual(@as(usize, 1), runtimes.len);
-    try std.testing.expectEqual(types.WebViewKind.webkitgtk, runtimes[0].kind);
-    try std.testing.expectEqual(types.EngineKind.webkit, runtimes[0].engine);
-    try std.testing.expectEqual(types.WebViewPlatform.linux, runtimes[0].platform);
-}
-
 test "webview discover explicit path infers android bridge kind from shizuku binary name" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -591,60 +456,4 @@ test "webview discover explicit path infers android bridge kind from shizuku bin
     try std.testing.expectEqual(types.WebViewKind.android_webview, runtimes[0].kind);
     try std.testing.expectEqual(types.EngineKind.chromium, runtimes[0].engine);
     try std.testing.expectEqual(types.WebViewPlatform.android, runtimes[0].platform);
-}
-
-test "webkitgtk infer recognizes MiniBrowser path under /usr/lib/webkitgtk-6.0" {
-    const kind = inferKindFromPath("/usr/lib/webkitgtk-6.0/MiniBrowser", &.{.webkitgtk});
-    try std.testing.expectEqual(types.WebViewKind.webkitgtk, kind);
-}
-
-test "webkitgtk known runtime candidates include /usr/lib/webkitgtk-6.0/MiniBrowser" {
-    var found = false;
-    for (linux_webkitgtk_known_runtime_candidates) |candidate| {
-        if (std.mem.eql(u8, candidate.path, "/usr/lib/webkitgtk-6.0/MiniBrowser")) {
-            found = true;
-            break;
-        }
-    }
-    try std.testing.expect(found);
-}
-
-test "webview candidate ordering prefers executable webkit driver over shared library runtime" {
-    const allocator = std.testing.allocator;
-
-    var candidates = [_]Candidate{
-        .{
-            .runtime = .{
-                .kind = .webkitgtk,
-                .engine = .webkit,
-                .platform = .linux,
-                .runtime_path = try allocator.dupe(u8, "/usr/lib/libwebkit2gtk-4.1.so.0"),
-                .bridge_tool_path = null,
-                .source = .package_db,
-                .version = null,
-            },
-            .score = 90,
-        },
-        .{
-            .runtime = .{
-                .kind = .webkitgtk,
-                .engine = .webkit,
-                .platform = .linux,
-                .runtime_path = try allocator.dupe(u8, "/usr/bin/WebKitWebDriver"),
-                .bridge_tool_path = null,
-                .source = .known_path,
-                .version = null,
-            },
-            .score = 140,
-        },
-    };
-    defer {
-        for (candidates) |candidate| {
-            freeRuntimeFields(allocator, candidate.runtime);
-        }
-    }
-
-    std.sort.heap(Candidate, candidates[0..], {}, lessThan);
-
-    try std.testing.expect(std.mem.eql(u8, std.fs.path.basename(candidates[0].runtime.runtime_path.?), "WebKitWebDriver"));
 }

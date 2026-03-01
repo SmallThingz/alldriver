@@ -12,13 +12,13 @@
 - Domain profile templates are intentionally out-of-core policy and should be implemented in application code.
 
 ## Namespaced Launch/Attach APIs
-- Launch/attach flows are namespace-only (`modern.*`, `legacy.*`).
+- Launch/attach flows are namespace-only (`modern.*`).
 - Root discovery remains available, but session creation and webview attach/launch helpers are no longer exported from root.
 
 ## Mobile Bridge Scope
-- Android/iOS support is bridge-smoke scoped for v1 release gates.
+- Android bridge support is bridge-smoke scoped for v1 release gates.
 - Full mobile app lifecycle orchestration is outside current GA scope.
-- Adversarial gate coverage for mobile webviews depends on bridge tooling/runtime presence on the host and reports missing targets as explicit skips.
+- Adversarial gate coverage for Android webviews depends on bridge tooling/runtime presence on the host and reports missing targets as explicit skips.
 
 ## Session Cache Scope
 - Built-in cache persistence is optimized for HTTP session reuse (`cookies + user_agent`) and optional payload masks.
@@ -26,7 +26,6 @@
 
 ## Strict TLS Default
 - TLS validation is strict by default across launch paths.
-- On constrained environments, some WebDriver HTTPS navigations can remain on `about:blank`; this now fails deterministically with `NavigationNotCommitted`.
 - Opt in to insecure cert handling with `ignore_tls_errors = true` when this behavior is expected for test infrastructure.
 
 ## Managed Cache Packaging
