@@ -300,6 +300,47 @@ pub fn build(b: *std.Build) void {
     const qemu_step = b.step("test-qemu-aarch64", "Run tests for Linux aarch64 target (invoke with -fqemu)");
     qemu_step.dependOn(&run_qemu_tests.step);
 
+    const compile_matrix_specs = [_]struct {
+        name: []const u8,
+        query: std.Target.Query,
+    }{
+        .{ .name = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
+        .{ .name = "linux-aarch64", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
+        .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ .name = "macos-aarch64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
+        .{ .name = "windows-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },
+        .{ .name = "windows-aarch64", .query = .{ .cpu_arch = .aarch64, .os_tag = .windows, .abi = .gnu } },
+    };
+
+    const compile_matrix_step = b.step("test-build-matrix", "Compile test binaries for Linux/macOS/Windows (x64+arm64)");
+    inline for (compile_matrix_specs) |spec| {
+        const matrix_target = b.resolveTargetQuery(spec.query);
+        const matrix_mod_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = matrix_target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "alldriver_config", .module = config.createModule() },
+                },
+            }),
+        });
+        compile_matrix_step.dependOn(&matrix_mod_test.step);
+
+        const matrix_tools_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/tools_main.zig"),
+                .target = matrix_target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "alldriver", .module = mod },
+                    .{ .name = "alldriver_config", .module = config.createModule() },
+                },
+            }),
+        });
+        compile_matrix_step.dependOn(&matrix_tools_test.step);
+    }
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

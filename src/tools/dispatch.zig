@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const driver = @import("alldriver");
 
 const Allocator = std.mem.Allocator;
@@ -127,7 +128,7 @@ pub fn main() !void {
 }
 
 fn defaultVmLabDir() []const u8 {
-    return std.posix.getenv("VM_LAB_DIR") orelse "/home/a/vm_lab";
+    return envOrDefault("VM_LAB_DIR", "/home/a/vm_lab");
 }
 
 fn isWindowsHost() bool {
@@ -257,6 +258,11 @@ fn runCollect(
 
 fn writeFile(path: []const u8, contents: []const u8) !void {
     try std.fs.cwd().writeFile(.{ .sub_path = path, .data = contents });
+}
+
+fn envOrDefault(name: []const u8, fallback: []const u8) []const u8 {
+    if (builtin.os.tag == .windows) return fallback;
+    return std.posix.getenv(name) orelse fallback;
 }
 
 fn writeFileAbs(path: []const u8, contents: []const u8) !void {
@@ -1556,7 +1562,7 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const strict_ga = strictGaEnabled(&flags, std.posix.getenv("STRICT_GA") orelse "0");
+    const strict_ga = strictGaEnabled(&flags, envOrDefault("STRICT_GA", "0"));
     const skip_marker_scan = std.mem.eql(u8, mapGetOr(&flags, "skip-marker-scan", "0"), "1");
     const skip_bundle = std.mem.eql(u8, mapGetOr(&flags, "skip-bundle", "0"), "1");
 
@@ -1771,7 +1777,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     const host_platform = getHostPlatform();
     const platform: []const u8 = flags.get("platform") orelse host_platform;
     const profile_mode = mapGetOr(&flags, "profile-mode", "ephemeral");
-    const strict_ga = strictGaEnabled(&flags, std.posix.getenv("STRICT_GA") orelse "0");
+    const strict_ga = strictGaEnabled(&flags, envOrDefault("STRICT_GA", "0"));
     const allow_platform_mismatch = std.mem.eql(u8, mapGetOr(&flags, "allow-platform-mismatch", "0"), "1");
 
     if (!allow_platform_mismatch and !std.mem.eql(u8, platform, host_platform) and !std.mem.eql(u8, host_platform, "unknown")) {
@@ -2216,7 +2222,7 @@ fn cmdMatrixRunRemote(allocator: Allocator, root: []const u8, args: []const []co
     try ensurePath(matrix_root);
 
     const strict_flag = if (strict_ga) " --strict-ga" else "";
-    const matrix_key = std.posix.getenv("MATRIX_GPG_KEY_ID") orelse "";
+    const matrix_key = envOrDefault("MATRIX_GPG_KEY_ID", "");
     const remote_cmd = try std.fmt.allocPrint(
         allocator,
         "cd '{s}' && MATRIX_GPG_KEY_ID='{s}' MATRIX_ENABLE_BEHAVIORAL=1 zig build tools -- matrix-run --platform '{s}'{s} --out 'artifacts/matrix/{s}'",
@@ -3005,7 +3011,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const vm_root = std.posix.getenv("ALLDRIVER_VM_ROOT") orelse "/tmp/codex-vms";
+    const vm_root = envOrDefault("ALLDRIVER_VM_ROOT", "/tmp/codex-vms");
     const name = flags.get("name") orelse {
         std.debug.print("usage: vm-qemu-create --name <name> --platform <linux|windows|macos> [--iso <path>] [--disk-gb N] [--memory-mb N] [--cpus N] [--ssh-port N]\n", .{});
         return ToolError.InvalidArgs;
@@ -3015,7 +3021,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
     const disk_gb = mapGetOr(&flags, "disk-gb", "80");
     const memory_mb = mapGetOr(&flags, "memory-mb", "8192");
     const cpus = mapGetOr(&flags, "cpus", "4");
-    const host_share = mapGetOr(&flags, "host-share-path", std.posix.getenv("ALLDRIVER_VM_SHARE_PATH") orelse root);
+    const host_share = mapGetOr(&flags, "host-share-path", envOrDefault("ALLDRIVER_VM_SHARE_PATH", root));
 
     if (!(std.mem.eql(u8, platform, "linux") or std.mem.eql(u8, platform, "windows") or std.mem.eql(u8, platform, "macos"))) {
         std.debug.print("invalid platform: {s}\n", .{platform});
@@ -3060,7 +3066,7 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
 }
 
 fn cmdVmQemuList(allocator: Allocator, _: []const u8, _: []const []const u8) !void {
-    const vm_root = std.posix.getenv("ALLDRIVER_VM_ROOT") orelse "/tmp/codex-vms";
+    const vm_root = envOrDefault("ALLDRIVER_VM_ROOT", "/tmp/codex-vms");
     const base = try pathJoin(allocator, &.{ vm_root, "alldriver" });
 
     if (std.fs.openDirAbsolute(base, .{}) catch null == null) {
@@ -3093,7 +3099,7 @@ fn cmdVmQemuStart(allocator: Allocator, root: []const u8, args: []const []const 
     var flags = try parseFlags(allocator, args);
     defer freeStringMap(allocator, &flags);
 
-    const vm_root = std.posix.getenv("ALLDRIVER_VM_ROOT") orelse "/tmp/codex-vms";
+    const vm_root = envOrDefault("ALLDRIVER_VM_ROOT", "/tmp/codex-vms");
     const name = flags.get("name") orelse {
         std.debug.print("usage: vm-qemu-start --name <name> --platform <linux|windows|macos> [--foreground]\n", .{});
         return ToolError.InvalidArgs;
