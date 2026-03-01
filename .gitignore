@@ -3,6 +3,7 @@
 zig-out
 artifacts/
 tmp/
+temp/
 
 # Example artifacts.
 example-screenshot.png
@@ -35,3 +36,11 @@ example-trace.json
 *.tar.gz
 *.tar.xz
 *.7z
+*.tmp
+*.temp
+*.log
+*.bak
+*.orig
+*~
+.DS_Store
+Thumbs.db

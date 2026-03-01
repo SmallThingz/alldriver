@@ -41,7 +41,9 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         std.fs.cwd().deleteTree(effective_profile_dir) catch {};
     };
 
-    if (opts.ignore_tls_errors and opts.install.engine == .gecko) {
+    const effective_ignore_tls_errors = opts.ignore_tls_errors or hasTlsAliasArg(opts.args);
+
+    if (effective_ignore_tls_errors and opts.install.engine == .gecko) {
         try writeGeckoInsecureTlsPrefs(allocator, effective_profile_dir);
     }
     if (opts.install.engine == .gecko and opts.gecko_stealth_prefs) {
@@ -60,9 +62,17 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     try raw_args.append(allocator, opts.install.path);
 
     const debug_port = try reserveLocalPort(allocator);
-    try appendDefaultArgs(allocator, &raw_args, &temp_owned_strings, opts, adapter_kind, debug_port);
+    try appendDefaultArgs(
+        allocator,
+        &raw_args,
+        &temp_owned_strings,
+        opts,
+        effective_ignore_tls_errors,
+        adapter_kind,
+        debug_port,
+    );
     try appendProfileArgs(allocator, &raw_args, &temp_owned_strings, opts.install.engine, effective_profile_dir);
-    for (opts.args) |arg| try raw_args.append(allocator, arg);
+    try appendUserArgs(allocator, &raw_args, opts.args);
 
     const final_args = try extensions.applyLaunchArgs(allocator, opts, raw_args.items);
     errdefer {
@@ -299,18 +309,33 @@ fn appendDefaultArgs(
     args: *std.ArrayList([]const u8),
     temp_owned_strings: *std.ArrayList([]u8),
     opts: types.LaunchOptions,
+    effective_ignore_tls_errors: bool,
     adapter: common.AdapterKind,
     debug_port: u16,
 ) !void {
-    if (opts.ignore_tls_errors and opts.install.engine == .chromium) {
+    if (effective_ignore_tls_errors and opts.install.engine == .chromium) {
         try args.append(allocator, "--ignore-certificate-errors");
-        try args.append(allocator, "--allow-insecure-localhost");
     }
 
     if (opts.headless) {
         switch (opts.install.engine) {
             .chromium => try args.append(allocator, "--headless=new"),
             .gecko => try args.append(allocator, "-headless"),
+            else => {},
+        }
+    }
+
+    // Keep headful launches clean by suppressing first-run/default-browser notices.
+    if (!opts.headless) {
+        switch (opts.install.engine) {
+            .chromium => {
+                try args.append(allocator, "--no-first-run");
+                try args.append(allocator, "--no-default-browser-check");
+                try args.append(allocator, "--disable-default-apps");
+            },
+            .gecko => {
+                try args.append(allocator, "--no-default-browser-check");
+            },
             else => {},
         }
     }
@@ -332,6 +357,31 @@ fn appendDefaultArgs(
             try args.append(allocator, flag);
         },
     }
+}
+
+fn appendUserArgs(
+    allocator: std.mem.Allocator,
+    args: *std.ArrayList([]const u8),
+    user_args: []const []const u8,
+) !void {
+    for (user_args) |arg| {
+        if (isTlsAliasArg(arg)) continue;
+        try args.append(allocator, arg);
+    }
+}
+
+fn hasTlsAliasArg(user_args: []const []const u8) bool {
+    for (user_args) |arg| {
+        if (isTlsAliasArg(arg)) return true;
+    }
+    return false;
+}
+
+fn isTlsAliasArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--no-tls") or
+        std.mem.eql(u8, arg, "--ignore-tls-errors") or
+        std.mem.eql(u8, arg, "--ignore-tls-error") or
+        std.mem.eql(u8, arg, "--insecure-tls");
 }
 
 fn appendProfileArgs(
@@ -500,4 +550,84 @@ test "attachWebView is cdp-only for modern kinds" {
     defer session.deinit();
     try std.testing.expectEqual(common.AdapterKind.cdp, session.adapter_kind);
     try std.testing.expectEqual(common.TransportKind.cdp_ws, session.transport);
+}
+
+test "tls aliases are consumed and not forwarded as raw args" {
+    const allocator = std.testing.allocator;
+    var list: std.ArrayList([]const u8) = .empty;
+    defer list.deinit(allocator);
+
+    try appendUserArgs(allocator, &list, &.{
+        "--no-tls",
+        "--ignore-tls-errors",
+        "--some-real-flag",
+    });
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expect(std.mem.eql(u8, list.items[0], "--some-real-flag"));
+    try std.testing.expect(hasTlsAliasArg(&.{ "--no-tls", "--abc" }));
+    try std.testing.expect(!hasTlsAliasArg(&.{"--abc"}));
+}
+
+test "headful chromium defaults suppress startup notices" {
+    const allocator = std.testing.allocator;
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    var temps: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temps.items) |buf| allocator.free(buf);
+        temps.deinit(allocator);
+    }
+
+    const opts: types.LaunchOptions = .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = "/bin/chrome",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .headless = false,
+        .args = &.{},
+    };
+
+    try appendDefaultArgs(allocator, &args, &temps, opts, false, .cdp, 9222);
+    try std.testing.expect(containsArg(args.items, "--no-first-run"));
+    try std.testing.expect(containsArg(args.items, "--no-default-browser-check"));
+    try std.testing.expect(containsArg(args.items, "--disable-default-apps"));
+}
+
+test "chromium tls ignore uses supported certificate flag" {
+    const allocator = std.testing.allocator;
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    var temps: std.ArrayList([]u8) = .empty;
+    defer {
+        for (temps.items) |buf| allocator.free(buf);
+        temps.deinit(allocator);
+    }
+
+    const opts: types.LaunchOptions = .{
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = "/bin/chrome",
+            .version = null,
+            .source = .explicit,
+        },
+        .profile_mode = .ephemeral,
+        .headless = true,
+        .args = &.{},
+    };
+
+    try appendDefaultArgs(allocator, &args, &temps, opts, true, .cdp, 9222);
+    try std.testing.expect(containsArg(args.items, "--ignore-certificate-errors"));
+    try std.testing.expect(!containsArg(args.items, "--no-tls"));
+}
+
+fn containsArg(args: []const []const u8, want: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, want)) return true;
+    }
+    return false;
 }
