@@ -9,6 +9,7 @@ const extensions = @import("extensions/api.zig");
 const errors = @import("errors.zig");
 const support_tier_catalog = @import("catalog/support_tier.zig");
 const modern_api = @import("modern/api.zig");
+const logging = @import("logging.zig");
 
 pub const BrowserKind = types.BrowserKind;
 pub const EngineKind = types.EngineKind;
@@ -61,6 +62,8 @@ pub const AndroidBridgeKind = types.AndroidBridgeKind;
 pub const AndroidWebViewAttachOptions = types.AndroidWebViewAttachOptions;
 pub const ElectronWebViewAttachOptions = types.ElectronWebViewAttachOptions;
 pub const ElectronWebViewLaunchOptions = types.ElectronWebViewLaunchOptions;
+pub const HardErrorLog = logging.HardErrorLog;
+pub const HardErrorLogger = logging.HardErrorLogger;
 
 pub const ProtocolError = errors.ProtocolError;
 pub const TransportError = errors.TransportError;
@@ -82,6 +85,10 @@ pub const path = @import("util/path.zig");
 
 pub const extension_hooks = extensions;
 pub const async_api = @import("core/async.zig");
+
+pub fn setHardErrorLogger(callback: ?*const HardErrorLogger) void {
+    logging.setHardErrorLogger(callback);
+}
 
 pub fn discover(
     allocator: std.mem.Allocator,

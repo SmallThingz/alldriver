@@ -9,6 +9,7 @@ const artifacts = @import("artifacts.zig");
 const events = @import("events.zig");
 const cancel = @import("cancel.zig");
 const async_mod = @import("async.zig");
+const logging = @import("../logging.zig");
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -208,6 +209,13 @@ pub const Session = struct {
             .transport = transport,
             .elapsed_ms = diag.elapsed_ms,
         };
+        logging.emitHardError(.{
+            .session_id = self.id,
+            .phase = diag.phase,
+            .code = diag.code,
+            .message = diag.message,
+            .transport = diag.transport,
+        });
     }
 
     pub fn clearDiagnostic(self: *Session) void {

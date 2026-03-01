@@ -78,6 +78,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 ### Timeouts and diagnostics
 
 - `setTimeoutPolicy`, `timeoutPolicy`, `lastDiagnostic`
+- `setHardErrorLogger` (register custom hard-error sink; default sink writes to stderr)
 
 ### Cookie helpers
 

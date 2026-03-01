@@ -8,6 +8,7 @@ const common = @import("protocol/common.zig");
 const cdp = @import("protocol/cdp/adapter.zig");
 const bidi = @import("protocol/bidi/adapter.zig");
 const http_client = @import("transport/http_client.zig");
+const logging = @import("logging.zig");
 const extensions = @import("extensions/api.zig");
 
 pub const Session = session_mod.Session;
@@ -85,15 +86,24 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Inherit;
-    child.spawn() catch return error.SpawnFailed;
+    child.spawn() catch |err| {
+        logHardLaunchError(transport, @errorName(err), "failed to spawn browser process");
+        return error.SpawnFailed;
+    };
     errdefer {
         _ = child.kill() catch {};
     }
 
     const launch_timeout_ms = (opts.timeout_policy orelse types.TimeoutPolicy{}).launch_ms;
     waitForDebugEndpointReady(adapter_kind, &child, debug_port, launch_timeout_ms) catch |err| return switch (err) {
-        error.SpawnFailed => error.SpawnFailed,
-        else => error.Timeout,
+        error.SpawnFailed => blk: {
+            logHardLaunchError(transport, @errorName(err), "browser exited before debug endpoint became ready");
+            break :blk error.SpawnFailed;
+        },
+        else => blk: {
+            logHardLaunchError(transport, @errorName(err), "debug endpoint did not become ready before timeout");
+            break :blk error.Timeout;
+        },
     };
 
     const install_copy: types.BrowserInstall = .{
@@ -227,7 +237,10 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Inherit;
-    child.spawn() catch return error.SpawnFailed;
+    child.spawn() catch |err| {
+        logHardLaunchError(.cdp_ws, @errorName(err), "failed to spawn webview host process");
+        return error.SpawnFailed;
+    };
     errdefer {
         _ = child.kill() catch {};
     }
@@ -562,6 +575,19 @@ fn cdpHttpEndpointReady(port: u16) bool {
     defer std.heap.page_allocator.free(response.body);
     if (response.status_code < 200 or response.status_code >= 300) return false;
     return std.mem.indexOf(u8, response.body, "webSocketDebuggerUrl") != null;
+}
+
+fn logHardLaunchError(
+    transport: common.TransportKind,
+    code: []const u8,
+    message: []const u8,
+) void {
+    logging.emitHardError(.{
+        .phase = .launch,
+        .code = code,
+        .message = message,
+        .transport = @tagName(transport),
+    });
 }
 
 test "attach supports cdp and bidi endpoints only" {

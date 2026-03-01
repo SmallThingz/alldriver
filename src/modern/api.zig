@@ -4,10 +4,17 @@ const runtime = @import("runtime.zig");
 const session_mod = @import("session.zig");
 const lightpanda = @import("../provision/lightpanda.zig");
 const async_mod = @import("../core/async.zig");
+const logging = @import("../logging.zig");
 
 pub const ModernInstall = types.BrowserInstall;
 pub const ModernSession = session_mod.ModernSession;
 pub const ModernWebViewRuntime = types.WebViewRuntime;
+pub const HardErrorLog = logging.HardErrorLog;
+pub const HardErrorLogger = logging.HardErrorLogger;
+
+pub fn setHardErrorLogger(callback: ?*const HardErrorLogger) void {
+    logging.setHardErrorLogger(callback);
+}
 
 pub fn discover(
     allocator: std.mem.Allocator,
