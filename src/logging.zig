@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("types.zig");
 
 pub const HardErrorLog = struct {
@@ -32,6 +33,10 @@ pub fn emitHardError(entry: HardErrorLog) void {
         log_fn(entry);
         return;
     }
+
+    // Default stderr hard-error logs are useful in runtime diagnostics, but
+    // test suites intentionally trigger some failure paths and become noisy.
+    if (builtin.is_test) return;
 
     std.debug.print(
         "[alldriver][hard-error] session={any} phase={s} code={s} transport={s} message={s}\n",
