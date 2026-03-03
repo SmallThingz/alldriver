@@ -41,6 +41,14 @@ pub const ModernSession = struct {
         return self.base.waitFor(target, opts);
     }
 
+    pub fn waitForCookie(
+        self: *ModernSession,
+        query: types.CookieQuery,
+        opts: types.WaitOptions,
+    ) !types.WaitResult {
+        return self.base.waitForCookie(query, opts);
+    }
+
     pub fn onEvent(
         self: *ModernSession,
         filter: types.EventFilter,
@@ -51,6 +59,14 @@ pub const ModernSession = struct {
 
     pub fn offEvent(self: *ModernSession, id: u64) bool {
         return self.base.offEvent(id);
+    }
+
+    pub fn addInitScript(self: *ModernSession, script: []const u8) ![]u8 {
+        return self.base.addInitScript(script);
+    }
+
+    pub fn removeInitScript(self: *ModernSession, script_id: []const u8) !void {
+        try self.base.removeInitScript(script_id);
     }
 
     pub fn setTimeoutPolicy(self: *ModernSession, policy: types.TimeoutPolicy) void {
@@ -132,6 +148,14 @@ pub const ModernSession = struct {
         opts: types.WaitOptions,
     ) !*async_mod.AsyncResult(types.WaitResult) {
         return self.base.waitForAsync(target, opts);
+    }
+
+    pub fn waitForCookieAsync(
+        self: *ModernSession,
+        query: types.CookieQuery,
+        opts: types.WaitOptions,
+    ) !*async_mod.AsyncResult(types.WaitResult) {
+        return self.base.waitForAsync(.{ .cookie_present = query }, opts);
     }
 
     pub fn screenshotAsync(

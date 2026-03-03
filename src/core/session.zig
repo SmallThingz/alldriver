@@ -9,6 +9,7 @@ const artifacts = @import("artifacts.zig");
 const events = @import("events.zig");
 const cancel = @import("cancel.zig");
 const async_mod = @import("async.zig");
+const executor = @import("../protocol/executor.zig");
 const logging = @import("../logging.zig");
 const ws_client = @import("../transport/ws_client.zig");
 
@@ -45,6 +46,14 @@ pub const Session = struct {
     event_subscriptions: std.ArrayList(events.EventSubscription) = .empty,
     next_event_subscription_id: u64 = 1,
     challenge_active: bool = false,
+    network_lock: std.Thread.Mutex = .{},
+    network_records: std.ArrayList(types.NetworkRecord) = .empty,
+    frames_lock: std.Thread.Mutex = .{},
+    frames: std.ArrayList(types.FrameInfo) = .empty,
+    service_workers_lock: std.Thread.Mutex = .{},
+    service_workers: std.ArrayList(types.ServiceWorkerInfo) = .empty,
+    snapshot_lock: std.Thread.Mutex = .{},
+    snapshots: std.ArrayList(types.SnapshotBundle) = .empty,
 
     pub fn deinit(self: *Session) void {
         if (self.child) |*child| {
@@ -78,6 +87,7 @@ pub const Session = struct {
 
         events.clear(self);
         self.event_subscriptions.deinit(self.allocator);
+        network.deinitTelemetry(self);
 
         self.clearDiagnostic();
 
@@ -110,7 +120,8 @@ pub const Session = struct {
     }
 
     pub fn navigate(self: *Session, url: []const u8) !void {
-        events.emit(self, .{ .navigation_started = .{ .url = url } });
+        events.emit(self, .{ .navigation_started = .{ .url = url, .cause = .navigate } });
+        capturePhaseSnapshotBestEffort(self, .navigation_started, url);
         const started = std.time.milliTimestamp();
         actions.navigate(self, url) catch |err| {
             self.recordDiagnostic(.{
@@ -120,27 +131,92 @@ pub const Session = struct {
                 .transport = @tagName(self.transport),
                 .elapsed_ms = elapsedSince(started),
             });
+            events.emit(self, .{
+                .navigation_failed = .{
+                    .url = url,
+                    .error_code = @errorName(err),
+                    .cause = .navigate,
+                },
+            });
+            capturePhaseSnapshotBestEffort(self, .navigation_failed, url);
             return err;
         };
+        try emitNavigationMilestones(self, url, .navigate);
         self.clearDiagnostic();
-        events.emit(self, .{ .navigation_completed = .{ .url = url } });
+        events.emit(self, .{ .navigation_completed = .{ .url = url, .cause = .navigate } });
+        capturePhaseSnapshotBestEffort(self, .navigation_completed, url);
     }
 
     pub fn reload(self: *Session) !void {
-        try actions.reload(self);
+        const url = currentUrlForLifecycle(self);
+        events.emit(self, .{ .navigation_started = .{ .url = url, .cause = .reload } });
+        events.emit(self, .{ .reload_started = .{ .url = url, .cause = .reload } });
+        capturePhaseSnapshotBestEffort(self, .navigation_started, url);
+        const started = std.time.milliTimestamp();
+        actions.reload(self) catch |err| {
+            self.recordDiagnostic(.{
+                .phase = .navigate,
+                .code = @errorName(err),
+                .message = "reload failed",
+                .transport = @tagName(self.transport),
+                .elapsed_ms = elapsedSince(started),
+            });
+            events.emit(self, .{
+                .reload_failed = .{
+                    .url = url,
+                    .error_code = @errorName(err),
+                    .cause = .reload,
+                },
+            });
+            events.emit(self, .{
+                .navigation_failed = .{
+                    .url = url,
+                    .error_code = @errorName(err),
+                    .cause = .reload,
+                },
+            });
+            capturePhaseSnapshotBestEffort(self, .navigation_failed, url);
+            return err;
+        };
+        try emitNavigationMilestones(self, url, .reload);
+        self.clearDiagnostic();
+        events.emit(self, .{ .reload_completed = .{ .url = url, .cause = .reload } });
+        events.emit(self, .{ .navigation_completed = .{ .url = url, .cause = .reload } });
+        capturePhaseSnapshotBestEffort(self, .navigation_completed, url);
     }
 
     pub fn click(self: *Session, selector: []const u8) !void {
-        try actions.click(self, selector);
+        events.emit(self, .{ .action_started = .{ .kind = .click } });
+        actions.click(self, selector) catch |err| {
+            events.emit(self, .{
+                .action_failed = .{
+                    .kind = .click,
+                    .error_code = @errorName(err),
+                },
+            });
+            return err;
+        };
+        events.emit(self, .{ .action_completed = .{ .kind = .click } });
     }
 
     pub fn typeText(self: *Session, selector: []const u8, text: []const u8) !void {
-        try actions.typeText(self, selector, text);
+        events.emit(self, .{ .action_started = .{ .kind = .type_text } });
+        actions.typeText(self, selector, text) catch |err| {
+            events.emit(self, .{
+                .action_failed = .{
+                    .kind = .type_text,
+                    .error_code = @errorName(err),
+                },
+            });
+            return err;
+        };
+        events.emit(self, .{ .action_completed = .{ .kind = .type_text } });
     }
 
     pub fn evaluate(self: *Session, script: []const u8) ![]u8 {
         const started = std.time.milliTimestamp();
-        return actions.evaluate(self, script) catch |err| {
+        events.emit(self, .{ .action_started = .{ .kind = .evaluate } });
+        const payload = actions.evaluate(self, script) catch |err| {
             self.recordDiagnostic(.{
                 .phase = .overall,
                 .code = @errorName(err),
@@ -148,12 +224,32 @@ pub const Session = struct {
                 .transport = @tagName(self.transport),
                 .elapsed_ms = elapsedSince(started),
             });
+            events.emit(self, .{
+                .action_failed = .{
+                    .kind = .evaluate,
+                    .error_code = @errorName(err),
+                },
+            });
             return err;
         };
+        events.emit(self, .{ .action_completed = .{ .kind = .evaluate } });
+        return payload;
     }
 
     pub fn waitFor(self: *Session, target: types.WaitTarget, opts: types.WaitOptions) !types.WaitResult {
         return wait_mod.waitFor(self, target, opts);
+    }
+
+    pub fn waitForCookie(self: *Session, query: types.CookieQuery, opts: types.WaitOptions) !types.WaitResult {
+        return wait_mod.waitFor(self, .{ .cookie_present = query }, opts);
+    }
+
+    pub fn addInitScript(self: *Session, script: []const u8) ![]u8 {
+        return executor.addInitScript(self, script);
+    }
+
+    pub fn removeInitScript(self: *Session, script_id: []const u8) !void {
+        try executor.removeInitScript(self, script_id);
     }
 
     pub fn enableNetworkInterception(self: *Session) !void {
@@ -178,6 +274,99 @@ pub const Session = struct {
 
     pub fn onResponse(self: *Session, callback: *const fn (types.ResponseEvent) void) void {
         network.onResponse(self, callback);
+    }
+
+    pub fn emitNetworkRequestObserved(self: *Session, event: types.RequestEvent) void {
+        network.emitRequestObserved(self, event);
+    }
+
+    pub fn emitNetworkResponseObserved(self: *Session, event: types.ResponseEvent) void {
+        network.emitResponseObserved(self, event);
+    }
+
+    pub fn recordNetworkRedirect(
+        self: *Session,
+        request_id: []const u8,
+        from_url: []const u8,
+        to_url: []const u8,
+        status: u16,
+        at_ms: u64,
+    ) void {
+        network.recordRedirect(self, request_id, from_url, to_url, status, at_ms) catch {};
+    }
+
+    pub fn recordNetworkStatus(self: *Session, request_id: []const u8, status: u16, at_ms: u64) void {
+        network.recordStatus(self, request_id, status, at_ms) catch {};
+    }
+
+    pub fn upsertFrameInfo(self: *Session, frame: types.FrameInfo) void {
+        network.upsertFrameInfo(self, frame) catch {};
+    }
+
+    pub fn removeFrameInfo(self: *Session, frame_id: []const u8) void {
+        network.removeFrameInfo(self, frame_id);
+    }
+
+    pub fn upsertServiceWorkerInfo(self: *Session, worker: types.ServiceWorkerInfo) void {
+        network.upsertServiceWorkerInfo(self, worker) catch {};
+    }
+
+    pub fn removeServiceWorkerInfo(self: *Session, worker_id: []const u8) void {
+        network.removeServiceWorkerInfo(self, worker_id);
+    }
+
+    pub fn networkRecords(self: *Session, allocator: std.mem.Allocator, include_bodies: bool) ![]types.NetworkRecord {
+        return network.listNetworkRecords(self, allocator, include_bodies);
+    }
+
+    pub fn freeNetworkRecords(_: *Session, allocator: std.mem.Allocator, records: []types.NetworkRecord) void {
+        network.freeNetworkRecords(allocator, records);
+    }
+
+    pub fn clearNetworkRecords(self: *Session) void {
+        network.clearNetworkRecords(self);
+    }
+
+    pub fn frameInfos(self: *Session, allocator: std.mem.Allocator) ![]types.FrameInfo {
+        return network.listFrames(self, allocator);
+    }
+
+    pub fn freeFrameInfos(_: *Session, allocator: std.mem.Allocator, frames: []types.FrameInfo) void {
+        network.freeFrames(allocator, frames);
+    }
+
+    pub fn serviceWorkerInfos(self: *Session, allocator: std.mem.Allocator) ![]types.ServiceWorkerInfo {
+        return network.listServiceWorkers(self, allocator);
+    }
+
+    pub fn freeServiceWorkerInfos(_: *Session, allocator: std.mem.Allocator, workers: []types.ServiceWorkerInfo) void {
+        network.freeServiceWorkers(allocator, workers);
+    }
+
+    pub fn captureSnapshot(
+        self: *Session,
+        allocator: std.mem.Allocator,
+        phase: types.SnapshotPhase,
+        url_override: ?[]const u8,
+    ) !types.SnapshotBundle {
+        return network.captureSnapshot(self, allocator, phase, url_override);
+    }
+
+    pub fn freeSnapshot(self: *Session, allocator: std.mem.Allocator, bundle: *types.SnapshotBundle) void {
+        _ = self;
+        network.freeSnapshot(allocator, bundle);
+    }
+
+    pub fn navigationSnapshots(self: *Session, allocator: std.mem.Allocator) ![]types.SnapshotBundle {
+        return network.listNavigationSnapshots(self, allocator);
+    }
+
+    pub fn freeNavigationSnapshots(_: *Session, allocator: std.mem.Allocator, bundles: []types.SnapshotBundle) void {
+        network.freeSnapshots(allocator, bundles);
+    }
+
+    pub fn clearNavigationSnapshots(self: *Session) void {
+        network.clearNavigationSnapshots(self);
     }
 
     pub fn onEvent(
@@ -407,6 +596,14 @@ pub const Session = struct {
         );
     }
 
+    pub fn waitForCookieAsync(
+        self: *Session,
+        query: types.CookieQuery,
+        opts: types.WaitOptions,
+    ) !*async_mod.AsyncResult(types.WaitResult) {
+        return self.waitForAsync(.{ .cookie_present = query }, opts);
+    }
+
     pub fn screenshotAsync(self: *Session, format: artifacts.ScreenshotFormat) !*async_mod.AsyncResult([]u8) {
         const Ctx = struct {
             session: *Session,
@@ -534,6 +731,520 @@ fn elapsedSince(start_ms: i64) u32 {
     return @intCast(delta);
 }
 
+fn currentUrlForLifecycle(self: *Session) []const u8 {
+    self.state_lock.lock();
+    defer self.state_lock.unlock();
+    return self.current_url orelse "";
+}
+
+fn emitNavigationMilestones(self: *Session, url: []const u8, cause: types.NavigationCause) !void {
+    const timeout_ms = self.timeout_policy.navigate_ms;
+    const response_observed = waitForResponseReceivedMilestone(self, timeout_ms);
+    const response_status = network.lastResponseStatusForUrl(self, url);
+    events.emit(self, .{
+        .response_received = .{
+            .url = url,
+            .cause = cause,
+            .status = response_status,
+            .observed = response_observed,
+        },
+    });
+    capturePhaseSnapshotBestEffort(self, .response_received, url);
+
+    const dom_ready_observed = waitForDomReadyMilestone(self, timeout_ms);
+    events.emit(self, .{
+        .dom_ready = .{
+            .url = url,
+            .cause = cause,
+            .observed = dom_ready_observed,
+        },
+    });
+    capturePhaseSnapshotBestEffort(self, .dom_ready, url);
+
+    const scripts_settled_observed = waitForScriptsSettledMilestone(self, timeout_ms);
+    events.emit(self, .{
+        .scripts_settled = .{
+            .url = url,
+            .cause = cause,
+            .observed = scripts_settled_observed,
+        },
+    });
+    capturePhaseSnapshotBestEffort(self, .scripts_settled, url);
+}
+
+fn capturePhaseSnapshotBestEffort(self: *Session, phase: types.SnapshotPhase, url: []const u8) void {
+    var bundle = network.captureSnapshot(self, self.allocator, phase, url) catch return;
+    network.appendNavigationSnapshot(self, bundle) catch {
+        network.freeSnapshot(self.allocator, &bundle);
+        return;
+    };
+    network.freeSnapshot(self.allocator, &bundle);
+}
+
+fn waitForResponseReceivedMilestone(self: *Session, timeout_ms: u32) bool {
+    if (!self.supports(.js_eval)) return false;
+    const max_wait_ms: u32 = @min(timeout_ms, 5_000);
+    const start = std.time.milliTimestamp();
+    while (elapsedSince(start) < max_wait_ms) {
+        const payload = executor.evaluate(
+            self,
+            "(function(){const n=performance.getEntriesByType('navigation'); if(!n||n.length===0) return false; const e=n[n.length-1]; return !!(e.responseStart && e.responseStart>0);})();",
+        ) catch return false;
+        defer self.allocator.free(payload);
+        if (std.mem.indexOf(u8, payload, "true") != null) return true;
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+    return false;
+}
+
+fn waitForDomReadyMilestone(self: *Session, timeout_ms: u32) bool {
+    if (!self.supports(.js_eval)) return false;
+    const max_wait_ms: u32 = @min(timeout_ms, 10_000);
+    executor.waitForDomReady(self, max_wait_ms) catch return false;
+    return true;
+}
+
+fn waitForScriptsSettledMilestone(self: *Session, timeout_ms: u32) bool {
+    if (!self.supports(.js_eval)) return false;
+    const max_wait_ms: u32 = @min(timeout_ms, 10_000);
+    const start = std.time.milliTimestamp();
+    while (elapsedSince(start) < max_wait_ms) {
+        const payload = executor.evaluate(
+            self,
+            "(function(){const ready=document.readyState==='complete'; const noReq=(!window.__webdriver_active_requests||window.__webdriver_active_requests===0); return ready && noReq;})();",
+        ) catch return false;
+        defer self.allocator.free(payload);
+        if (std.mem.indexOf(u8, payload, "true") != null) return true;
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+    return false;
+}
+
 pub fn nextSessionId() u64 {
     return @as(u64, @intCast(std.time.milliTimestamp()));
+}
+
+fn makeTestSession(allocator: std.mem.Allocator, capabilities: types.CapabilitySet) !Session {
+    return .{
+        .allocator = allocator,
+        .id = 42,
+        .mode = .browser,
+        .transport = .cdp_ws,
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, "test-browser"),
+            .version = null,
+            .source = .explicit,
+        },
+        .capability_set = capabilities,
+        .adapter_kind = .cdp,
+        .endpoint = null,
+        .browsing_context_id = null,
+    };
+}
+
+const SessionEventCapture = struct {
+    navigation_started: usize = 0,
+    navigation_completed: usize = 0,
+    navigation_failed: usize = 0,
+    reload_started: usize = 0,
+    reload_completed: usize = 0,
+    reload_failed: usize = 0,
+    wait_started: usize = 0,
+    wait_satisfied: usize = 0,
+    wait_timeout: usize = 0,
+    wait_canceled: usize = 0,
+    wait_failed: usize = 0,
+    action_started: usize = 0,
+    action_completed: usize = 0,
+    action_failed: usize = 0,
+    response_received: usize = 0,
+    dom_ready: usize = 0,
+    scripts_settled: usize = 0,
+    cookie_updated: usize = 0,
+    last_started_url: ?[]const u8 = null,
+    last_navigation_started_cause: ?types.NavigationCause = null,
+    last_navigation_completed_cause: ?types.NavigationCause = null,
+    last_navigation_failed_error: ?[]const u8 = null,
+    last_navigation_failed_cause: ?types.NavigationCause = null,
+    last_reload_url: ?[]const u8 = null,
+    last_reload_failed_error: ?[]const u8 = null,
+    last_wait_target: ?types.WaitTargetTag = null,
+    last_wait_failed_error: ?[]const u8 = null,
+    last_action_started_kind: ?types.ActionKind = null,
+    last_action_failed_kind: ?types.ActionKind = null,
+    last_action_failed_error: ?[]const u8 = null,
+};
+
+var session_event_capture: SessionEventCapture = .{};
+
+fn resetSessionEventCapture() void {
+    session_event_capture = .{};
+}
+
+fn captureSessionEvent(event: types.LifecycleEvent) void {
+    switch (event) {
+        .navigation_started => |e| {
+            session_event_capture.navigation_started += 1;
+            session_event_capture.last_started_url = e.url;
+            session_event_capture.last_navigation_started_cause = e.cause;
+        },
+        .navigation_completed => |e| {
+            session_event_capture.navigation_completed += 1;
+            session_event_capture.last_navigation_completed_cause = e.cause;
+        },
+        .navigation_failed => |e| {
+            session_event_capture.navigation_failed += 1;
+            session_event_capture.last_navigation_failed_error = e.error_code;
+            session_event_capture.last_navigation_failed_cause = e.cause;
+        },
+        .reload_started => |e| {
+            session_event_capture.reload_started += 1;
+            session_event_capture.last_reload_url = e.url;
+        },
+        .reload_completed => session_event_capture.reload_completed += 1,
+        .reload_failed => |e| {
+            session_event_capture.reload_failed += 1;
+            session_event_capture.last_reload_url = e.url;
+            session_event_capture.last_reload_failed_error = e.error_code;
+        },
+        .wait_started => |e| {
+            session_event_capture.wait_started += 1;
+            session_event_capture.last_wait_target = e.target;
+        },
+        .wait_satisfied => |e| {
+            session_event_capture.wait_satisfied += 1;
+            session_event_capture.last_wait_target = e.target;
+        },
+        .wait_timeout => |e| {
+            session_event_capture.wait_timeout += 1;
+            session_event_capture.last_wait_target = e.target;
+        },
+        .wait_canceled => |e| {
+            session_event_capture.wait_canceled += 1;
+            session_event_capture.last_wait_target = e.target;
+        },
+        .wait_failed => |e| {
+            session_event_capture.wait_failed += 1;
+            session_event_capture.last_wait_target = e.target;
+            session_event_capture.last_wait_failed_error = e.error_code;
+        },
+        .action_started => |e| {
+            session_event_capture.action_started += 1;
+            session_event_capture.last_action_started_kind = e.kind;
+        },
+        .action_completed => session_event_capture.action_completed += 1,
+        .action_failed => |e| {
+            session_event_capture.action_failed += 1;
+            session_event_capture.last_action_failed_kind = e.kind;
+            session_event_capture.last_action_failed_error = e.error_code;
+        },
+        .response_received => session_event_capture.response_received += 1,
+        .dom_ready => session_event_capture.dom_ready += 1,
+        .scripts_settled => session_event_capture.scripts_settled += 1,
+        .cookie_updated => session_event_capture.cookie_updated += 1,
+        else => {},
+    }
+}
+
+test "emitNavigationMilestones emits deterministic milestone events and stores snapshots" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = false,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{ .response_received, .dom_ready, .scripts_settled } },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try emitNavigationMilestones(&session, "https://example.com/path", .navigate);
+
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.response_received);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.dom_ready);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.scripts_settled);
+
+    const snapshots = try session.navigationSnapshots(allocator);
+    defer session.freeNavigationSnapshots(allocator, snapshots);
+    try std.testing.expectEqual(@as(usize, 3), snapshots.len);
+    try std.testing.expectEqual(types.SnapshotPhase.response_received, snapshots[0].phase);
+    try std.testing.expectEqual(types.SnapshotPhase.dom_ready, snapshots[1].phase);
+    try std.testing.expectEqual(types.SnapshotPhase.scripts_settled, snapshots[2].phase);
+}
+
+test "navigate failure emits navigation_started without completion and records diagnostic" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = false,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{ .navigation_started, .navigation_completed, .navigation_failed } },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(
+        error.UnsupportedCapability,
+        session.navigate("https://api.example.com/fail"),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.navigation_started);
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.navigation_completed);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.navigation_failed);
+    try std.testing.expectEqualStrings(
+        "https://api.example.com/fail",
+        session_event_capture.last_started_url.?,
+    );
+    try std.testing.expectEqualStrings(
+        "UnsupportedCapability",
+        session_event_capture.last_navigation_failed_error.?,
+    );
+    try std.testing.expectEqual(types.NavigationCause.navigate, session_event_capture.last_navigation_started_cause.?);
+    try std.testing.expectEqual(types.NavigationCause.navigate, session_event_capture.last_navigation_failed_cause.?);
+
+    const diag = session.lastDiagnostic() orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(types.TimeoutPhase.navigate, diag.phase);
+    try std.testing.expectEqualStrings("UnsupportedCapability", diag.code);
+    try std.testing.expectEqualStrings("navigation failed", diag.message);
+    try std.testing.expectEqualStrings("cdp_ws", diag.transport.?);
+}
+
+test "navigate failure still honors domain filter for navigation_started hooks" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = false,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{
+            .domain = "example.com",
+            .kinds = &.{.navigation_started},
+        },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(
+        error.UnsupportedCapability,
+        session.navigate("https://api.example.com/fail"),
+    );
+    try std.testing.expectError(
+        error.UnsupportedCapability,
+        session.navigate("https://outside.test/fail"),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.navigation_started);
+    try std.testing.expectEqualStrings(
+        "https://api.example.com/fail",
+        session_event_capture.last_started_url.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.navigation_failed);
+}
+
+test "reload failure emits reload_started and reload_failed hooks" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = false,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    session.current_url = try allocator.dupe(u8, "https://example.com/origin");
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{ .reload_started, .reload_completed, .reload_failed } },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(error.UnsupportedCapability, session.reload());
+
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.reload_started);
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.reload_completed);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.reload_failed);
+    try std.testing.expectEqualStrings("https://example.com/origin", session_event_capture.last_reload_url.?);
+    try std.testing.expectEqualStrings("UnsupportedCapability", session_event_capture.last_reload_failed_error.?);
+}
+
+test "reload failure emits navigation hooks with reload cause" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = false,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    session.current_url = try allocator.dupe(u8, "https://example.com/origin");
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{ .navigation_started, .navigation_failed } },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(error.UnsupportedCapability, session.reload());
+
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.navigation_started);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.navigation_failed);
+    try std.testing.expectEqual(types.NavigationCause.reload, session_event_capture.last_navigation_started_cause.?);
+    try std.testing.expectEqual(types.NavigationCause.reload, session_event_capture.last_navigation_failed_cause.?);
+}
+
+test "click failure emits action_started and action_failed hooks" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = false,
+        .js_eval = true,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{ .action_started, .action_completed, .action_failed } },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(error.UnsupportedCapability, session.click("#submit"));
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.action_started);
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.action_completed);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.action_failed);
+    try std.testing.expectEqual(types.ActionKind.click, session_event_capture.last_action_started_kind.?);
+    try std.testing.expectEqual(types.ActionKind.click, session_event_capture.last_action_failed_kind.?);
+    try std.testing.expectEqualStrings("UnsupportedCapability", session_event_capture.last_action_failed_error.?);
+}
+
+test "evaluate failure emits action_failed and records diagnostic" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = true,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{ .action_started, .action_completed, .action_failed } },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(error.UnsupportedCapability, session.evaluate("1+1"));
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.action_started);
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.action_completed);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.action_failed);
+    try std.testing.expectEqual(types.ActionKind.evaluate, session_event_capture.last_action_started_kind.?);
+    try std.testing.expectEqual(types.ActionKind.evaluate, session_event_capture.last_action_failed_kind.?);
+    try std.testing.expectEqualStrings("UnsupportedCapability", session_event_capture.last_action_failed_error.?);
+
+    const diag = session.lastDiagnostic() orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(types.TimeoutPhase.overall, diag.phase);
+    try std.testing.expectEqualStrings("UnsupportedCapability", diag.code);
+    try std.testing.expectEqualStrings("script evaluation failed", diag.message);
+}
+
+test "wait failure emits wait_started and wait_failed hooks" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = true,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{ .wait_started, .wait_satisfied, .wait_timeout, .wait_canceled, .wait_failed } },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(
+        error.UnsupportedCapability,
+        session.waitFor(.{ .js_truthy = "true" }, .{ .timeout_ms = 1000, .poll_interval_ms = 10 }),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.wait_started);
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.wait_satisfied);
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.wait_timeout);
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.wait_canceled);
+    try std.testing.expectEqual(@as(usize, 1), session_event_capture.wait_failed);
+    try std.testing.expectEqual(types.WaitTargetTag.js_truthy, session_event_capture.last_wait_target.?);
+    try std.testing.expectEqualStrings("UnsupportedCapability", session_event_capture.last_wait_failed_error.?);
+}
+
+test "setCookie failure does not emit cookie_updated hook" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator, .{
+        .dom = false,
+        .js_eval = false,
+        .network_intercept = false,
+        .tracing = false,
+        .downloads = false,
+        .bidi_events = false,
+    });
+    defer session.deinit();
+
+    resetSessionEventCapture();
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{.cookie_updated} },
+        captureSessionEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+
+    try std.testing.expectError(
+        error.UnsupportedCapability,
+        session.setCookie(.{
+            .name = "sid",
+            .value = "abc",
+            .domain = "example.com",
+            .path = "/",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), session_event_capture.cookie_updated);
 }

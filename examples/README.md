@@ -32,6 +32,7 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 - `19_session_cache.zig`: persist/load session state with payload presets and custom payload masks.
 - `20_timeout_and_cancel.zig`: apply timeout policies and cooperative cancellation for waits.
 - `21_lightpanda_runtime_download.zig`: download/install latest Lightpanda at runtime and verify discovery.
+- `22_forensic_timeline_snapshot.zig`: forensic debugging flow for request/response timelines, redirect/status chains, frame/service-worker introspection, and phase snapshots.
 
 ## Notes
 

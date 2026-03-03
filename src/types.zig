@@ -235,20 +235,112 @@ pub const WaitResult = struct {
     target: WaitTargetTag,
 };
 
+pub const ActionKind = enum {
+    click,
+    type_text,
+    evaluate,
+};
+
+pub const NavigationCause = enum {
+    navigate,
+    reload,
+    redirect,
+    history,
+    attach,
+    other,
+};
+
+pub const CookieChangeKind = enum {
+    set,
+    updated,
+    deleted,
+    unknown,
+};
+
+pub const CookieChangeSource = enum {
+    api,
+    document,
+    network,
+    browser,
+    unknown,
+};
+
 pub const LifecycleEventKind = enum {
     navigation_started,
     navigation_completed,
+    navigation_failed,
+    reload_started,
+    reload_completed,
+    reload_failed,
+    wait_started,
+    wait_satisfied,
+    wait_timeout,
+    wait_canceled,
+    wait_failed,
+    action_started,
+    action_completed,
+    action_failed,
+    network_request_observed,
+    network_response_observed,
+    response_received,
+    dom_ready,
+    scripts_settled,
     challenge_detected,
     challenge_solved,
     cookie_updated,
 };
 
 pub const LifecycleEvent = union(LifecycleEventKind) {
-    navigation_started: struct { url: []const u8 },
-    navigation_completed: struct { url: []const u8 },
+    navigation_started: struct { url: []const u8, cause: NavigationCause = .navigate },
+    navigation_completed: struct { url: []const u8, cause: NavigationCause = .navigate },
+    navigation_failed: struct { url: []const u8, error_code: []const u8, cause: NavigationCause = .navigate },
+    reload_started: struct { url: []const u8, cause: NavigationCause = .reload },
+    reload_completed: struct { url: []const u8, cause: NavigationCause = .reload },
+    reload_failed: struct { url: []const u8, error_code: []const u8, cause: NavigationCause = .reload },
+    wait_started: struct { target: WaitTargetTag, timeout_ms: u32, poll_interval_ms: u32 },
+    wait_satisfied: struct { target: WaitTargetTag, elapsed_ms: u32 },
+    wait_timeout: struct { target: WaitTargetTag, elapsed_ms: u32, timeout_ms: u32 },
+    wait_canceled: struct { target: WaitTargetTag, elapsed_ms: u32 },
+    wait_failed: struct { target: WaitTargetTag, elapsed_ms: u32, error_code: []const u8 },
+    action_started: struct { kind: ActionKind },
+    action_completed: struct { kind: ActionKind },
+    action_failed: struct { kind: ActionKind, error_code: []const u8 },
+    network_request_observed: struct {
+        request_id: []const u8,
+        method: []const u8,
+        url: []const u8,
+        headers_json: []const u8 = "{}",
+    },
+    network_response_observed: struct {
+        request_id: []const u8,
+        status: u16,
+        url: []const u8,
+        headers_json: []const u8 = "{}",
+    },
+    response_received: struct {
+        url: []const u8,
+        cause: NavigationCause = .navigate,
+        status: ?u16 = null,
+        observed: bool = false,
+    },
+    dom_ready: struct {
+        url: []const u8,
+        cause: NavigationCause = .navigate,
+        observed: bool = false,
+    },
+    scripts_settled: struct {
+        url: []const u8,
+        cause: NavigationCause = .navigate,
+        observed: bool = false,
+    },
     challenge_detected: struct { url: []const u8, signal: []const u8 },
     challenge_solved: struct { url: []const u8 },
-    cookie_updated: struct { domain: []const u8, name: []const u8 },
+    cookie_updated: struct {
+        domain: []const u8,
+        name: []const u8,
+        change: CookieChangeKind = .unknown,
+        source: CookieChangeSource = .unknown,
+    },
 };
 
 pub const EventFilter = struct {
@@ -315,6 +407,7 @@ pub const RequestEvent = struct {
     method: []const u8,
     url: []const u8,
     headers_json: []const u8,
+    body: ?[]const u8 = null,
 };
 
 pub const ResponseEvent = struct {
@@ -322,6 +415,66 @@ pub const ResponseEvent = struct {
     status: u16,
     url: []const u8,
     headers_json: []const u8,
+    body: ?[]const u8 = null,
+};
+
+pub const NetworkStatusTimelinePoint = struct {
+    status: u16,
+    at_ms: u64,
+};
+
+pub const RedirectHop = struct {
+    from_url: []const u8,
+    to_url: []const u8,
+    status: u16,
+    at_ms: u64,
+};
+
+pub const NetworkRecord = struct {
+    request_id: []const u8,
+    method: []const u8,
+    url: []const u8,
+    request_headers_json: []const u8 = "{}",
+    response_headers_json: []const u8 = "{}",
+    request_body: ?[]const u8 = null,
+    response_body: ?[]const u8 = null,
+    final_status: ?u16 = null,
+    redirects: []RedirectHop = &.{},
+    status_timeline: []NetworkStatusTimelinePoint = &.{},
+};
+
+pub const FrameInfo = struct {
+    frame_id: []const u8,
+    parent_frame_id: ?[]const u8 = null,
+    url: []const u8,
+};
+
+pub const ServiceWorkerInfo = struct {
+    worker_id: []const u8,
+    scope_url: ?[]const u8 = null,
+    script_url: ?[]const u8 = null,
+    state: ?[]const u8 = null,
+};
+
+pub const SnapshotPhase = enum {
+    navigation_started,
+    response_received,
+    dom_ready,
+    scripts_settled,
+    navigation_completed,
+    navigation_failed,
+    manual,
+};
+
+pub const SnapshotBundle = struct {
+    phase: SnapshotPhase,
+    url: []const u8,
+    captured_at_ms: u64,
+    dom_html: []const u8,
+    response_headers_json: []const u8,
+    cookies: []Cookie = &.{},
+    local_storage: []StorageValue = &.{},
+    session_storage: []StorageValue = &.{},
 };
 
 pub const WebViewRuntimeSource = enum {

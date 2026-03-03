@@ -50,6 +50,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 ### Waits and cancellation
 
 - `waitFor(target, opts)` and `waitForAsync(target, opts)`
+- `waitForCookie(query, opts)` and `waitForCookieAsync(query, opts)`
 - Targets:
   - `dom_ready`
   - `network_idle`
@@ -59,16 +60,34 @@ pub fn run(allocator: std.mem.Allocator) !void {
   - `storage_key_present`
   - `js_truthy`
 - Use `CancelToken` for cooperative cancellation.
+- `addInitScript(script)` / `removeInitScript(id)` install/remove pre-document scripts (CDP: `Page.addScriptToEvaluateOnNewDocument`, BiDi: `script.addPreloadScript`).
 
 ### Events
 
 - `onEvent(filter, callback)` / `offEvent(id)`
 - Event kinds:
-  - `navigation_started`
-  - `navigation_completed`
-  - `challenge_detected`
-  - `challenge_solved`
-  - `cookie_updated`
+  - Navigation/reload: `navigation_started`, `navigation_completed`, `navigation_failed`, `reload_started`, `reload_completed`, `reload_failed`
+  - Deterministic milestones: `response_received`, `dom_ready`, `scripts_settled`
+  - Wait lifecycle: `wait_started`, `wait_satisfied`, `wait_timeout`, `wait_canceled`, `wait_failed`
+  - Action lifecycle: `action_started`, `action_completed`, `action_failed`
+  - Network observation: `network_request_observed`, `network_response_observed`
+  - Challenge/cookie: `challenge_detected`, `challenge_solved`, `cookie_updated`
+- Emission semantics:
+  - `navigation_started` fires before each navigate attempt, including attempts that later return an error.
+  - `navigation_completed` fires only after navigate succeeds; failed attempts emit `navigation_failed`.
+  - `reload_started`/`reload_completed`/`reload_failed` mirror reload lifecycle.
+  - `reload()` also emits `navigation_started`/`navigation_completed` (or `navigation_failed`) with `cause=.reload`.
+  - `wait_*` hooks are emitted by `waitFor`/`waitForAsync` for start, success, timeout, cancellation, and failures.
+  - `action_*` hooks are emitted around `click`, `typeText`, and `evaluate`.
+  - `network_*` hooks are emitted when request/response observation callbacks receive events and include `headers_json`.
+  - Milestone hooks are emitted in deterministic order: `response_received` -> `dom_ready` -> `scripts_settled`.
+  - `challenge_detected` and `challenge_solved` are emitted from wait polling when challenge heuristics toggle state.
+  - `cookie_updated` fires after successful cookie writes and includes `change` + `source` metadata.
+- Filter semantics:
+  - `EventFilter.kinds = &.{}` subscribes to all kinds.
+  - `EventFilter.domain` is case-insensitive, matches exact host or subdomain suffix, and is applied after kind filtering.
+  - Domain source is URL host for navigation/reload/network/challenge events and cookie domain for `cookie_updated`.
+  - Domain filtering is skipped for domainless events (`wait_*`, `action_*`).
 
 ### Timeouts and diagnostics
 
@@ -79,6 +98,17 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 - `queryCookies`
 - `buildCookieHeaderForUrl`
+
+### Network/frame/worker telemetry
+
+- `session.network().records(allocator, include_bodies)`
+  - Includes redirect chains and status timeline points per request.
+  - `include_bodies=true` attempts full response-body capture via protocol body endpoints when available.
+- `session.network().frames(allocator)` for frame tree introspection.
+- `session.network().serviceWorkers(allocator)` for service-worker runtime introspection.
+- `session.network().captureSnapshot(allocator, phase, url_override)`
+- `session.network().navigationSnapshots(allocator)` for automatically captured bundles at navigation phases.
+  - Bundle payload: DOM HTML + response headers + cookies + localStorage + sessionStorage.
 
 ### Session cache
 
@@ -167,10 +197,10 @@ Notes:
 
 Hooks are defined in `src/extensions/api.zig` and are statically linked:
 
-- `score_install`
-- `launch_args`
-- `session_init`
-- `event_observer`
+- `score_install`: adds per-install score adjustments during discovery ranking.
+- `launch_args`: receives computed launch args and returns the final argv slice used for process spawn.
+- `session_init`: called once after protocol readiness is established for a newly launched session.
+- `event_observer`: generic extension event sink for explicit `notifyEvent(name, payload_json)` calls.
 
 Dynamic runtime plugin loading is intentionally out of scope.
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("../types.zig");
 const common = @import("common.zig");
 const cdp = @import("cdp/adapter.zig");
+const bidi = @import("bidi/adapter.zig");
 const ws = @import("../transport/ws_client.zig");
 const http = @import("../transport/http_client.zig");
 const json_rpc = @import("../transport/json_rpc.zig");
@@ -76,10 +77,20 @@ fn initializeCdpSession(session: *Session) !void {
         else => return err,
     };
     session.allocator.free(ping_raw);
+
+    // Enable event domains used for request/response, frame, and worker telemetry.
+    try callCdpBestEffort(session, "Page.enable", "{}");
+    try callCdpBestEffort(session, "Runtime.enable", "{}");
+    try callCdpBestEffort(session, "Network.enable", "{}");
+    try callCdpBestEffort(session, "Target.setDiscoverTargets", "{\"discover\":true}");
+    try callCdpBestEffort(session, "ServiceWorker.enable", "{}");
 }
 
 fn initializeBidiSession(session: *Session) !void {
-    if (session.browsing_context_id != null) return;
+    if (session.browsing_context_id != null) {
+        try subscribeBidiCoreEvents(session);
+        return;
+    }
 
     // Some BiDi endpoints require explicit session initialization, others are
     // already session-bound. Treat failure here as non-fatal and continue.
@@ -90,6 +101,7 @@ fn initializeBidiSession(session: *Session) !void {
 
     if (try fetchFirstBidiContext(session)) |context_id| {
         try assignBrowsingContext(session, context_id);
+        try subscribeBidiCoreEvents(session);
         return;
     }
 
@@ -97,6 +109,20 @@ fn initializeBidiSession(session: *Session) !void {
     defer session.allocator.free(created_raw);
     const created_context = try extractBidiContextId(session.allocator, created_raw) orelse return error.SessionNotReady;
     try assignBrowsingContext(session, created_context);
+
+    try subscribeBidiCoreEvents(session);
+}
+
+fn subscribeBidiCoreEvents(session: *Session) !void {
+    const raw = callBidi(
+        session,
+        "session.subscribe",
+        "{\"events\":[\"network.beforeRequestSent\",\"network.responseStarted\",\"network.responseCompleted\",\"browsingContext.domContentLoaded\",\"browsingContext.load\"]}",
+    ) catch |err| switch (err) {
+        error.ProtocolCommandFailed => return,
+        else => return err,
+    };
+    session.allocator.free(raw);
 }
 
 fn assignBrowsingContext(session: *Session, context_id: []u8) !void {
@@ -191,6 +217,73 @@ pub fn evaluate(session: *Session, script: []const u8) ![]u8 {
     };
 }
 
+pub fn addInitScript(session: *Session, script: []const u8) ![]u8 {
+    switch (session.transport) {
+        .cdp_ws => {
+            const source = try json_util.escapeJsonString(session.allocator, script);
+            defer session.allocator.free(source);
+            const params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"source\":\"{s}\"}}",
+                .{source},
+            );
+            defer session.allocator.free(params);
+            const raw = try callCdp(session, "Page.addScriptToEvaluateOnNewDocument", params);
+            defer session.allocator.free(raw);
+            return extractJsonStringAtPath(session.allocator, raw, "result", "identifier");
+        },
+        .bidi_ws => {
+            const context_id = session.browsing_context_id orelse return error.SessionNotReady;
+            const declaration_raw = try std.fmt.allocPrint(
+                session.allocator,
+                "() => {{ {s} }}",
+                .{script},
+            );
+            defer session.allocator.free(declaration_raw);
+            const declaration = try json_util.escapeJsonString(session.allocator, declaration_raw);
+            defer session.allocator.free(declaration);
+            const params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"functionDeclaration\":\"{s}\",\"contexts\":[\"{s}\"]}}",
+                .{ declaration, context_id },
+            );
+            defer session.allocator.free(params);
+            const raw = try callBidi(session, "script.addPreloadScript", params);
+            defer session.allocator.free(raw);
+            return extractBidiPreloadScriptId(session.allocator, raw);
+        },
+    }
+}
+
+pub fn removeInitScript(session: *Session, script_id: []const u8) !void {
+    switch (session.transport) {
+        .cdp_ws => {
+            const id = try json_util.escapeJsonString(session.allocator, script_id);
+            defer session.allocator.free(id);
+            const params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"identifier\":\"{s}\"}}",
+                .{id},
+            );
+            defer session.allocator.free(params);
+            const raw = try callCdp(session, "Page.removeScriptToEvaluateOnNewDocument", params);
+            session.allocator.free(raw);
+        },
+        .bidi_ws => {
+            const id = try json_util.escapeJsonString(session.allocator, script_id);
+            defer session.allocator.free(id);
+            const params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"script\":\"{s}\"}}",
+                .{id},
+            );
+            defer session.allocator.free(params);
+            const raw = try callBidi(session, "script.removePreloadScript", params);
+            session.allocator.free(raw);
+        },
+    }
+}
+
 pub fn waitForDomReady(session: *Session, timeout_ms: u32) !void {
     const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     while (true) {
@@ -274,6 +367,45 @@ pub fn getCookies(session: *Session) ![]u8 {
         return callCdp(session, "Network.getCookies", params);
     }
     return callCdp(session, "Network.getCookies", "{}");
+}
+
+pub fn getResponseBody(session: *Session, request_id: []const u8) !?[]u8 {
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    const escaped = try json_util.escapeJsonString(session.allocator, request_id);
+    defer session.allocator.free(escaped);
+    const params = try std.fmt.allocPrint(session.allocator, "{{\"requestId\":\"{s}\"}}", .{escaped});
+    defer session.allocator.free(params);
+    const raw = callCdp(session, "Network.getResponseBody", params) catch |err| switch (err) {
+        error.ProtocolCommandFailed => return null,
+        else => return err,
+    };
+    defer session.allocator.free(raw);
+    return parseResponseBodyPayload(session.allocator, raw);
+}
+
+fn parseResponseBodyPayload(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const result = parsed.value.object.get("result") orelse return null;
+    if (result != .object) return null;
+    const body_value = result.object.get("body") orelse return null;
+    if (body_value != .string) return null;
+    const encoded = result.object.get("base64Encoded");
+    const is_base64 = if (encoded) |value| (value == .bool and value.bool) else false;
+    if (!is_base64) {
+        const copy = try allocator.dupe(u8, body_value.string);
+        return copy;
+    }
+
+    const decoder = std.base64.standard.Decoder;
+    const max_size = decoder.calcSizeForSlice(body_value.string) catch return null;
+    const out = try allocator.alloc(u8, max_size);
+    decoder.decode(out, body_value.string) catch {
+        allocator.free(out);
+        return null;
+    };
+    return out;
 }
 
 pub fn screenshot(session: *Session) ![]u8 {
@@ -583,6 +715,9 @@ fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]
         };
         defer env.deinit(session.allocator);
         if (env.id == null or env.id.? != id) {
+            if (env.id == null) {
+                processBidiNotification(session, payload);
+            }
             session.allocator.free(payload);
             continue;
         }
@@ -655,6 +790,9 @@ fn sendCdpRpc(
         };
         defer env.deinit(session.allocator);
         if (env.id == null or env.id.? != id) {
+            if (env.id == null) {
+                processCdpNotification(session, payload);
+            }
             session.allocator.free(payload);
             continue;
         }
@@ -667,6 +805,292 @@ fn sendCdpRpc(
         }
         return payload;
     }
+}
+
+fn processCdpNotification(session: *Session, payload: []const u8) void {
+    var parsed = std.json.parseFromSlice(std.json.Value, session.allocator, payload, .{}) catch return;
+    defer parsed.deinit();
+    if (parsed.value != .object) return;
+    const method_value = parsed.value.object.get("method") orelse return;
+    if (method_value != .string) return;
+    const method = method_value.string;
+    const params_value = parsed.value.object.get("params") orelse return;
+    if (params_value != .object) return;
+    const params = params_value.object;
+
+    if (std.mem.eql(u8, method, "Network.requestWillBeSent")) {
+        handleCdpRequestWillBeSent(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "Network.responseReceived")) {
+        handleCdpResponseReceived(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "Page.frameNavigated")) {
+        handleCdpFrameNavigated(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "Page.frameAttached")) {
+        handleCdpFrameAttached(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "Page.frameDetached")) {
+        handleCdpFrameDetached(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "Target.targetCreated") or
+        std.mem.eql(u8, method, "Target.targetInfoChanged"))
+    {
+        handleCdpServiceWorkerTarget(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "Target.targetDestroyed")) {
+        if (jsonObjectString(params, "targetId")) |target_id| {
+            session.removeServiceWorkerInfo(target_id);
+        }
+        return;
+    }
+    if (std.mem.eql(u8, method, "ServiceWorker.workerVersionUpdated")) {
+        handleCdpWorkerVersionUpdated(session, params);
+    }
+}
+
+fn processBidiNotification(session: *Session, payload: []const u8) void {
+    var parsed = std.json.parseFromSlice(std.json.Value, session.allocator, payload, .{}) catch return;
+    defer parsed.deinit();
+    if (parsed.value != .object) return;
+    const method_value = parsed.value.object.get("method") orelse return;
+    if (method_value != .string) return;
+    const method = method_value.string;
+    const params_value = parsed.value.object.get("params") orelse return;
+    if (params_value != .object) return;
+    const params = params_value.object;
+
+    if (std.mem.eql(u8, method, "network.beforeRequestSent")) {
+        handleBidiBeforeRequest(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "network.responseStarted") or
+        std.mem.eql(u8, method, "network.responseCompleted"))
+    {
+        handleBidiResponse(session, params);
+        return;
+    }
+    if (std.mem.eql(u8, method, "browsingContext.domContentLoaded") or
+        std.mem.eql(u8, method, "browsingContext.load"))
+    {
+        handleBidiContextLifecycle(session, params);
+    }
+}
+
+fn handleCdpRequestWillBeSent(session: *Session, params: std.json.ObjectMap) void {
+    const request_id = jsonObjectString(params, "requestId") orelse return;
+    const request_value = params.get("request") orelse return;
+    if (request_value != .object) return;
+    const request = request_value.object;
+
+    const method = jsonObjectString(request, "method") orelse "GET";
+    const url = jsonObjectString(request, "url") orelse "";
+    const request_headers = stringifyObjectField(session.allocator, request, "headers") catch session.allocator.dupe(u8, "{}") catch return;
+    defer session.allocator.free(request_headers);
+    const post_data = jsonObjectString(request, "postData");
+
+    if (params.get("redirectResponse")) |redirect_value| {
+        if (redirect_value == .object) {
+            const redirect = redirect_value.object;
+            const from_url = jsonObjectString(redirect, "url") orelse "";
+            const status = jsonObjectU16(redirect, "status") orelse 0;
+            const redirect_headers = stringifyObjectField(session.allocator, redirect, "headers") catch session.allocator.dupe(u8, "{}") catch return;
+            defer session.allocator.free(redirect_headers);
+            const at_ms = timestampFromEvent(params, "timestamp");
+            session.recordNetworkRedirect(request_id, from_url, url, status, at_ms);
+            session.emitNetworkResponseObserved(.{
+                .request_id = request_id,
+                .status = status,
+                .url = from_url,
+                .headers_json = redirect_headers,
+                .body = null,
+            });
+        }
+    }
+
+    session.emitNetworkRequestObserved(.{
+        .request_id = request_id,
+        .method = method,
+        .url = url,
+        .headers_json = request_headers,
+        .body = post_data,
+    });
+}
+
+fn handleCdpResponseReceived(session: *Session, params: std.json.ObjectMap) void {
+    const request_id = jsonObjectString(params, "requestId") orelse return;
+    const response_value = params.get("response") orelse return;
+    if (response_value != .object) return;
+    const response = response_value.object;
+    const status = jsonObjectU16(response, "status") orelse 0;
+    const url = jsonObjectString(response, "url") orelse "";
+    const headers = stringifyObjectField(session.allocator, response, "headers") catch session.allocator.dupe(u8, "{}") catch return;
+    defer session.allocator.free(headers);
+
+    session.recordNetworkStatus(request_id, status, timestampFromEvent(params, "timestamp"));
+    session.emitNetworkResponseObserved(.{
+        .request_id = request_id,
+        .status = status,
+        .url = url,
+        .headers_json = headers,
+        .body = null,
+    });
+}
+
+fn handleCdpFrameNavigated(session: *Session, params: std.json.ObjectMap) void {
+    const frame_value = params.get("frame") orelse return;
+    if (frame_value != .object) return;
+    const frame = frame_value.object;
+    const frame_id = jsonObjectString(frame, "id") orelse return;
+    const url = jsonObjectString(frame, "url") orelse "";
+    session.upsertFrameInfo(.{
+        .frame_id = frame_id,
+        .parent_frame_id = jsonObjectString(frame, "parentId"),
+        .url = url,
+    });
+}
+
+fn handleCdpFrameAttached(session: *Session, params: std.json.ObjectMap) void {
+    const frame_id = jsonObjectString(params, "frameId") orelse return;
+    session.upsertFrameInfo(.{
+        .frame_id = frame_id,
+        .parent_frame_id = jsonObjectString(params, "parentFrameId"),
+        .url = "",
+    });
+}
+
+fn handleCdpFrameDetached(session: *Session, params: std.json.ObjectMap) void {
+    const frame_id = jsonObjectString(params, "frameId") orelse return;
+    session.removeFrameInfo(frame_id);
+}
+
+fn handleCdpServiceWorkerTarget(session: *Session, params: std.json.ObjectMap) void {
+    const info_value = params.get("targetInfo") orelse return;
+    if (info_value != .object) return;
+    const info = info_value.object;
+    const target_type = jsonObjectString(info, "type") orelse return;
+    if (!std.ascii.eqlIgnoreCase(target_type, "service_worker")) return;
+    const target_id = jsonObjectString(info, "targetId") orelse return;
+    session.upsertServiceWorkerInfo(.{
+        .worker_id = target_id,
+        .scope_url = jsonObjectString(info, "url"),
+        .script_url = jsonObjectString(info, "url"),
+        .state = null,
+    });
+}
+
+fn handleCdpWorkerVersionUpdated(session: *Session, params: std.json.ObjectMap) void {
+    const versions_value = params.get("versions") orelse return;
+    if (versions_value != .array) return;
+    for (versions_value.array.items) |version| {
+        if (version != .object) continue;
+        const version_obj = version.object;
+        const worker_id = jsonObjectString(version_obj, "versionId") orelse continue;
+        session.upsertServiceWorkerInfo(.{
+            .worker_id = worker_id,
+            .scope_url = jsonObjectString(version_obj, "scopeURL"),
+            .script_url = jsonObjectString(version_obj, "scriptURL"),
+            .state = jsonObjectString(version_obj, "status"),
+        });
+    }
+}
+
+fn handleBidiBeforeRequest(session: *Session, params: std.json.ObjectMap) void {
+    const request_value = params.get("request") orelse return;
+    if (request_value != .object) return;
+    const request = request_value.object;
+    const request_id = jsonObjectString(request, "request") orelse return;
+    const method = jsonObjectString(request, "method") orelse "GET";
+    const url = jsonObjectString(request, "url") orelse "";
+    const headers = stringifyObjectField(session.allocator, request, "headers") catch session.allocator.dupe(u8, "{}") catch return;
+    defer session.allocator.free(headers);
+    const body = jsonObjectString(request, "body");
+
+    session.emitNetworkRequestObserved(.{
+        .request_id = request_id,
+        .method = method,
+        .url = url,
+        .headers_json = headers,
+        .body = body,
+    });
+}
+
+fn handleBidiResponse(session: *Session, params: std.json.ObjectMap) void {
+    const request_value = params.get("request") orelse return;
+    const response_value = params.get("response") orelse return;
+    if (request_value != .object or response_value != .object) return;
+    const request = request_value.object;
+    const response = response_value.object;
+    const request_id = jsonObjectString(request, "request") orelse return;
+    const url = jsonObjectString(request, "url") orelse "";
+    const status = jsonObjectU16(response, "status") orelse 0;
+    const headers = stringifyObjectField(session.allocator, response, "headers") catch session.allocator.dupe(u8, "{}") catch return;
+    defer session.allocator.free(headers);
+    const body = jsonObjectString(response, "body");
+
+    session.recordNetworkStatus(request_id, status, nowMs());
+    session.emitNetworkResponseObserved(.{
+        .request_id = request_id,
+        .status = status,
+        .url = url,
+        .headers_json = headers,
+        .body = body,
+    });
+}
+
+fn handleBidiContextLifecycle(session: *Session, params: std.json.ObjectMap) void {
+    const context = jsonObjectString(params, "context") orelse return;
+    const url = jsonObjectString(params, "url") orelse "";
+    session.upsertFrameInfo(.{
+        .frame_id = context,
+        .parent_frame_id = null,
+        .url = url,
+    });
+}
+
+fn stringifyObjectField(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    field: []const u8,
+) ![]u8 {
+    const value = obj.get(field) orelse return allocator.dupe(u8, "{}");
+    return std.json.Stringify.valueAlloc(allocator, value, .{});
+}
+
+fn jsonObjectString(obj: std.json.ObjectMap, field: []const u8) ?[]const u8 {
+    const value = obj.get(field) orelse return null;
+    if (value != .string) return null;
+    return value.string;
+}
+
+fn jsonObjectU16(obj: std.json.ObjectMap, field: []const u8) ?u16 {
+    const value = obj.get(field) orelse return null;
+    return switch (value) {
+        .integer => |n| if (n >= 0 and n <= std.math.maxInt(u16)) @as(u16, @intCast(n)) else null,
+        .float => |n| if (n >= 0 and n <= std.math.maxInt(u16)) @as(u16, @intFromFloat(n)) else null,
+        else => null,
+    };
+}
+
+fn timestampFromEvent(params: std.json.ObjectMap, field: []const u8) u64 {
+    const value = params.get(field) orelse return nowMs();
+    return switch (value) {
+        .float => |seconds| if (seconds > 0) @intFromFloat(seconds * 1000.0) else nowMs(),
+        .integer => |seconds| if (seconds > 0) @intCast(seconds * 1000) else nowMs(),
+        else => nowMs(),
+    };
+}
+
+fn nowMs() u64 {
+    const ts = std.time.milliTimestamp();
+    if (ts <= 0) return 0;
+    return @intCast(ts);
 }
 
 fn encodeCdpRequest(
@@ -964,6 +1388,21 @@ fn extractBidiContextId(allocator: std.mem.Allocator, payload: []const u8) !?[]u
     return null;
 }
 
+fn extractBidiPreloadScriptId(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const result = parsed.value.object.get("result") orelse return error.MissingEndpoint;
+    if (result != .object) return error.InvalidResponse;
+    if (result.object.get("script")) |value| {
+        if (value == .string) return allocator.dupe(u8, value.string);
+    }
+    if (result.object.get("identifier")) |value| {
+        if (value == .string) return allocator.dupe(u8, value.string);
+    }
+    return error.MissingEndpoint;
+}
+
 fn extractJsonStringValue(allocator: std.mem.Allocator, payload: []const u8, field_name: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
@@ -1093,6 +1532,15 @@ test "extract first bidi context from getTree payload" {
     try std.testing.expectEqualStrings("ctx-1", context.?);
 }
 
+test "extract bidi preload script id from addPreloadScript payload" {
+    const allocator = std.testing.allocator;
+    const script_id = try extractBidiPreloadScriptId(allocator,
+        \\{"id":1,"result":{"script":"preload-123"}}
+    );
+    defer allocator.free(script_id);
+    try std.testing.expectEqualStrings("preload-123", script_id);
+}
+
 test "extract bidi context id from create payload" {
     const allocator = std.testing.allocator;
     const context = try extractBidiContextId(allocator,
@@ -1101,4 +1549,94 @@ test "extract bidi context id from create payload" {
     try std.testing.expect(context != null);
     defer allocator.free(context.?);
     try std.testing.expectEqualStrings("ctx-2", context.?);
+}
+
+fn makeNotificationTestSession(
+    allocator: std.mem.Allocator,
+    transport: common.TransportKind,
+    engine: types.EngineKind,
+) !Session {
+    return .{
+        .allocator = allocator,
+        .id = 7,
+        .mode = .browser,
+        .transport = transport,
+        .install = .{
+            .kind = if (engine == .gecko) .firefox else .chrome,
+            .engine = engine,
+            .path = try allocator.dupe(u8, "test-browser"),
+            .version = null,
+            .source = .explicit,
+        },
+        .capability_set = if (engine == .gecko) bidi.capabilitiesFor(.gecko) else cdp.capabilities(),
+        .adapter_kind = if (transport == .bidi_ws) .bidi else .cdp,
+        .endpoint = null,
+        .browsing_context_id = null,
+    };
+}
+
+test "cdp notifications populate network/frame/service-worker telemetry" {
+    const allocator = std.testing.allocator;
+    var session = try makeNotificationTestSession(allocator, .cdp_ws, .chromium);
+    defer session.deinit();
+
+    processCdpNotification(&session,
+        \\{"method":"Network.requestWillBeSent","params":{"requestId":"r1","timestamp":1.1,"request":{"url":"https://example.com/next","method":"POST","headers":{"accept":"*/*"},"postData":"k=v"},"redirectResponse":{"url":"https://example.com/start","status":302,"headers":{"location":"https://example.com/next"}}}}
+    );
+    processCdpNotification(&session,
+        \\{"method":"Network.responseReceived","params":{"requestId":"r1","timestamp":1.2,"response":{"url":"https://example.com/next","status":200,"headers":{"content-type":"text/html"}}}}
+    );
+    processCdpNotification(&session,
+        \\{"method":"Page.frameNavigated","params":{"frame":{"id":"root","url":"https://example.com/next"}}}
+    );
+    processCdpNotification(&session,
+        \\{"method":"Target.targetCreated","params":{"targetInfo":{"targetId":"sw-1","type":"service_worker","url":"https://example.com/sw.js"}}}
+    );
+
+    const records = try session.networkRecords(allocator, false);
+    defer session.freeNetworkRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+    try std.testing.expectEqualStrings("r1", records[0].request_id);
+    try std.testing.expect(records[0].request_body != null);
+    try std.testing.expectEqualStrings("k=v", records[0].request_body.?);
+    try std.testing.expectEqual(@as(usize, 1), records[0].redirects.len);
+    try std.testing.expectEqual(@as(?u16, 200), records[0].final_status);
+    try std.testing.expect(records[0].status_timeline.len >= 2);
+
+    const frames = try session.frameInfos(allocator);
+    defer session.freeFrameInfos(allocator, frames);
+    try std.testing.expectEqual(@as(usize, 1), frames.len);
+    try std.testing.expectEqualStrings("root", frames[0].frame_id);
+
+    const workers = try session.serviceWorkerInfos(allocator);
+    defer session.freeServiceWorkerInfos(allocator, workers);
+    try std.testing.expectEqual(@as(usize, 1), workers.len);
+    try std.testing.expectEqualStrings("sw-1", workers[0].worker_id);
+}
+
+test "bidi notifications populate network and frame telemetry" {
+    const allocator = std.testing.allocator;
+    var session = try makeNotificationTestSession(allocator, .bidi_ws, .gecko);
+    defer session.deinit();
+
+    processBidiNotification(&session,
+        \\{"method":"network.beforeRequestSent","params":{"request":{"request":"b1","url":"https://example.org/a","method":"GET","headers":{"accept":"text/html"}}}}
+    );
+    processBidiNotification(&session,
+        \\{"method":"network.responseCompleted","params":{"request":{"request":"b1","url":"https://example.org/a"},"response":{"status":204,"headers":{"x":"1"}}}}
+    );
+    processBidiNotification(&session,
+        \\{"method":"browsingContext.load","params":{"context":"ctx-main","url":"https://example.org/a"}}
+    );
+
+    const records = try session.networkRecords(allocator, false);
+    defer session.freeNetworkRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+    try std.testing.expectEqualStrings("b1", records[0].request_id);
+    try std.testing.expectEqual(@as(?u16, 204), records[0].final_status);
+
+    const frames = try session.frameInfos(allocator);
+    defer session.freeFrameInfos(allocator, frames);
+    try std.testing.expectEqual(@as(usize, 1), frames.len);
+    try std.testing.expectEqualStrings("ctx-main", frames[0].frame_id);
 }

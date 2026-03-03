@@ -177,6 +177,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "example-19-session-cache", .path = "examples/19_session_cache.zig" },
         .{ .name = "example-20-timeout-and-cancel", .path = "examples/20_timeout_and_cancel.zig" },
         .{ .name = "example-21-lightpanda-runtime-download", .path = "examples/21_lightpanda_runtime_download.zig" },
+        .{ .name = "example-22-forensic-timeline-snapshot", .path = "examples/22_forensic_timeline_snapshot.zig" },
     };
     const examples_step = b.step("examples", "Build all library usage examples");
     inline for (example_specs) |spec| {

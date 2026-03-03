@@ -10,17 +10,33 @@ pub fn waitFor(session: *Session, target: types.WaitTarget, opts: types.WaitOpti
     const start_ms = std.time.milliTimestamp();
     const timeout_ms = opts.timeout_ms orelse session.timeout_policy.wait_ms;
     const poll_interval_ms = if (opts.poll_interval_ms == 0) @as(u32, 25) else opts.poll_interval_ms;
+    const target_tag = std.meta.activeTag(target);
     var next_challenge_probe_ms = start_ms;
+
+    events.emit(session, .{
+        .wait_started = .{
+            .target = target_tag,
+            .timeout_ms = timeout_ms,
+            .poll_interval_ms = poll_interval_ms,
+        },
+    });
 
     while (true) {
         if (opts.cancel_token) |token| {
             if (token.isCanceled()) {
+                const elapsed = elapsedSince(start_ms);
                 session.recordDiagnostic(.{
                     .phase = .wait,
                     .code = "canceled",
                     .message = "wait canceled by token",
                     .transport = @tagName(session.transport),
-                    .elapsed_ms = elapsedSince(start_ms),
+                    .elapsed_ms = elapsed,
+                });
+                events.emit(session, .{
+                    .wait_canceled = .{
+                        .target = target_tag,
+                        .elapsed_ms = elapsed,
+                    },
                 });
                 return error.Canceled;
             }
@@ -28,26 +44,75 @@ pub fn waitFor(session: *Session, target: types.WaitTarget, opts: types.WaitOpti
 
         const now_ms = std.time.milliTimestamp();
         if (now_ms >= next_challenge_probe_ms) {
-            try maybeEmitChallengeSignals(session);
+            maybeEmitChallengeSignals(session) catch |err| {
+                const elapsed = elapsedSince(start_ms);
+                session.recordDiagnostic(.{
+                    .phase = .wait,
+                    .code = @errorName(err),
+                    .message = "wait failed",
+                    .transport = @tagName(session.transport),
+                    .elapsed_ms = elapsed,
+                });
+                events.emit(session, .{
+                    .wait_failed = .{
+                        .target = target_tag,
+                        .elapsed_ms = elapsed,
+                        .error_code = @errorName(err),
+                    },
+                });
+                return err;
+            };
             next_challenge_probe_ms = now_ms + 500;
         }
-        const matched = try isTargetMatched(session, target, poll_interval_ms);
+        const matched = isTargetMatched(session, target, poll_interval_ms) catch |err| {
+            const elapsed = elapsedSince(start_ms);
+            session.recordDiagnostic(.{
+                .phase = .wait,
+                .code = @errorName(err),
+                .message = "wait failed",
+                .transport = @tagName(session.transport),
+                .elapsed_ms = elapsed,
+            });
+            events.emit(session, .{
+                .wait_failed = .{
+                    .target = target_tag,
+                    .elapsed_ms = elapsed,
+                    .error_code = @errorName(err),
+                },
+            });
+            return err;
+        };
         if (matched) {
+            const elapsed = elapsedSince(start_ms);
             session.clearDiagnostic();
+            events.emit(session, .{
+                .wait_satisfied = .{
+                    .target = target_tag,
+                    .elapsed_ms = elapsed,
+                },
+            });
             return .{
                 .matched = true,
-                .elapsed_ms = elapsedSince(start_ms),
-                .target = std.meta.activeTag(target),
+                .elapsed_ms = elapsed,
+                .target = target_tag,
             };
         }
 
-        if (elapsedSince(start_ms) >= timeout_ms) {
+        const elapsed = elapsedSince(start_ms);
+        if (elapsed >= timeout_ms) {
             session.recordDiagnostic(.{
                 .phase = .wait,
                 .code = "timeout",
                 .message = "wait timeout reached",
                 .transport = @tagName(session.transport),
-                .elapsed_ms = elapsedSince(start_ms),
+                .elapsed_ms = elapsed,
+            });
+            events.emit(session, .{
+                .wait_timeout = .{
+                    .target = target_tag,
+                    .elapsed_ms = elapsed,
+                    .timeout_ms = timeout_ms,
+                },
             });
             return error.Timeout;
         }
@@ -92,7 +157,8 @@ fn waitSelectorStep(session: *Session, selector: []const u8, poll_interval_ms: u
 
 fn waitNetworkIdleStep(session: *Session) !bool {
     if (!session.supports(.js_eval)) return error.UnsupportedCapability;
-    const payload = try session.evaluate(
+    const payload = try evaluateForWait(
+        session,
         "(function(){return document.readyState==='complete' && (!window.__webdriver_active_requests || window.__webdriver_active_requests===0);})();",
     );
     defer session.allocator.free(payload);
@@ -100,7 +166,7 @@ fn waitNetworkIdleStep(session: *Session) !bool {
 }
 
 fn waitUrlContainsStep(session: *Session, needle: []const u8) !bool {
-    const payload = try session.evaluate("location.href");
+    const payload = try evaluateForWait(session, "location.href");
     defer session.allocator.free(payload);
     return strings.containsIgnoreCase(payload, needle);
 }
@@ -120,7 +186,7 @@ fn waitCookieStep(session: *Session, query: types.CookieQuery) !bool {
             .{escaped},
         );
         defer session.allocator.free(script);
-        const payload = try session.evaluate(script);
+        const payload = try evaluateForWait(session, script);
         defer session.allocator.free(payload);
         return payloadContainsTruthy(payload);
     }
@@ -152,14 +218,14 @@ fn waitStorageKeyStep(session: *Session, query: types.StorageKeyQuery) !bool {
     };
     defer session.allocator.free(script);
 
-    const payload = try session.evaluate(script);
+    const payload = try evaluateForWait(session, script);
     defer session.allocator.free(payload);
     return payloadContainsTruthy(payload);
 }
 
 fn waitJsTruthyStep(session: *Session, script: []const u8) !bool {
     if (!session.supports(.js_eval)) return error.UnsupportedCapability;
-    const payload = try session.evaluate(script);
+    const payload = try evaluateForWait(session, script);
     defer session.allocator.free(payload);
     return payloadContainsTruthy(payload);
 }
@@ -206,7 +272,7 @@ fn jsonValueTruthy(value: std.json.Value) bool {
 
 fn maybeEmitChallengeSignals(session: *Session) !void {
     if (!session.supports(.js_eval)) return;
-    const title_payload = try session.evaluate("document.title");
+    const title_payload = try evaluateForWait(session, "document.title");
     defer session.allocator.free(title_payload);
 
     const looks_like_challenge = strings.containsIgnoreCase(title_payload, "challenge") or
@@ -239,7 +305,7 @@ fn maybeEmitChallengeSignals(session: *Session) !void {
 
 fn currentUrl(session: *Session) ![]u8 {
     if (session.supports(.js_eval)) {
-        const payload = try session.evaluate("location.href");
+        const payload = try evaluateForWait(session, "location.href");
         return payload;
     }
     session.state_lock.lock();
@@ -252,6 +318,11 @@ fn clampTimeout(poll_interval_ms: u32) u32 {
     if (poll_interval_ms < 25) return 25;
     if (poll_interval_ms > 500) return 500;
     return poll_interval_ms;
+}
+
+fn evaluateForWait(session: *Session, script: []const u8) ![]u8 {
+    if (!session.supports(.js_eval)) return error.UnsupportedCapability;
+    return executor.evaluate(session, script);
 }
 
 fn elapsedSince(start_ms: i64) u32 {

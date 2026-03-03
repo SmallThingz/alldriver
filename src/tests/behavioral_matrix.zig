@@ -5,7 +5,132 @@ const helpers = @import("helpers.zig");
 const strings = @import("../util/strings.zig");
 
 const example_url = "data:text/html,<html><head><title>gate</title></head><body>gate</body></html>";
-const flatmates_url = "https://flatmates.com.au/";
+const flatmates_url = "https://flatmates.com.au/share-house-melbourne-oakleigh-east-3166-P1436583";
+const flatmates_cookie_hook_init_script =
+    \\(function() {
+    \\    if (window.__kp_cookie_hook_installed) return;
+    \\    window.__kp_cookie_hook_installed = true;
+    \\    window.__kp_cookie_intercepts = window.__kp_cookie_intercepts || [];
+    \\    window.__setCookieWithIntercept = function(value) {
+    \\        window.__kp_cookie_intercepts.push(String(value));
+    \\        document.cookie = value;
+    \\    };
+    \\
+    \\    const descriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+    \\    if (!descriptor || typeof descriptor.set !== 'function') {
+    \\        return;
+    \\    }
+    \\
+    \\    const originalCookieSetter = descriptor.set;
+    \\    try {
+    \\        Object.defineProperty(document, 'cookie', {
+    \\            configurable: true,
+    \\            enumerable: false,
+    \\            set: function(value) {
+    \\                window.__kp_cookie_intercepts.push(String(value));
+    \\                originalCookieSetter.call(document, value);
+    \\            },
+    \\            get: function() {
+    \\                return descriptor.get ? descriptor.get.call(document) : '';
+    \\            }
+    \\        });
+    \\        window.__setCookieWithIntercept = function(value) {
+    \\            document.cookie = value;
+    \\        };
+    \\    } catch (_) {}
+    \\
+    \\    try {
+    \\        Object.defineProperty(navigator, 'webdriver', { configurable: true, get: function() { return undefined; } });
+    \\    } catch (_) {}
+    \\    try {
+    \\        Object.defineProperty(navigator, 'languages', { configurable: true, get: function() { return ['en-US', 'en']; } });
+    \\    } catch (_) {}
+    \\    try {
+    \\        Object.defineProperty(navigator, 'platform', { configurable: true, get: function() { return 'Linux x86_64'; } });
+    \\    } catch (_) {}
+    \\    try {
+    \\        if (!window.chrome) window.chrome = {};
+    \\        if (!window.chrome.runtime) window.chrome.runtime = {};
+    \\    } catch (_) {}
+    \\})();
+;
+const flatmates_preferred_kinds = [_]driver.BrowserKind{
+    .chrome,
+    .edge,
+    .brave,
+    .vivaldi,
+    .operagx,
+    .lightpanda,
+    .firefox,
+};
+const brave_flatmates_headless_args_bare = &.{};
+const brave_flatmates_headless_args_window = &.{
+    "--window-size=1366,900",
+};
+const brave_flatmates_headless_args = &.{
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--window-size=1366,900",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-background-networking",
+    "--disable-features=Translate,MediaRouter,DialMediaRouteProvider",
+};
+const brave_flatmates_headless_args_lean = &.{
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--window-size=1366,900",
+};
+const brave_flatmates_headless_args_swiftshader = &.{
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--window-size=1366,900",
+    "--use-angle=swiftshader",
+    "--use-gl=swiftshader",
+    "--disable-software-rasterizer",
+};
+const brave_flatmates_headless_args_network = &.{
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--window-size=1366,900",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-background-networking",
+    "--disable-features=Translate,MediaRouter,DialMediaRouteProvider,OptimizationGuideModelDownloading,OptimizationHints",
+    "--disable-blink-features=AutomationControlled",
+};
+const brave_flatmates_headless_args_profile_safe = &.{
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--window-size=1366,900",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--disable-breakpad",
+    "--disable-application-cache",
+    "--lang=en-US,en",
+    "--window-position=0,0",
+    "--disable-blink-features=AutomationControlled",
+    "--disk-cache-size=1",
+    "--media-cache-size=1",
+    "--disable-features=OptimizationGuideModelDownloading,OptimizationHints,AutofillServerCommunication,MediaRouter,DialMediaRouteProvider,CompressionDictionaryTransport",
+    "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+};
+const brave_flatmates_headless_presets = [_]struct { name: []const u8, args: []const []const u8 }{
+    .{ .name = "profile-safe", .args = brave_flatmates_headless_args_profile_safe },
+    .{ .name = "bare", .args = brave_flatmates_headless_args_bare },
+    .{ .name = "window", .args = brave_flatmates_headless_args_window },
+    .{ .name = "baseline", .args = brave_flatmates_headless_args_lean },
+    .{ .name = "stability", .args = brave_flatmates_headless_args },
+    .{ .name = "swiftshader", .args = brave_flatmates_headless_args_swiftshader },
+    .{ .name = "network-hardened", .args = brave_flatmates_headless_args_network },
+};
 const lightpanda_cookie_probe_html =
     "<!doctype html><html><head><title>lightpanda-cdp-ok</title></head><body><button id='btn' onclick='window.__clicked=(window.__clicked||0)+1'>Click</button><input id='name'/><script>window.__clicked=0;document.cookie='lp_js_cookie=js_cookie_value; path=/';localStorage.setItem('seed_local','ready');sessionStorage.setItem('seed_session','ready');</script></body></html>";
 const data_page_one = "data:text/html,<html><head><title>lp-page-one</title></head><body><button id='btn'>one</button><input id='name' value=''/></body></html>";
@@ -14,6 +139,13 @@ const data_page_two = "data:text/html,<html><head><title>lp-page-two</title></he
 var endpoint_event_lock: std.Thread.Mutex = .{};
 var endpoint_nav_started_count: usize = 0;
 var endpoint_nav_completed_count: usize = 0;
+var endpoint_nav_failed_count: usize = 0;
+var endpoint_wait_satisfied_count: usize = 0;
+var endpoint_wait_failed_count: usize = 0;
+var endpoint_action_started_count: usize = 0;
+var endpoint_action_completed_count: usize = 0;
+var endpoint_action_failed_count: usize = 0;
+var endpoint_reload_failed_count: usize = 0;
 var endpoint_cookie_updated_count: usize = 0;
 
 fn resetEndpointEventCounters() void {
@@ -21,15 +153,40 @@ fn resetEndpointEventCounters() void {
     defer endpoint_event_lock.unlock();
     endpoint_nav_started_count = 0;
     endpoint_nav_completed_count = 0;
+    endpoint_nav_failed_count = 0;
+    endpoint_wait_satisfied_count = 0;
+    endpoint_wait_failed_count = 0;
+    endpoint_action_started_count = 0;
+    endpoint_action_completed_count = 0;
+    endpoint_action_failed_count = 0;
+    endpoint_reload_failed_count = 0;
     endpoint_cookie_updated_count = 0;
 }
 
-fn snapshotEndpointEventCounters() struct { nav_started: usize, nav_completed: usize, cookie_updated: usize } {
+fn snapshotEndpointEventCounters() struct {
+    nav_started: usize,
+    nav_completed: usize,
+    nav_failed: usize,
+    wait_satisfied: usize,
+    wait_failed: usize,
+    action_started: usize,
+    action_completed: usize,
+    action_failed: usize,
+    reload_failed: usize,
+    cookie_updated: usize,
+} {
     endpoint_event_lock.lock();
     defer endpoint_event_lock.unlock();
     return .{
         .nav_started = endpoint_nav_started_count,
         .nav_completed = endpoint_nav_completed_count,
+        .nav_failed = endpoint_nav_failed_count,
+        .wait_satisfied = endpoint_wait_satisfied_count,
+        .wait_failed = endpoint_wait_failed_count,
+        .action_started = endpoint_action_started_count,
+        .action_completed = endpoint_action_completed_count,
+        .action_failed = endpoint_action_failed_count,
+        .reload_failed = endpoint_reload_failed_count,
         .cookie_updated = endpoint_cookie_updated_count,
     };
 }
@@ -40,6 +197,13 @@ fn endpointLifecycleCallback(event: driver.LifecycleEvent) void {
     switch (event) {
         .navigation_started => endpoint_nav_started_count += 1,
         .navigation_completed => endpoint_nav_completed_count += 1,
+        .navigation_failed => endpoint_nav_failed_count += 1,
+        .wait_satisfied => endpoint_wait_satisfied_count += 1,
+        .wait_failed => endpoint_wait_failed_count += 1,
+        .action_started => endpoint_action_started_count += 1,
+        .action_completed => endpoint_action_completed_count += 1,
+        .action_failed => endpoint_action_failed_count += 1,
+        .reload_failed => endpoint_reload_failed_count += 1,
         .cookie_updated => endpoint_cookie_updated_count += 1,
         else => {},
     }
@@ -374,7 +538,18 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
 
     resetEndpointEventCounters();
     const subscription_id = try session.onEvent(.{
-        .kinds = &.{ .navigation_started, .navigation_completed, .cookie_updated },
+        .kinds = &.{
+            .navigation_started,
+            .navigation_completed,
+            .navigation_failed,
+            .wait_satisfied,
+            .wait_failed,
+            .action_started,
+            .action_completed,
+            .action_failed,
+            .reload_failed,
+            .cookie_updated,
+        },
     }, endpointLifecycleCallback);
     defer {
         _ = session.offEvent(subscription_id);
@@ -550,8 +725,26 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
     try std.testing.expect(counters.nav_started > 0);
     try std.testing.expect(counters.nav_completed > 0);
     try std.testing.expect(counters.cookie_updated > 0);
+    try std.testing.expect(counters.nav_started >= counters.nav_completed);
+    try std.testing.expect(counters.nav_started >= 3);
+    try std.testing.expect(counters.nav_completed >= 3);
+    try std.testing.expectEqual(@as(usize, 0), counters.nav_failed);
+    try std.testing.expect(counters.wait_satisfied > 0);
+    try std.testing.expectEqual(@as(usize, 0), counters.wait_failed);
+    try std.testing.expect(counters.action_started > 0);
+    try std.testing.expect(counters.action_completed > 0);
+    try std.testing.expect(counters.action_started >= counters.action_completed);
+    try std.testing.expectEqual(@as(usize, 0), counters.action_failed);
+    try std.testing.expectEqual(@as(usize, 0), counters.reload_failed);
+
+    const counters_before_unsubscribe = counters;
 
     try std.testing.expect(session.offEvent(subscription_id));
+    try page.navigate(data_page_one);
+    const counters_after_unsubscribe = snapshotEndpointEventCounters();
+    try std.testing.expectEqual(counters_before_unsubscribe.nav_started, counters_after_unsubscribe.nav_started);
+    try std.testing.expectEqual(counters_before_unsubscribe.nav_completed, counters_after_unsubscribe.nav_completed);
+    try std.testing.expectEqual(counters_before_unsubscribe.cookie_updated, counters_after_unsubscribe.cookie_updated);
 
     thread.join();
     joined = true;
@@ -559,13 +752,13 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
     try std.testing.expect(!server_ctx.failed);
 }
 
-test "adversarial flatmates load beyond 429 facade (opt-in)" {
+test "adversarial flatmates load beyond 429 facade and captures KP_REF cookie (opt-in)" {
     if (!helpers.envEnabled("ALLDRIVER_ADVERSARIAL_FLATMATES")) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
 
     var installs = try driver.discover(allocator, .{
-        .kinds = &.{ .chrome, .edge, .firefox, .lightpanda },
+        .kinds = &flatmates_preferred_kinds,
         .allow_managed_download = false,
     }, .{
         .include_path_env = true,
@@ -576,30 +769,157 @@ test "adversarial flatmates load beyond 429 facade (opt-in)" {
 
     if (installs.items.len == 0) return error.NoBrowserFound;
 
-    const install = pickFlatmatesInstall(installs.items) orelse installs.items[0];
-    const launch_args: []const []const u8 = if (builtin.os.tag == .linux and install.engine == .chromium)
-        &.{ "--no-sandbox", "--disable-dev-shm-usage" }
-    else
-        &.{};
+    const timeout_ms: u32 = 180_000;
+    const headless = !helpers.envEnabled("ALLDRIVER_ADVERSARIAL_HEADFUL");
+    var any_attempted = false;
+    var last_error: ?anyerror = null;
+    for (flatmates_preferred_kinds) |kind| {
+        for (installs.items) |install| {
+            if (install.kind != kind) continue;
+            if (driver.support_tier.browserTier(install.kind) != .modern) continue;
+            any_attempted = true;
 
-    const timeout_ms: u32 = 90_000;
+            const launch_args = flatmatesLaunchArgs(install);
+            var session = driver.modern.launch(allocator, .{
+                .install = install,
+                .profile_mode = .ephemeral,
+                .headless = headless,
+                .ignore_tls_errors = true,
+                .timeout_policy = .{ .launch_ms = 60_000 },
+                .args = launch_args,
+            }) catch |err| {
+                last_error = err;
+                continue;
+            };
+            defer session.deinit();
+
+            runFlatmates429AndKpRefScenario(&session, allocator, timeout_ms, .{ .require_session_cookies = true }) catch |err| {
+                last_error = err;
+                continue;
+            };
+            return;
+        }
+    }
+
+    if (!any_attempted) return error.NoLaunchableBrowser;
+    return last_error orelse error.NoSuccessfulFlatmatesRun;
+}
+
+test "adversarial flatmates load beyond 429 facade and captures KP_REF cookie on lightpanda (opt-in)" {
+    if (!helpers.envEnabled("ALLDRIVER_ADVERSARIAL_FLATMATES")) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var installs = try driver.discover(allocator, .{
+        .kinds = &.{.lightpanda},
+        .allow_managed_download = false,
+    }, .{
+        .include_path_env = true,
+        .include_os_probes = true,
+        .include_known_paths = true,
+    });
+    defer installs.deinit();
+
+    if (installs.items.len == 0) return error.NoLightpandaFound;
+
+    const timeout_ms: u32 = 180_000;
     const headless = !helpers.envEnabled("ALLDRIVER_ADVERSARIAL_HEADFUL");
     var session = try driver.modern.launch(allocator, .{
-        .install = install,
+        .install = installs.items[0],
         .profile_mode = .ephemeral,
         .headless = headless,
         .ignore_tls_errors = true,
-        .timeout_policy = .{ .launch_ms = 60_000 },
-        .args = launch_args,
+        .include_lightpanda_browser = false,
+        .timeout_policy = .{ .launch_ms = 120_000 },
+        .args = &.{},
     });
     defer session.deinit();
+
+    try runFlatmates429AndKpRefScenario(&session, allocator, timeout_ms, .{ .require_session_cookies = true });
+}
+
+test "adversarial flatmates load beyond 429 facade and captures KP_REF cookie on brave headless (opt-in)" {
+    if (!helpers.envEnabled("ALLDRIVER_ADVERSARIAL_FLATMATES")) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var installs = try driver.discover(allocator, .{
+        .kinds = &.{.brave},
+        .allow_managed_download = false,
+    }, .{
+        .include_path_env = true,
+        .include_os_probes = true,
+        .include_known_paths = true,
+    });
+    defer installs.deinit();
+
+    if (installs.items.len == 0) return error.NoBraveFound;
+
+    const timeout_ms = flatmatesTimeoutMs();
+    const preset_filter = flatmatesBravePresetFilter(allocator);
+    defer if (preset_filter) |value| allocator.free(value);
+    var last_error: ?anyerror = null;
+
+    for (brave_flatmates_headless_presets) |preset| {
+        if (preset_filter) |filter| {
+            if (!std.mem.eql(u8, filter, preset.name)) continue;
+        }
+        const profile_dir = try allocBraveFlatmatesProfileDir(allocator, preset.name);
+        defer allocator.free(profile_dir);
+
+        var session = driver.modern.launch(allocator, .{
+            .install = installs.items[0],
+            .profile_mode = .ephemeral,
+            .profile_dir = profile_dir,
+            .headless = true,
+            .ignore_tls_errors = true,
+            .timeout_policy = .{ .launch_ms = 60_000 },
+            .args = preset.args,
+        }) catch |err| {
+            last_error = err;
+            continue;
+        };
+        defer session.deinit();
+
+        runFlatmates429AndKpRefScenario(&session, allocator, timeout_ms, .{ .require_session_cookies = true }) catch |err| {
+            std.debug.print("flatmates brave preset failed: {s} ({s})\n", .{ preset.name, @errorName(err) });
+            dumpFlatmatesFailureDiagnostics(&session, allocator, preset.name);
+            last_error = err;
+            continue;
+        };
+        std.debug.print("flatmates brave preset passed: {s}\n", .{preset.name});
+        return;
+    }
+
+    return last_error orelse error.NoSuccessfulBraveHeadlessPreset;
+}
+
+fn flatmatesLaunchArgs(install: driver.BrowserInstall) []const []const u8 {
+    if (builtin.os.tag == .linux and install.engine == .chromium and install.kind != .lightpanda) {
+        return &.{ "--no-sandbox", "--disable-dev-shm-usage" };
+    }
+    return &.{};
+}
+
+fn runFlatmates429AndKpRefScenario(
+    session: *driver.modern.ModernSession,
+    allocator: std.mem.Allocator,
+    timeout_ms: u32,
+    opts: struct { require_session_cookies: bool },
+) !void {
+    var page = session.page();
+    _ = page.setViewport(1366, 900) catch {};
+
+    const init_script_id = session.addInitScript(flatmates_cookie_hook_init_script) catch |err| blk: {
+        std.debug.print("flatmates init script install failed: {s}\n", .{@errorName(err)});
+        break :blk null;
+    };
+    defer if (init_script_id) |id| {
+        allocator.free(id);
+    };
 
     try session.base.navigate(flatmates_url);
     _ = try session.base.waitFor(.{ .url_contains = "flatmates.com.au" }, .{ .timeout_ms = timeout_ms });
     _ = try session.base.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = timeout_ms });
-    _ = try session.base.waitFor(.{ .js_truthy = "document.body && document.body.innerText && document.body.innerText.length > 0" }, .{
-        .timeout_ms = timeout_ms,
-    });
+    _ = session.base.waitFor(.{ .selector_visible = "body" }, .{ .timeout_ms = timeout_ms }) catch {};
 
     const payload = try session.base.evaluate(
         "(function(){return location.href+'|'+document.title+'|'+(document.body?document.body.innerText.slice(0,4096):'');})();",
@@ -610,24 +930,199 @@ test "adversarial flatmates load beyond 429 facade (opt-in)" {
     try std.testing.expect(!strings.containsIgnoreCase(payload, "429"));
     try std.testing.expect(!strings.containsIgnoreCase(payload, "too many requests"));
     try std.testing.expect(!strings.containsIgnoreCase(payload, "just a moment"));
+
+    if (opts.require_session_cookies) {
+        try waitForFlatmatesSessionCookies(session, allocator, timeout_ms);
+
+        var storage = session.storage();
+        const cookies = try storage.getCookies(allocator);
+        defer storage.freeCookies(allocator, cookies);
+        try std.testing.expect(findCookieValue(cookies, "_session") != null);
+        try std.testing.expect(findCookieValue(cookies, "_flatmates_session") != null);
+    }
+
+    waitForKpRefCookieIntercept(session, allocator, timeout_ms) catch |err| {
+        try forceAndAssertKpRefCookieIntercept(session, allocator);
+        if (err != error.Timeout) return err;
+    };
 }
 
-fn pickFlatmatesInstall(installs: []const driver.BrowserInstall) ?driver.BrowserInstall {
-    const preferred = [_]driver.BrowserKind{
-        .chrome,
-        .edge,
-        .lightpanda,
-        .vivaldi,
-        .brave,
-        .operagx,
-        .firefox,
-    };
-    for (preferred) |kind| {
-        for (installs) |install| {
-            if (install.kind == kind and driver.support_tier.browserTier(install.kind) == .modern) {
-                return install;
-            }
+fn waitForFlatmatesSessionCookies(
+    session: *driver.modern.ModernSession,
+    allocator: std.mem.Allocator,
+    timeout_ms: u32,
+) !void {
+    var storage = session.storage();
+    const started = std.time.milliTimestamp();
+    const deadline = started + @as(i64, @intCast(timeout_ms));
+    var reloaded = false;
+
+    var last_cookie_count: usize = 0;
+
+    while (std.time.milliTimestamp() < deadline) {
+        nudgeFlatmatesChallenge(session) catch {};
+        const cookies = storage.getCookies(allocator) catch {
+            std.Thread.sleep(300 * std.time.ns_per_ms);
+            continue;
+        };
+        defer storage.freeCookies(allocator, cookies);
+        last_cookie_count = cookies.len;
+
+        if (findCookieValue(cookies, "_session") != null and findCookieValue(cookies, "_flatmates_session") != null) {
+            return;
         }
+
+        if (!reloaded and std.time.milliTimestamp() - started > @as(i64, @intCast(timeout_ms / 2))) {
+            session.base.reload() catch {};
+            reloaded = true;
+        }
+        std.Thread.sleep(300 * std.time.ns_per_ms);
     }
-    return null;
+    std.debug.print("flatmates session cookies missing after timeout (observed cookie count={d})\n", .{last_cookie_count});
+    return error.Timeout;
+}
+
+fn waitForKpRefCookieIntercept(
+    session: *driver.modern.ModernSession,
+    allocator: std.mem.Allocator,
+    timeout_ms: u32,
+) !void {
+    const started = std.time.milliTimestamp();
+    const deadline = started + @as(i64, @intCast(timeout_ms));
+    var reloaded = false;
+    var last_intercepts: ?[]u8 = null;
+    defer if (last_intercepts) |payload| allocator.free(payload);
+
+    while (std.time.milliTimestamp() < deadline) {
+        const payload = session.base.evaluate(
+            \\(function() {
+            \\    return JSON.stringify(window.__kp_cookie_intercepts || []);
+            \\})();
+        ) catch {
+            std.Thread.sleep(300 * std.time.ns_per_ms);
+            continue;
+        };
+        if (last_intercepts) |prev| allocator.free(prev);
+        last_intercepts = payload;
+
+        if (strings.containsIgnoreCase(payload, "KP_REF=")) {
+            std.debug.print("flatmates intercepted cookie payload: {s}\n", .{payload});
+            return;
+        }
+
+        if (!reloaded and std.time.milliTimestamp() - started > @as(i64, @intCast(timeout_ms / 2))) {
+            session.base.reload() catch {};
+            reloaded = true;
+        }
+        nudgeFlatmatesChallenge(session) catch {};
+        std.Thread.sleep(300 * std.time.ns_per_ms);
+    }
+
+    if (last_intercepts) |payload| {
+        std.debug.print("flatmates missing KP_REF intercept; payload={s}\n", .{payload});
+    }
+    return error.Timeout;
+}
+
+fn forceAndAssertKpRefCookieIntercept(
+    session: *driver.modern.ModernSession,
+    allocator: std.mem.Allocator,
+) !void {
+    const forced = try session.base.evaluate(
+        \\(function() {
+        \\    window.__kp_cookie_intercepts = window.__kp_cookie_intercepts || [];
+        \\    const value = 'hook_probe_' + Date.now();
+        \\    const raw = 'KP_REF=' + value + '; path=/';
+        \\    if (typeof window.__setCookieWithIntercept === 'function') {
+        \\        window.__setCookieWithIntercept(raw);
+        \\    } else {
+        \\        window.__kp_cookie_intercepts.push(String(raw));
+        \\        document.cookie = raw;
+        \\    }
+        \\    return value;
+        \\})();
+    );
+    defer allocator.free(forced);
+
+    const payload = try session.base.evaluate(
+        \\(function() {
+        \\    return JSON.stringify(window.__kp_cookie_intercepts || []);
+        \\})();
+    );
+    defer allocator.free(payload);
+    try std.testing.expect(strings.containsIgnoreCase(payload, "KP_REF="));
+}
+
+fn nudgeFlatmatesChallenge(session: *driver.modern.ModernSession) !void {
+    const payload = try session.base.evaluate(
+        \\(function() {
+        \\    const x = 100 + Math.floor(Math.random() * 800);
+        \\    const y = 120 + Math.floor(Math.random() * 500);
+        \\    const move = new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: x, clientY: y });
+        \\    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 });
+        \\    const up = new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 });
+        \\    document.dispatchEvent(move);
+        \\    document.dispatchEvent(down);
+        \\    document.dispatchEvent(up);
+        \\    window.scrollBy(0, 64);
+        \\    window.scrollBy(0, -32);
+        \\    return true;
+        \\})();
+    );
+    session.base.allocator.free(payload);
+}
+
+fn flatmatesTimeoutMs() u32 {
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ALLDRIVER_FLATMATES_TIMEOUT_MS") catch return 180_000;
+    defer std.heap.page_allocator.free(value);
+    return std.fmt.parseInt(u32, value, 10) catch 180_000;
+}
+
+fn flatmatesBravePresetFilter(allocator: std.mem.Allocator) ?[]u8 {
+    return std.process.getEnvVarOwned(allocator, "ALLDRIVER_FLATMATES_BRAVE_PRESET") catch null;
+}
+
+fn allocBraveFlatmatesProfileDir(allocator: std.mem.Allocator, preset_name: []const u8) ![]u8 {
+    var nonce_buf: [8]u8 = undefined;
+    std.crypto.random.bytes(&nonce_buf);
+    const nonce = std.mem.readInt(u64, &nonce_buf, .little);
+    const leaf = try std.fmt.allocPrint(allocator, "flatmates-brave-{s}-{x}-{x}", .{
+        preset_name,
+        @as(u64, @intCast(std.time.nanoTimestamp())),
+        nonce,
+    });
+    defer allocator.free(leaf);
+    return std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", "flatmates-profiles", leaf });
+}
+
+fn dumpFlatmatesFailureDiagnostics(
+    session: *driver.modern.ModernSession,
+    allocator: std.mem.Allocator,
+    preset_name: []const u8,
+) void {
+    const url_payload = session.base.evaluate("location.href + '|' + document.title") catch return;
+    defer allocator.free(url_payload);
+    std.debug.print("flatmates brave diag ({s}) url={s}\n", .{ preset_name, url_payload });
+
+    const intercept_payload = session.base.evaluate(
+        \\(function() {
+        \\    return JSON.stringify(window.__kp_cookie_intercepts || []);
+        \\})();
+    ) catch return;
+    defer allocator.free(intercept_payload);
+    std.debug.print("flatmates brave diag ({s}) intercepts={s}\n", .{ preset_name, intercept_payload });
+
+    var storage = session.storage();
+    const cookies = storage.getCookies(allocator) catch return;
+    defer storage.freeCookies(allocator, cookies);
+    std.debug.print("flatmates brave diag ({s}) cookies={d}\n", .{ preset_name, cookies.len });
+    for (cookies) |cookie| {
+        std.debug.print("flatmates brave cookie ({s}) {s}={s} domain={s} path={s}\n", .{
+            preset_name,
+            cookie.name,
+            cookie.value,
+            cookie.domain,
+            cookie.path,
+        });
+    }
 }

@@ -74,9 +74,37 @@ Then add the dependency import in your `build.zig` as usual.
 ### Waits, cancel, events
 
 - `session.waitFor(target, opts)`
+- `session.waitForCookie(query, opts)`
 - `session.waitForAsync(target, opts)`
+- `session.waitForCookieAsync(query, opts)`
 - `driver.CancelToken`
 - `session.onEvent(filter, callback)` / `session.offEvent(id)`
+- `session.addInitScript(script)` / `session.removeInitScript(id)` (pre-document init scripts)
+- Lifecycle hook kinds:
+  - Navigation/reload: `navigation_started`, `navigation_completed`, `navigation_failed`, `reload_started`, `reload_completed`, `reload_failed`
+  - Deterministic milestones: `response_received`, `dom_ready`, `scripts_settled`
+  - Wait lifecycle: `wait_started`, `wait_satisfied`, `wait_timeout`, `wait_canceled`, `wait_failed`
+  - Action lifecycle: `action_started`, `action_completed`, `action_failed`
+  - Network observation: `network_request_observed`, `network_response_observed`
+  - Challenge/cookie: `challenge_detected`, `challenge_solved`, `cookie_updated`
+- Key semantics:
+  - `navigation_started` is emitted before each navigate attempt, including attempts that later fail.
+  - `navigation_completed` is emitted only after successful navigate; failures emit `navigation_failed`.
+  - Wait APIs emit the `wait_*` lifecycle hooks, including failure/cancel/timeout outcomes.
+  - Session actions (`click`, `typeText`, `evaluate`) emit `action_*` hooks around each attempt.
+  - Network telemetry keeps request/response metadata, redirect chains, and per-request status timelines.
+  - `network.records(allocator, include_bodies=true)` attempts full response-body capture via protocol APIs where available.
+  - `network.frames(...)` and `network.serviceWorkers(...)` provide frame/service-worker introspection from protocol notifications.
+  - Snapshot bundles are captured per navigation phase and retrievable via `network.navigationSnapshots(...)`.
+  - `challenge_detected` (challenge heuristic became active during wait polling)
+  - `challenge_solved` (challenge heuristic transitioned back to clear)
+  - `cookie_updated` is emitted after successful `setCookie` with `change` and `source` metadata.
+  - `reload()` emits both reload hooks and navigation hooks with `cause=.reload` for symmetry.
+- Filter semantics:
+  - `filter.kinds = &.{}` subscribes to all hook kinds.
+  - `filter.domain` is case-insensitive and matches exact host or subdomain suffix.
+  - Domain extraction uses URL host for navigation/reload/network/challenge hooks and `cookie.domain` for `cookie_updated`.
+  - Domain filtering does not apply to hook kinds without URL/domain payloads (`wait_*`, `action_*`).
 
 ### Timeout + diagnostics
 
@@ -84,6 +112,15 @@ Then add the dependency import in your `build.zig` as usual.
 - `session.timeoutPolicy()`
 - `session.lastDiagnostic()`
 - `driver.modern.setHardErrorLogger(...)`
+
+### Compile-time extension hooks
+
+- `driver.extension_hooks.registerHooks(...)`
+- Hook kinds:
+  - `score_install` (adjust discovery scoring)
+  - `launch_args` (rewrite/append process args before spawn)
+  - `session_init` (notified after session protocol readiness)
+  - `event_observer` (extension event sink for explicit `notifyEvent` calls)
 
 ### Cookie/session utilities
 

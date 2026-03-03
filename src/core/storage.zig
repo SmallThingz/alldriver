@@ -11,14 +11,21 @@ pub const CookieHeaderOptions = types.CookieHeaderOptions;
 
 pub fn setCookie(session: *Session, cookie: Cookie) !void {
     if (!session.supports(.dom)) return error.UnsupportedCapability;
+    const change_kind = detectCookieChangeKind(session, cookie) catch .unknown;
+    var source: types.CookieChangeSource = .api;
     executor.setCookie(session, .{ .name = cookie.name, .value = cookie.value }, cookie.domain, cookie.path) catch |err| switch (err) {
-        error.ProtocolCommandFailed => try setCookieViaDocument(session, cookie),
+        error.ProtocolCommandFailed, error.UnsupportedProtocol => {
+            source = .document;
+            try setCookieViaDocument(session, cookie);
+        },
         else => return err,
     };
     events.emit(session, .{
         .cookie_updated = .{
             .domain = cookie.domain,
             .name = cookie.name,
+            .change = change_kind,
+            .source = source,
         },
     });
 }
@@ -39,6 +46,23 @@ fn setCookieViaDocument(session: *Session, cookie: Cookie) !void {
     defer session.allocator.free(script);
     const result = try executor.evaluate(session, script);
     defer session.allocator.free(result);
+}
+
+fn detectCookieChangeKind(session: *Session, cookie: Cookie) !types.CookieChangeKind {
+    const existing = getCookies(session, session.allocator) catch return .unknown;
+    defer freeCookies(session.allocator, existing);
+
+    for (existing) |current| {
+        if (!cookieIdentityMatches(current, cookie)) continue;
+        return .updated;
+    }
+    return .set;
+}
+
+fn cookieIdentityMatches(existing: Cookie, target: Cookie) bool {
+    if (!std.mem.eql(u8, existing.name, target.name)) return false;
+    if (!domainMatches(existing.domain, target.domain) and !domainMatches(target.domain, existing.domain)) return false;
+    return pathMatches(existing.path, target.path) and pathMatches(target.path, existing.path);
 }
 
 pub fn getCookies(session: *Session, allocator: std.mem.Allocator) ![]Cookie {

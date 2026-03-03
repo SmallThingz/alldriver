@@ -3,11 +3,20 @@ const driver = @import("alldriver");
 
 fn printEvent(event: driver.LifecycleEvent) void {
     switch (event) {
-        .navigation_started => |e| std.debug.print("event navigation_started url={s}\n", .{e.url}),
-        .navigation_completed => |e| std.debug.print("event navigation_completed url={s}\n", .{e.url}),
+        .navigation_started => |e| std.debug.print("event navigation_started url={s} cause={s}\n", .{ e.url, @tagName(e.cause) }),
+        .navigation_completed => |e| std.debug.print("event navigation_completed url={s} cause={s}\n", .{ e.url, @tagName(e.cause) }),
+        .response_received => |e| std.debug.print("event response_received url={s} status={any} observed={}\n", .{ e.url, e.status, e.observed }),
+        .dom_ready => |e| std.debug.print("event dom_ready url={s} observed={}\n", .{ e.url, e.observed }),
+        .scripts_settled => |e| std.debug.print("event scripts_settled url={s} observed={}\n", .{ e.url, e.observed }),
         .challenge_detected => |e| std.debug.print("event challenge_detected url={s} signal={s}\n", .{ e.url, e.signal }),
         .challenge_solved => |e| std.debug.print("event challenge_solved url={s}\n", .{e.url}),
-        .cookie_updated => |e| std.debug.print("event cookie_updated domain={s} name={s}\n", .{ e.domain, e.name }),
+        .cookie_updated => |e| std.debug.print("event cookie_updated domain={s} name={s} change={s} source={s}\n", .{
+            e.domain,
+            e.name,
+            @tagName(e.change),
+            @tagName(e.source),
+        }),
+        else => {},
     }
 }
 
@@ -38,7 +47,16 @@ pub fn main() !void {
     defer session.deinit();
 
     const sub_id = try session.base.onEvent(.{
-        .kinds = &.{ .navigation_started, .navigation_completed, .challenge_detected, .challenge_solved, .cookie_updated },
+        .kinds = &.{
+            .navigation_started,
+            .navigation_completed,
+            .response_received,
+            .dom_ready,
+            .scripts_settled,
+            .challenge_detected,
+            .challenge_solved,
+            .cookie_updated,
+        },
     }, printEvent);
     defer _ = session.base.offEvent(sub_id);
 
@@ -68,6 +86,23 @@ pub fn main() !void {
     const clear_challenge = try runtime.evaluate("document.title='events complete'; true;");
     defer allocator.free(clear_challenge);
     _ = try session.base.waitFor(.{ .js_truthy = "window.__event_ready__===true" }, .{ .timeout_ms = 2_000 });
+
+    var net = session.network();
+    const records = try net.records(allocator, false);
+    defer net.freeRecords(allocator, records);
+    std.debug.print("network records captured: {d}\n", .{records.len});
+
+    const frames = try net.frames(allocator);
+    defer net.freeFrames(allocator, frames);
+    std.debug.print("frames observed: {d}\n", .{frames.len});
+
+    const workers = try net.serviceWorkers(allocator);
+    defer net.freeServiceWorkers(allocator, workers);
+    std.debug.print("service workers observed: {d}\n", .{workers.len});
+
+    const snapshots = try net.navigationSnapshots(allocator);
+    defer net.freeNavigationSnapshots(allocator, snapshots);
+    std.debug.print("navigation snapshots: {d}\n", .{snapshots.len});
 
     std.debug.print("event hook demo completed\n", .{});
 }

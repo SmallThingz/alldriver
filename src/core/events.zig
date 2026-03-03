@@ -99,9 +99,27 @@ fn domainForEvent(event: types.LifecycleEvent) ?[]const u8 {
     return switch (event) {
         .navigation_started => |e| hostFromUrl(e.url),
         .navigation_completed => |e| hostFromUrl(e.url),
+        .navigation_failed => |e| hostFromUrl(e.url),
+        .reload_started => |e| hostFromUrl(e.url),
+        .reload_completed => |e| hostFromUrl(e.url),
+        .reload_failed => |e| hostFromUrl(e.url),
+        .network_request_observed => |e| hostFromUrl(e.url),
+        .network_response_observed => |e| hostFromUrl(e.url),
+        .response_received => |e| hostFromUrl(e.url),
+        .dom_ready => |e| hostFromUrl(e.url),
+        .scripts_settled => |e| hostFromUrl(e.url),
         .challenge_detected => |e| hostFromUrl(e.url),
         .challenge_solved => |e| hostFromUrl(e.url),
         .cookie_updated => |e| e.domain,
+        .wait_started,
+        .wait_satisfied,
+        .wait_timeout,
+        .wait_canceled,
+        .wait_failed,
+        .action_started,
+        .action_completed,
+        .action_failed,
+        => null,
     };
 }
 
@@ -144,7 +162,301 @@ test "domain matcher handles subdomains" {
 
 test "matchesKind accepts empty filter and exact kind" {
     const nav_event: types.LifecycleEvent = .{ .navigation_started = .{ .url = "https://example.com" } };
+    const challenge_event: types.LifecycleEvent = .{
+        .challenge_detected = .{ .url = "https://example.com/challenge", .signal = "title_challenge_heuristic" },
+    };
     try std.testing.expect(matchesKind(&.{}, nav_event));
     try std.testing.expect(matchesKind(&.{.navigation_started}, nav_event));
     try std.testing.expect(!matchesKind(&.{.cookie_updated}, nav_event));
+    try std.testing.expect(matchesKind(&.{.challenge_detected}, challenge_event));
+    try std.testing.expect(!matchesKind(&.{.challenge_solved}, challenge_event));
+}
+
+fn makeTestSession(allocator: std.mem.Allocator) !Session {
+    return .{
+        .allocator = allocator,
+        .id = 1,
+        .mode = .browser,
+        .transport = .cdp_ws,
+        .install = .{
+            .kind = .chrome,
+            .engine = .chromium,
+            .path = try allocator.dupe(u8, "test-browser"),
+            .version = null,
+            .source = .explicit,
+        },
+        .capability_set = .{
+            .dom = true,
+            .js_eval = true,
+            .network_intercept = false,
+            .tracing = false,
+            .downloads = false,
+            .bidi_events = false,
+        },
+        .adapter_kind = .cdp,
+        .endpoint = null,
+        .browsing_context_id = null,
+    };
+}
+
+const EventCapture = struct {
+    navigation_started: usize = 0,
+    network_request_observed: usize = 0,
+    wait_failed: usize = 0,
+    action_failed: usize = 0,
+    challenge_detected: usize = 0,
+    cookie_updated: usize = 0,
+};
+
+var event_capture: EventCapture = .{};
+
+fn resetEventCapture() void {
+    event_capture = .{};
+}
+
+fn captureEvent(event: types.LifecycleEvent) void {
+    switch (event) {
+        .navigation_started => event_capture.navigation_started += 1,
+        .network_request_observed => event_capture.network_request_observed += 1,
+        .wait_failed => event_capture.wait_failed += 1,
+        .action_failed => event_capture.action_failed += 1,
+        .challenge_detected => event_capture.challenge_detected += 1,
+        .cookie_updated => event_capture.cookie_updated += 1,
+        else => {},
+    }
+}
+
+test "domainForEvent extracts lifecycle domains" {
+    try std.testing.expectEqualStrings(
+        "api.example.com",
+        domainForEvent(.{
+            .navigation_started = .{ .url = "https://api.example.com/path" },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "www.example.com",
+        domainForEvent(.{
+            .navigation_completed = .{ .url = "https://www.example.com:443/" },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "api.example.com",
+        domainForEvent(.{
+            .navigation_failed = .{
+                .url = "https://api.example.com/path",
+                .error_code = "Timeout",
+            },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "example.com",
+        domainForEvent(.{
+            .reload_started = .{ .url = "https://example.com" },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "example.com",
+        domainForEvent(.{
+            .reload_completed = .{ .url = "https://example.com" },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "example.com",
+        domainForEvent(.{
+            .reload_failed = .{
+                .url = "https://example.com",
+                .error_code = "UnsupportedCapability",
+            },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "api.example.com",
+        domainForEvent(.{
+            .network_request_observed = .{
+                .request_id = "1",
+                .method = "GET",
+                .url = "https://api.example.com/v1",
+            },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "api.example.com",
+        domainForEvent(.{
+            .network_response_observed = .{
+                .request_id = "1",
+                .status = 200,
+                .url = "https://api.example.com/v1",
+            },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "challenge.example.com",
+        domainForEvent(.{
+            .challenge_detected = .{
+                .url = "https://challenge.example.com/interstitial",
+                .signal = "title_challenge_heuristic",
+            },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "challenge.example.com",
+        domainForEvent(.{
+            .challenge_solved = .{ .url = "https://challenge.example.com/home" },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "Sub.Example.Com",
+        domainForEvent(.{
+            .cookie_updated = .{ .domain = "Sub.Example.Com", .name = "sid" },
+        }).?,
+    );
+    try std.testing.expect(
+        domainForEvent(.{
+            .challenge_detected = .{ .url = "data:text/html,hello", .signal = "x" },
+        }) == null,
+    );
+    try std.testing.expect(
+        domainForEvent(.{
+            .wait_failed = .{
+                .target = .dom_ready,
+                .elapsed_ms = 10,
+                .error_code = "Timeout",
+            },
+        }) == null,
+    );
+    try std.testing.expect(
+        domainForEvent(.{
+            .action_failed = .{
+                .kind = .evaluate,
+                .error_code = "UnsupportedCapability",
+            },
+        }) == null,
+    );
+}
+
+test "emit applies domain and kind filters across expanded lifecycle kinds" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator);
+    defer session.deinit();
+
+    resetEventCapture();
+
+    const sub_id = try register(&session, .{
+        .domain = "example.com",
+        .kinds = &.{ .challenge_detected, .cookie_updated },
+    }, captureEvent);
+    defer _ = unregister(&session, sub_id);
+
+    emit(&session, .{ .challenge_detected = .{
+        .url = "https://api.example.com/challenge",
+        .signal = "title_challenge_heuristic",
+    } });
+    emit(&session, .{ .challenge_solved = .{ .url = "https://api.example.com/ok" } });
+    emit(&session, .{ .cookie_updated = .{ .domain = "Sub.Example.Com", .name = "sid" } });
+    emit(&session, .{ .cookie_updated = .{ .domain = "example.org", .name = "sid" } });
+    emit(&session, .{ .navigation_started = .{ .url = "https://example.com" } });
+
+    try std.testing.expectEqual(@as(usize, 0), event_capture.navigation_started);
+    try std.testing.expectEqual(@as(usize, 0), event_capture.network_request_observed);
+    try std.testing.expectEqual(@as(usize, 0), event_capture.wait_failed);
+    try std.testing.expectEqual(@as(usize, 0), event_capture.action_failed);
+    try std.testing.expectEqual(@as(usize, 1), event_capture.challenge_detected);
+    try std.testing.expectEqual(@as(usize, 1), event_capture.cookie_updated);
+}
+
+test "domain filter applies to network urls and excludes domainless hook kinds" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator);
+    defer session.deinit();
+
+    resetEventCapture();
+
+    const sub_id = try register(&session, .{
+        .domain = "example.com",
+        .kinds = &.{ .network_request_observed, .wait_failed, .action_failed },
+    }, captureEvent);
+    defer _ = unregister(&session, sub_id);
+
+    emit(&session, .{ .network_request_observed = .{
+        .request_id = "1",
+        .method = "GET",
+        .url = "https://api.example.com/resource",
+    } });
+    emit(&session, .{ .network_request_observed = .{
+        .request_id = "2",
+        .method = "GET",
+        .url = "https://outside.test/resource",
+    } });
+    emit(&session, .{ .wait_failed = .{
+        .target = .dom_ready,
+        .elapsed_ms = 10,
+        .error_code = "Timeout",
+    } });
+    emit(&session, .{ .action_failed = .{
+        .kind = .evaluate,
+        .error_code = "UnsupportedCapability",
+    } });
+
+    try std.testing.expectEqual(@as(usize, 1), event_capture.network_request_observed);
+    try std.testing.expectEqual(@as(usize, 0), event_capture.wait_failed);
+    try std.testing.expectEqual(@as(usize, 0), event_capture.action_failed);
+}
+
+test "register copies filter buffers and unregister removes callback" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator);
+    defer session.deinit();
+
+    resetEventCapture();
+
+    var mutable_kinds = [_]types.LifecycleEventKind{.challenge_detected};
+    var mutable_domain = try allocator.dupe(u8, "example.com");
+    defer allocator.free(mutable_domain);
+
+    const sub_id = try register(&session, .{
+        .domain = mutable_domain,
+        .kinds = &mutable_kinds,
+    }, captureEvent);
+
+    mutable_kinds[0] = .navigation_started;
+    mutable_domain[0] = 'x';
+
+    emit(&session, .{
+        .challenge_detected = .{
+            .url = "https://api.example.com/challenge",
+            .signal = "title_challenge_heuristic",
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 1), event_capture.challenge_detected);
+    try std.testing.expectEqual(@as(usize, 0), event_capture.navigation_started);
+
+    try std.testing.expect(unregister(&session, sub_id));
+    try std.testing.expect(!unregister(&session, sub_id));
+
+    emit(&session, .{
+        .challenge_detected = .{
+            .url = "https://api.example.com/challenge",
+            .signal = "title_challenge_heuristic",
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 1), event_capture.challenge_detected);
+}
+
+test "domain filtered navigation skips events without host extraction" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator);
+    defer session.deinit();
+
+    resetEventCapture();
+
+    const sub_id = try register(&session, .{
+        .domain = "example.com",
+        .kinds = &.{.navigation_started},
+    }, captureEvent);
+    defer _ = unregister(&session, sub_id);
+
+    emit(&session, .{ .navigation_started = .{ .url = "data:text/html,hello" } });
+    emit(&session, .{ .navigation_started = .{ .url = "https://api.example.com/path" } });
+
+    try std.testing.expectEqual(@as(usize, 1), event_capture.navigation_started);
 }
