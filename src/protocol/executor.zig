@@ -1593,7 +1593,7 @@ test "cdp notifications populate network/frame/service-worker telemetry" {
         \\{"method":"Target.targetCreated","params":{"targetInfo":{"targetId":"sw-1","type":"service_worker","url":"https://example.com/sw.js"}}}
     );
 
-    const records = try session.networkRecords(allocator, false);
+    const records = try session.networkRecords(allocator, true);
     defer session.freeNetworkRecords(allocator, records);
     try std.testing.expectEqual(@as(usize, 1), records.len);
     try std.testing.expectEqualStrings("r1", records[0].request_id);
@@ -1602,6 +1602,10 @@ test "cdp notifications populate network/frame/service-worker telemetry" {
     try std.testing.expectEqual(@as(usize, 1), records[0].redirects.len);
     try std.testing.expectEqual(@as(?u16, 200), records[0].final_status);
     try std.testing.expect(records[0].status_timeline.len >= 2);
+
+    const slim = try session.networkRecords(allocator, false);
+    defer session.freeNetworkRecords(allocator, slim);
+    try std.testing.expect(slim[0].request_body == null);
 
     const frames = try session.frameInfos(allocator);
     defer session.freeFrameInfos(allocator, frames);

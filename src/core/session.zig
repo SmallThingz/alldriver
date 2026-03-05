@@ -778,7 +778,6 @@ fn capturePhaseSnapshotBestEffort(self: *Session, phase: types.SnapshotPhase, ur
         network.freeSnapshot(self.allocator, &bundle);
         return;
     };
-    network.freeSnapshot(self.allocator, &bundle);
 }
 
 fn waitForResponseReceivedMilestone(self: *Session, timeout_ms: u32) bool {

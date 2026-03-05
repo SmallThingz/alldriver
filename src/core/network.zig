@@ -241,7 +241,7 @@ pub fn listNetworkRecords(
         allocator.free(out);
     }
     for (session.network_records.items, 0..) |record, idx| {
-        out[idx] = try cloneNetworkRecord(allocator, record);
+        out[idx] = try cloneNetworkRecord(allocator, record, include_bodies);
         copied = idx + 1;
     }
     session.network_lock.unlock();
@@ -367,7 +367,7 @@ pub fn captureSnapshot(
 pub fn appendNavigationSnapshot(session: *Session, bundle: types.SnapshotBundle) !void {
     session.snapshot_lock.lock();
     defer session.snapshot_lock.unlock();
-    try session.snapshots.append(session.allocator, try cloneSnapshotBundle(session.allocator, bundle));
+    try session.snapshots.append(session.allocator, bundle);
 }
 
 pub fn listNavigationSnapshots(session: *Session, allocator: std.mem.Allocator) ![]types.SnapshotBundle {
@@ -544,6 +544,7 @@ fn replaceOptionalOwnedString(
 fn cloneNetworkRecord(
     allocator: std.mem.Allocator,
     src: types.NetworkRecord,
+    include_bodies: bool,
 ) !types.NetworkRecord {
     var redirects = try allocator.alloc(types.RedirectHop, src.redirects.len);
     var redirect_copied: usize = 0;
@@ -575,8 +576,8 @@ fn cloneNetworkRecord(
         .url = try allocator.dupe(u8, src.url),
         .request_headers_json = try allocator.dupe(u8, src.request_headers_json),
         .response_headers_json = try allocator.dupe(u8, src.response_headers_json),
-        .request_body = if (src.request_body != null) try allocator.dupe(u8, src.request_body.?) else null,
-        .response_body = if (src.response_body != null) try allocator.dupe(u8, src.response_body.?) else null,
+        .request_body = if (include_bodies and src.request_body != null) try allocator.dupe(u8, src.request_body.?) else null,
+        .response_body = if (include_bodies and src.response_body != null) try allocator.dupe(u8, src.response_body.?) else null,
         .final_status = src.final_status,
         .redirects = redirects,
         .status_timeline = timeline,
@@ -1149,7 +1150,13 @@ test "network telemetry keeps request bodies, redirect timeline, and status time
         .body = "<html>ok</html>",
     });
 
-    const records = try listNetworkRecords(&session, allocator, false);
+    const slim_records = try listNetworkRecords(&session, allocator, false);
+    defer freeNetworkRecords(allocator, slim_records);
+    try std.testing.expectEqual(@as(usize, 1), slim_records.len);
+    try std.testing.expect(slim_records[0].request_body == null);
+    try std.testing.expect(slim_records[0].response_body == null);
+
+    const records = try listNetworkRecords(&session, allocator, true);
     defer freeNetworkRecords(allocator, records);
     try std.testing.expectEqual(@as(usize, 1), records.len);
     try std.testing.expectEqualStrings("req-1", records[0].request_id);
