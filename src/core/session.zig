@@ -46,6 +46,7 @@ pub const Session = struct {
     event_subscriptions: std.ArrayList(events.EventSubscription) = .empty,
     next_event_subscription_id: u64 = 1,
     challenge_active: bool = false,
+    challenge_lock: std.Thread.Mutex = .{},
     network_lock: std.Thread.Mutex = .{},
     network_records: std.ArrayList(types.NetworkRecord) = .empty,
     frames_lock: std.Thread.Mutex = .{},
@@ -148,7 +149,8 @@ pub const Session = struct {
     }
 
     pub fn reload(self: *Session) !void {
-        const url = currentUrlForLifecycle(self);
+        const url = try currentUrlForLifecycle(self);
+        defer self.allocator.free(url);
         events.emit(self, .{ .navigation_started = .{ .url = url, .cause = .reload } });
         events.emit(self, .{ .reload_started = .{ .url = url, .cause = .reload } });
         capturePhaseSnapshotBestEffort(self, .navigation_started, url);
@@ -731,10 +733,11 @@ fn elapsedSince(start_ms: i64) u32 {
     return @intCast(delta);
 }
 
-fn currentUrlForLifecycle(self: *Session) []const u8 {
+fn currentUrlForLifecycle(self: *Session) ![]u8 {
     self.state_lock.lock();
     defer self.state_lock.unlock();
-    return self.current_url orelse "";
+    if (self.current_url) |url| return self.allocator.dupe(u8, url);
+    return self.allocator.dupe(u8, "");
 }
 
 fn emitNavigationMilestones(self: *Session, url: []const u8, cause: types.NavigationCause) !void {
@@ -867,6 +870,7 @@ const SessionEventCapture = struct {
     last_navigation_completed_cause: ?types.NavigationCause = null,
     last_navigation_failed_error: ?[]const u8 = null,
     last_navigation_failed_cause: ?types.NavigationCause = null,
+    reload_url_buf: [512]u8 = [_]u8{0} ** 512,
     last_reload_url: ?[]const u8 = null,
     last_reload_failed_error: ?[]const u8 = null,
     last_wait_target: ?types.WaitTargetTag = null,
@@ -900,12 +904,16 @@ fn captureSessionEvent(event: types.LifecycleEvent) void {
         },
         .reload_started => |e| {
             session_event_capture.reload_started += 1;
-            session_event_capture.last_reload_url = e.url;
+            const copy_len = @min(e.url.len, session_event_capture.reload_url_buf.len);
+            @memcpy(session_event_capture.reload_url_buf[0..copy_len], e.url[0..copy_len]);
+            session_event_capture.last_reload_url = session_event_capture.reload_url_buf[0..copy_len];
         },
         .reload_completed => session_event_capture.reload_completed += 1,
         .reload_failed => |e| {
             session_event_capture.reload_failed += 1;
-            session_event_capture.last_reload_url = e.url;
+            const copy_len = @min(e.url.len, session_event_capture.reload_url_buf.len);
+            @memcpy(session_event_capture.reload_url_buf[0..copy_len], e.url[0..copy_len]);
+            session_event_capture.last_reload_url = session_event_capture.reload_url_buf[0..copy_len];
             session_event_capture.last_reload_failed_error = e.error_code;
         },
         .wait_started => |e| {

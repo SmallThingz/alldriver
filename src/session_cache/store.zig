@@ -39,6 +39,11 @@ pub const SessionCacheStore = struct {
 
         var entry = try parseEntry(allocator, payload);
         errdefer deinitEntry(allocator, &entry);
+        if (!std.mem.eql(u8, entry.domain, domain) or !std.mem.eql(u8, entry.profile_key, profile_key)) {
+            _ = self.invalidate(domain, profile_key) catch {};
+            deinitEntry(allocator, &entry);
+            return error.InvalidState;
+        }
 
         if (entry.expires_at_ms) |expires_at| {
             if (expires_at <= nowMs()) {
@@ -283,12 +288,14 @@ fn cachePathFor(
     domain: []const u8,
     profile_key: []const u8,
 ) ![]u8 {
-    var hasher = std.hash.Wyhash.init(0);
+    var digest: [32]u8 = undefined;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(domain);
-    hasher.update("|");
+    hasher.update(&[_]u8{0});
     hasher.update(profile_key);
-    const key = hasher.final();
-    const file_name = try std.fmt.allocPrint(allocator, "{x}.json", .{key});
+    hasher.final(&digest);
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    const file_name = try std.fmt.allocPrint(allocator, "{s}.json", .{digest_hex[0..]});
     defer allocator.free(file_name);
     return std.fs.path.join(allocator, &.{ root_dir, file_name });
 }
@@ -611,6 +618,28 @@ test "session cache payload mask supports custom combos" {
     try std.testing.expect(!mask.session_storage);
     try std.testing.expect(mask.current_url);
     try std.testing.expect(!mask.extra_headers);
+}
+
+test "session cache load rejects mismatched identity payload" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "cache-identity" });
+    defer allocator.free(root);
+
+    var store = try SessionCacheStore.open(allocator, root);
+    defer store.deinit();
+
+    const path = try cachePathFor(allocator, store.root_dir, "example.com", "default");
+    defer allocator.free(path);
+
+    const payload =
+        \\{"schema_version":1,"domain":"wrong.example","profile_key":"default","captured_at_ms":1,"expires_at_ms":null,"user_agent":"ua","cookies":[],"local_storage":[],"session_storage":[],"current_url":null,"extra_headers":[]}
+    ;
+    try atomicWriteFile(path, payload);
+
+    try std.testing.expectError(error.InvalidState, store.load(allocator, "example.com", "default"));
 }
 
 test "session cache ttl expiry invalidates on load" {

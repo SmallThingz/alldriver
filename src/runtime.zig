@@ -38,9 +38,10 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     const transport = common.transportForAdapter(adapter_kind);
     const capability_set = capabilitiesFor(opts.install.engine, adapter_kind);
     const effective_profile_dir = try resolveEffectiveProfileDir(allocator, opts.profile_mode, opts.profile_dir);
+    const should_cleanup_ephemeral_profile = opts.profile_mode == .ephemeral and opts.profile_dir == null;
     var profile_dir_owned = true;
     defer if (profile_dir_owned) allocator.free(effective_profile_dir);
-    errdefer if (opts.profile_mode == .ephemeral) {
+    errdefer if (should_cleanup_ephemeral_profile) {
         std.fs.cwd().deleteTree(effective_profile_dir) catch {};
     };
 
@@ -127,7 +128,7 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
 
     const id = session_mod.nextSessionId();
     const endpoint = try buildEndpoint(allocator, adapter_kind, id, debug_port);
-    const ephemeral_profile_dir = if (opts.profile_mode == .ephemeral) blk: {
+    const ephemeral_profile_dir = if (should_cleanup_ephemeral_profile) blk: {
         profile_dir_owned = false;
         break :blk effective_profile_dir;
     } else null;

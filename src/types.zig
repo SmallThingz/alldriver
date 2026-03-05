@@ -594,6 +594,7 @@ pub const LaunchError = error{
     UnsupportedEngine,
     SpawnFailed,
     PersistentProfileDirRequired,
+    Timeout,
 };
 
 fn browserTierForKind(kind: BrowserKind) ApiTier {

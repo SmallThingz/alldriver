@@ -168,7 +168,9 @@ fn waitNetworkIdleStep(session: *Session) !bool {
 fn waitUrlContainsStep(session: *Session, needle: []const u8) !bool {
     const payload = try evaluateForWait(session, "location.href");
     defer session.allocator.free(payload);
-    return strings.containsIgnoreCase(payload, needle);
+    const url = try extractEvaluationString(session.allocator, payload);
+    defer session.allocator.free(url);
+    return strings.containsIgnoreCase(url, needle);
 }
 
 fn waitCookieStep(session: *Session, query: types.CookieQuery) !bool {
@@ -274,15 +276,20 @@ fn maybeEmitChallengeSignals(session: *Session) !void {
     if (!session.supports(.js_eval)) return;
     const title_payload = try evaluateForWait(session, "document.title");
     defer session.allocator.free(title_payload);
+    const title = try extractEvaluationString(session.allocator, title_payload);
+    defer session.allocator.free(title);
 
-    const looks_like_challenge = strings.containsIgnoreCase(title_payload, "challenge") or
-        strings.containsIgnoreCase(title_payload, "just a moment") or
-        strings.containsIgnoreCase(title_payload, "attention required") or
-        strings.containsIgnoreCase(title_payload, "cf-chl") or
-        strings.containsIgnoreCase(title_payload, "cloudflare");
+    const looks_like_challenge = strings.containsIgnoreCase(title, "challenge") or
+        strings.containsIgnoreCase(title, "just a moment") or
+        strings.containsIgnoreCase(title, "attention required") or
+        strings.containsIgnoreCase(title, "cf-chl") or
+        strings.containsIgnoreCase(title, "cloudflare");
 
     const current_url = try currentUrl(session);
     defer session.allocator.free(current_url);
+
+    session.challenge_lock.lock();
+    defer session.challenge_lock.unlock();
 
     if (looks_like_challenge and !session.challenge_active) {
         session.challenge_active = true;
@@ -306,12 +313,25 @@ fn maybeEmitChallengeSignals(session: *Session) !void {
 fn currentUrl(session: *Session) ![]u8 {
     if (session.supports(.js_eval)) {
         const payload = try evaluateForWait(session, "location.href");
-        return payload;
+        defer session.allocator.free(payload);
+        return extractEvaluationString(session.allocator, payload);
     }
     session.state_lock.lock();
     defer session.state_lock.unlock();
     if (session.current_url) |url| return session.allocator.dupe(u8, url);
     return session.allocator.dupe(u8, "");
+}
+
+fn extractEvaluationString(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch {
+        return allocator.dupe(u8, payload);
+    };
+    defer parsed.deinit();
+    const value = extractEvaluationValue(parsed.value) orelse return allocator.dupe(u8, payload);
+    return switch (value) {
+        .string => allocator.dupe(u8, value.string),
+        else => std.json.Stringify.valueAlloc(allocator, value, .{}),
+    };
 }
 
 fn clampTimeout(poll_interval_ms: u32) u32 {

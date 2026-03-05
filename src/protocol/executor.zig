@@ -117,7 +117,7 @@ fn subscribeBidiCoreEvents(session: *Session) !void {
     const raw = callBidi(
         session,
         "session.subscribe",
-        "{\"events\":[\"network.beforeRequestSent\",\"network.responseStarted\",\"network.responseCompleted\",\"browsingContext.domContentLoaded\",\"browsingContext.load\"]}",
+        "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\",\"browsingContext.domContentLoaded\",\"browsingContext.load\"]}",
     ) catch |err| switch (err) {
         error.ProtocolCommandFailed => return,
         else => return err,
@@ -870,8 +870,7 @@ fn processBidiNotification(session: *Session, payload: []const u8) void {
         handleBidiBeforeRequest(session, params);
         return;
     }
-    if (std.mem.eql(u8, method, "network.responseStarted") or
-        std.mem.eql(u8, method, "network.responseCompleted"))
+    if (std.mem.eql(u8, method, "network.responseCompleted"))
     {
         handleBidiResponse(session, params);
         return;
@@ -933,7 +932,6 @@ fn handleCdpResponseReceived(session: *Session, params: std.json.ObjectMap) void
     const headers = stringifyObjectField(session.allocator, response, "headers") catch session.allocator.dupe(u8, "{}") catch return;
     defer session.allocator.free(headers);
 
-    session.recordNetworkStatus(request_id, status, timestampFromEvent(params, "timestamp"));
     session.emitNetworkResponseObserved(.{
         .request_id = request_id,
         .status = status,
@@ -1034,7 +1032,6 @@ fn handleBidiResponse(session: *Session, params: std.json.ObjectMap) void {
     defer session.allocator.free(headers);
     const body = jsonObjectString(response, "body");
 
-    session.recordNetworkStatus(request_id, status, nowMs());
     session.emitNetworkResponseObserved(.{
         .request_id = request_id,
         .status = status,

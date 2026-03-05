@@ -124,14 +124,17 @@ fn domainForEvent(event: types.LifecycleEvent) ?[]const u8 {
 }
 
 fn hostFromUrl(url: []const u8) ?[]const u8 {
-    const scheme = std.mem.indexOf(u8, url, "://") orelse return null;
-    const rest = url[scheme + 3 ..];
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
-    const host_port = rest[0..slash];
-    const colon = std.mem.indexOfScalar(u8, host_port, ':') orelse host_port.len;
-    const host = host_port[0..colon];
-    if (host.len == 0) return null;
-    return host;
+    const parsed = std.Uri.parse(url) catch return null;
+    const host_component = parsed.host orelse return null;
+    const raw_host = switch (host_component) {
+        .raw => |value| value,
+        .percent_encoded => |value| value,
+    };
+    if (raw_host.len == 0) return null;
+    if (raw_host.len >= 2 and raw_host[0] == '[' and raw_host[raw_host.len - 1] == ']') {
+        return raw_host[1 .. raw_host.len - 1];
+    }
+    return raw_host;
 }
 
 fn domainMatches(value: []const u8, filter: []const u8) bool {
@@ -149,6 +152,8 @@ fn freeSubscription(allocator: std.mem.Allocator, sub: EventSubscription) void {
 test "host parser extracts host" {
     try std.testing.expectEqualStrings("example.com", hostFromUrl("https://example.com/path").?);
     try std.testing.expectEqualStrings("example.com", hostFromUrl("https://example.com:443/path").?);
+    try std.testing.expectEqualStrings("2001:db8::1", hostFromUrl("https://[2001:db8::1]:443/path").?);
+    try std.testing.expectEqualStrings("example.com", hostFromUrl("https://user:pass@example.com/path?x=1").?);
     try std.testing.expect(hostFromUrl("data:text/html,hello") == null);
 }
 

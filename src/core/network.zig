@@ -233,18 +233,22 @@ pub fn listNetworkRecords(
     allocator: std.mem.Allocator,
     include_bodies: bool,
 ) ![]types.NetworkRecord {
-    session.network_lock.lock();
-    var out = try allocator.alloc(types.NetworkRecord, session.network_records.items.len);
-    var copied: usize = 0;
-    errdefer {
-        for (out[0..copied]) |*record| freeNetworkRecord(allocator, record);
-        allocator.free(out);
-    }
-    for (session.network_records.items, 0..) |record, idx| {
-        out[idx] = try cloneNetworkRecord(allocator, record, include_bodies);
-        copied = idx + 1;
-    }
-    session.network_lock.unlock();
+    const out = blk: {
+        session.network_lock.lock();
+        defer session.network_lock.unlock();
+
+        var copied_out = try allocator.alloc(types.NetworkRecord, session.network_records.items.len);
+        var copied_count: usize = 0;
+        errdefer {
+            for (copied_out[0..copied_count]) |*record| freeNetworkRecord(allocator, record);
+            allocator.free(copied_out);
+        }
+        for (session.network_records.items, 0..) |record, idx| {
+            copied_out[idx] = try cloneNetworkRecord(allocator, record, include_bodies);
+            copied_count = idx + 1;
+        }
+        break :blk copied_out;
+    };
 
     if (!include_bodies or session.transport != .cdp_ws) return out;
 
