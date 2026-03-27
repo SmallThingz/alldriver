@@ -156,3 +156,7 @@ test "discoverWebViews root API" {
 
     try std.testing.expectEqual(@as(usize, 0), runtimes.items.len);
 }
+
+test "surface coverage contracts" {
+    _ = @import("tests/surface_coverage.zig");
+}

@@ -562,53 +562,34 @@ fn realpathAllocMaybe(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn writeGeckoInsecureTlsPrefs(allocator: std.mem.Allocator, profile_dir: []const u8) !void {
-    const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
-    defer allocator.free(user_js_path);
-
-    const existing = compat.cwd().readFileAlloc(allocator, user_js_path, 1024 * 1024) catch null;
-    defer if (existing) |data| allocator.free(data);
-    const contents = if (existing) |data|
-        try std.mem.concat(allocator, u8, &.{
-            data,
-            \\user_pref("webdriver_accept_untrusted_certs", true);
-            \\user_pref("webdriver_assume_untrusted_issuer", false);
-            \\user_pref("security.cert_pinning.enforcement_level", 0);
-            \\user_pref("network.stricttransportsecurity.preloadlist", false);
-            \\user_pref("security.enterprise_roots.enabled", true);
-            \\
-        })
-    else
-        try allocator.dupe(u8,
-            \\user_pref("webdriver_accept_untrusted_certs", true);
-            \\user_pref("webdriver_assume_untrusted_issuer", false);
-            \\user_pref("security.cert_pinning.enforcement_level", 0);
-            \\user_pref("network.stricttransportsecurity.preloadlist", false);
-            \\user_pref("security.enterprise_roots.enabled", true);
-            \\
-        );
-    defer allocator.free(contents);
-    try compat.cwd().writeFile(.{ .sub_path = user_js_path, .data = contents });
+    try appendGeckoUserJsPrefs(allocator, profile_dir,
+        \\user_pref("webdriver_accept_untrusted_certs", true);
+        \\user_pref("webdriver_assume_untrusted_issuer", false);
+        \\user_pref("security.cert_pinning.enforcement_level", 0);
+        \\user_pref("network.stricttransportsecurity.preloadlist", false);
+        \\user_pref("security.enterprise_roots.enabled", true);
+        \\
+    );
 }
 
 fn writeGeckoStealthPrefs(allocator: std.mem.Allocator, profile_dir: []const u8) !void {
+    try appendGeckoUserJsPrefs(allocator, profile_dir,
+        \\user_pref("dom.webdriver.enabled", false);
+        \\user_pref("privacy.resistFingerprinting", true);
+        \\
+    );
+}
+
+fn appendGeckoUserJsPrefs(allocator: std.mem.Allocator, profile_dir: []const u8, prefs: []const u8) !void {
     const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
     defer allocator.free(user_js_path);
 
     const existing = compat.cwd().readFileAlloc(allocator, user_js_path, 1024 * 1024) catch null;
     defer if (existing) |data| allocator.free(data);
     const contents = if (existing) |data|
-        try std.mem.concat(allocator, u8, &.{
-            data,
-            \\user_pref("dom.webdriver.enabled", false);
-            \\user_pref("privacy.resistFingerprinting", true);
-            \\
-        })
+        try std.mem.concat(allocator, u8, &.{ data, prefs })
     else
-        try allocator.dupe(u8,
-            \\user_pref("dom.webdriver.enabled", false);
-            \\user_pref("privacy.resistFingerprinting", true);
-            \\
-        );
+        try allocator.dupe(u8, prefs);
     defer allocator.free(contents);
     try compat.cwd().writeFile(.{ .sub_path = user_js_path, .data = contents });
 }
@@ -685,7 +666,7 @@ fn waitForDebugEndpointReady(
 fn childExitedPosixNoHang(child: *std.process.Child) bool {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return false;
     const pid = child.id orelse return true;
-    var status: if (@import("builtin").link_libc) std.c.c_int else u32 = undefined;
+    var status: if (@import("builtin").link_libc) c_int else u32 = undefined;
     switch (std.posix.errno(std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG))) {
         .SUCCESS => {
             child.id = null;

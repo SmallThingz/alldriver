@@ -140,10 +140,6 @@ fn isWindowsHost() bool {
     };
 }
 
-fn ensureDir(path: []const u8) !void {
-    try std.fs.makeDirAbsolute(path);
-}
-
 fn ensurePath(path: []const u8) !void {
     var dir = compat.cwd();
     try dir.makePath(path);
@@ -274,14 +270,6 @@ fn writeFile(path: []const u8, contents: []const u8) !void {
 
 fn envOrDefault(name: []const u8, fallback: []const u8) []const u8 {
     return compat.getEnvVarOwned(std.heap.page_allocator, name) catch fallback;
-}
-
-fn writeFileAbs(path: []const u8, contents: []const u8) !void {
-    const dir_path = std.fs.path.dirname(path) orelse "/";
-    try compat.cwd().makePath(dir_path);
-    const f = try compat.createFileAbsolute(path, .{});
-    defer f.close(compat.io());
-    try f.writeStreamingAll(compat.io(), contents);
 }
 
 fn readFileAlloc(allocator: Allocator, path: []const u8, max: usize) ![]u8 {
@@ -892,20 +880,6 @@ const WebViewSessionProbe = struct {
     launched: bool,
 };
 
-fn canCreateIpv4TcpSocket() bool {
-    if (builtin.os.tag != .linux) return true;
-    const linux = std.os.linux;
-    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
-    switch (linux.errno(rc)) {
-        .SUCCESS => {
-            _ = linux.close(@intCast(rc));
-            return true;
-        },
-        .PERM, .ACCES => return false,
-        else => return true,
-    }
-}
-
 fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
     _ = root;
 
@@ -956,7 +930,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         },
     );
 
-    if (!canCreateIpv4TcpSocket()) {
+    if (!compat.canCreateIpv4TcpSocket()) {
         const soft_skip = allow_missing_browser or allow_launch_probe_failures;
         try report.appendSlice(allocator, "[browser_targets]\n");
         for (target_browser_kinds) |kind| {

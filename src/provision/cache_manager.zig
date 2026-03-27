@@ -527,23 +527,9 @@ fn runOneShotHttpServer(ctx: *OneShotHttpServer) void {
     };
 }
 
-fn canCreateIpv4TcpSocket() bool {
-    if (builtin.os.tag != .linux) return true;
-    const linux = std.os.linux;
-    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
-    switch (linux.errno(rc)) {
-        .SUCCESS => {
-            _ = linux.close(@intCast(rc));
-            return true;
-        },
-        .PERM, .ACCES => return false,
-        else => return true,
-    }
-}
-
 test "managed install downloads over HTTP and extracts zip without external tools" {
     const allocator = std.testing.allocator;
-    if (!canCreateIpv4TcpSocket()) return error.SkipZigTest;
+    if (!compat.canCreateIpv4TcpSocket()) return error.SkipZigTest;
 
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();

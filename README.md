@@ -25,9 +25,7 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.smp_allocator;
 
     var session = try driver.modern.launchAuto(allocator, .{
         .kinds = &.{ .chrome, .firefox, .lightpanda },

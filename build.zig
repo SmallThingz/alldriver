@@ -247,6 +247,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_tools_tests = b.addRunArtifact(tools_tests);
 
+    const script_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts_test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "alldriver", .module = mod },
+                .{ .name = "alldriver_config", .module = config.createModule() },
+            },
+        }),
+    });
+    const run_script_tests = b.addRunArtifact(script_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -256,6 +269,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_behavioral_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_tools_tests.step);
+    test_step.dependOn(&run_script_tests.step);
 
     const vm_prereq_cmd = b.addRunArtifact(tools_exe);
     vm_prereq_cmd.addArgs(&.{"vm-check-prereqs"});

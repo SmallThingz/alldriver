@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn io() std.Io {
     return std.Options.debug_io;
@@ -174,4 +175,18 @@ pub fn dirRealpathAlloc(
 pub fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) std.process.Environ.GetAllocError![]u8 {
     const threaded = std.Options.debug_threaded_io orelse return error.EnvironmentVariableMissing;
     return threaded.environ.process_environ.getAlloc(allocator, name);
+}
+
+pub fn canCreateIpv4TcpSocket() bool {
+    if (builtin.os.tag != .linux) return true;
+    const linux = std.os.linux;
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {
+            _ = linux.close(@intCast(rc));
+            return true;
+        },
+        .PERM, .ACCES => return false,
+        else => return true,
+    }
 }

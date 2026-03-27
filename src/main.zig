@@ -2,11 +2,9 @@ const std = @import("std");
 const alldriver = @import("alldriver");
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
+    const allocator = std.heap.smp_allocator;
 
-    var installs = try alldriver.discover(gpa, .{
+    var installs = try alldriver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .safari, .firefox, .brave, .tor, .duckduckgo, .mullvad, .librewolf, .epic, .arc, .vivaldi, .sigmaos, .sidekick, .shift, .operagx, .lightpanda, .palemoon },
         .allow_managed_download = false,
     }, .{});
@@ -21,9 +19,9 @@ pub fn main() !void {
 }
 
 test "simple test" {
-    const gpa = std.testing.allocator;
+    const allocator = std.testing.allocator;
     var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa);
-    try list.append(gpa, 42);
+    defer list.deinit(allocator);
+    try list.append(allocator, 42);
     try std.testing.expectEqual(@as(i32, 42), list.pop());
 }
