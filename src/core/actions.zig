@@ -4,11 +4,6 @@ const executor = @import("../protocol/executor.zig");
 pub fn navigate(session: *Session, url: []const u8) !void {
     if (!session.supports(.dom)) return error.UnsupportedCapability;
     try executor.navigate(session, url);
-
-    session.state_lock.lock();
-    defer session.state_lock.unlock();
-    if (session.current_url) |old| session.allocator.free(old);
-    session.current_url = try session.allocator.dupe(u8, url);
 }
 
 pub fn reload(session: *Session) !void {

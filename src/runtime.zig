@@ -38,7 +38,7 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     const transport = common.transportForAdapter(adapter_kind);
     const capability_set = capabilitiesFor(opts.install.engine, adapter_kind);
     const effective_profile_dir = try resolveEffectiveProfileDir(allocator, opts.profile_mode, opts.profile_dir);
-    const should_cleanup_ephemeral_profile = opts.profile_mode == .ephemeral and opts.profile_dir == null;
+    const should_cleanup_ephemeral_profile = opts.profile_mode == .ephemeral;
     var profile_dir_owned = true;
     defer if (profile_dir_owned) allocator.free(effective_profile_dir);
     errdefer if (should_cleanup_ephemeral_profile) {
@@ -498,7 +498,7 @@ fn resolveEffectiveProfileDir(
     profile_mode: types.ProfileMode,
     profile_dir: ?[]const u8,
 ) ![]u8 {
-    const effective = switch (profile_mode) {
+    const requested = switch (profile_mode) {
         .persistent => blk: {
             const configured = profile_dir orelse return error.PersistentProfileDirRequired;
             break :blk try allocator.dupe(u8, configured);
@@ -508,8 +508,10 @@ fn resolveEffectiveProfileDir(
         else
             try createEphemeralProfileDir(allocator),
     };
-    errdefer allocator.free(effective);
-    try ensureDirPathExists(effective);
+    errdefer allocator.free(requested);
+    try ensureDirPathExists(requested);
+    const effective = try realpathAllocMaybe(requested, allocator);
+    allocator.free(requested);
     return effective;
 }
 
@@ -547,6 +549,13 @@ fn tempBaseDirAlloc(allocator: std.mem.Allocator) ![]u8 {
 
 fn ensureDirPathExists(path: []const u8) !void {
     try std.fs.cwd().makePath(path);
+}
+
+fn realpathAllocMaybe(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    return std.fs.cwd().realpathAlloc(allocator, path) catch {
+        if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+        return std.fs.path.resolve(allocator, &.{path});
+    };
 }
 
 fn writeGeckoInsecureTlsPrefs(allocator: std.mem.Allocator, profile_dir: []const u8) !void {

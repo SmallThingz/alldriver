@@ -158,6 +158,7 @@ pub fn lastResponseStatusForUrl(session: *Session, url: []const u8) ?u16 {
             j -= 1;
             const hop = record.redirects[j];
             if (std.mem.eql(u8, hop.to_url, url) or std.mem.eql(u8, hop.from_url, url)) {
+                if (record.final_status) |status| return status;
                 return hop.status;
             }
         }

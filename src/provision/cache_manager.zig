@@ -132,14 +132,17 @@ pub fn installManagedBrowserWithOptions(
 
     const lock_path = try std.fs.path.join(allocator, &.{ kind_root, ".install.lock" });
     defer allocator.free(lock_path);
-    const lock_file = try std.fs.cwd().createFile(lock_path, .{ .exclusive = true, .truncate = true });
+    const lock_file = try acquireInstallLock(lock_path);
     defer {
         lock_file.close();
         std.fs.cwd().deleteFile(lock_path) catch {};
     }
 
-    const stamp = std.time.timestamp();
-    const version_dir = try std.fmt.allocPrint(allocator, "{s}/{d}", .{ kind_root, stamp });
+    var nonce_bytes: [8]u8 = undefined;
+    std.crypto.random.bytes(&nonce_bytes);
+    const nonce = std.mem.readInt(u64, &nonce_bytes, .little);
+    const stamp = std.time.nanoTimestamp();
+    const version_dir = try std.fmt.allocPrint(allocator, "{s}/{d}-{x}", .{ kind_root, stamp, nonce });
     defer allocator.free(version_dir);
     try std.fs.cwd().makePath(version_dir);
 
@@ -164,14 +167,13 @@ pub fn installManagedBrowserWithOptions(
             staged_path,
             options.archive_executable_name,
         )
-    else
-        blk: {
-            const base = std.fs.path.basename(options.executable_name orelse std.fs.path.basename(staged_path));
-            break :blk SelectedExecutable{
-                .path = try allocator.dupe(u8, staged_path),
-                .basename = try allocator.dupe(u8, base),
-            };
+    else blk: {
+        const base = std.fs.path.basename(options.executable_name orelse std.fs.path.basename(staged_path));
+        break :blk SelectedExecutable{
+            .path = try allocator.dupe(u8, staged_path),
+            .basename = try allocator.dupe(u8, base),
         };
+    };
     defer {
         allocator.free(selected.path);
         allocator.free(selected.basename);
@@ -212,8 +214,8 @@ pub fn installManagedBrowserWithOptions(
 
 fn downloadToMemory(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, url, "file://")) {
-        const local = url[7..];
-        if (local.len == 0) return error.InvalidUrl;
+        const local = try localPathFromFileUrl(allocator, url);
+        defer allocator.free(local);
         return std.fs.cwd().readFileAlloc(allocator, local, 1024 * 1024 * 256);
     }
 
@@ -235,8 +237,13 @@ fn downloadToMemory(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
 
 fn inferFileName(url: []const u8) []const u8 {
     if (std.mem.startsWith(u8, url, "file://")) {
-        const local = url[7..];
-        return std.fs.path.basename(local);
+        const end = std.mem.indexOfAny(u8, url, "?#") orelse url.len;
+        const clean = url[0..end];
+        if (std.mem.lastIndexOfScalar(u8, clean, '/')) |idx| {
+            const name = clean[idx + 1 ..];
+            if (name.len > 0) return name;
+        }
+        return "browser.bin";
     }
 
     const end = std.mem.indexOfAny(u8, url, "?#") orelse url.len;
@@ -247,6 +254,60 @@ fn inferFileName(url: []const u8) []const u8 {
     }
 
     return "browser.bin";
+}
+
+fn acquireInstallLock(lock_path: []const u8) !std.fs.File {
+    const deadline_ms = std.time.milliTimestamp() + 10_000;
+    while (true) {
+        return std.fs.cwd().createFile(lock_path, .{ .exclusive = true, .truncate = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                const stat = std.fs.cwd().statFile(lock_path) catch |stat_err| switch (stat_err) {
+                    error.FileNotFound => continue,
+                    else => return stat_err,
+                };
+                const age_ms = std.time.milliTimestamp() - @as(i64, @intCast(@divTrunc(stat.mtime, std.time.ns_per_ms)));
+                if (age_ms > 300_000) {
+                    std.fs.cwd().deleteFile(lock_path) catch {};
+                    continue;
+                }
+                if (std.time.milliTimestamp() >= deadline_ms) return err;
+                std.Thread.sleep(50 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+    }
+}
+
+fn localPathFromFileUrl(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    const uri = try std.Uri.parse(url);
+    const raw_path = switch (uri.path) {
+        .raw => |value| value,
+        .percent_encoded => |value| value,
+    };
+    const host = if (uri.host) |component| switch (component) {
+        .raw => |value| value,
+        .percent_encoded => |value| value,
+    } else null;
+
+    if (builtin.os.tag == .windows) {
+        if (host) |value| {
+            if (value.len > 0 and !std.ascii.eqlIgnoreCase(value, "localhost")) {
+                return std.fmt.allocPrint(allocator, "\\\\{s}{s}", .{ value, raw_path });
+            }
+        }
+        if (raw_path.len >= 3 and raw_path[0] == '/' and std.ascii.isAlphabetic(raw_path[1]) and raw_path[2] == ':') {
+            return allocator.dupe(u8, raw_path[1..]);
+        }
+        return allocator.dupe(u8, raw_path);
+    }
+
+    if (host) |value| {
+        if (value.len > 0 and !std.ascii.eqlIgnoreCase(value, "localhost")) {
+            return std.fmt.allocPrint(allocator, "//{s}{s}", .{ value, raw_path });
+        }
+    }
+    return allocator.dupe(u8, raw_path);
 }
 
 const SelectedExecutable = struct {

@@ -159,7 +159,7 @@ fn waitNetworkIdleStep(session: *Session) !bool {
     if (!session.supports(.js_eval)) return error.UnsupportedCapability;
     const payload = try evaluateForWait(
         session,
-        "(function(){return document.readyState==='complete' && (!window.__webdriver_active_requests || window.__webdriver_active_requests===0);})();",
+        "(function(){return document.readyState==='complete' && (!window.__alldriver_active_requests || window.__alldriver_active_requests===0);})();",
     );
     defer session.allocator.free(payload);
     return payloadContainsTruthy(payload);
@@ -288,11 +288,19 @@ fn maybeEmitChallengeSignals(session: *Session) !void {
     const current_url = try currentUrl(session);
     defer session.allocator.free(current_url);
 
+    var should_emit_detected = false;
+    var should_emit_solved = false;
     session.challenge_lock.lock();
-    defer session.challenge_lock.unlock();
-
     if (looks_like_challenge and !session.challenge_active) {
         session.challenge_active = true;
+        should_emit_detected = true;
+    } else if (!looks_like_challenge and session.challenge_active) {
+        session.challenge_active = false;
+        should_emit_solved = true;
+    }
+    session.challenge_lock.unlock();
+
+    if (should_emit_detected) {
         events.emit(session, .{
             .challenge_detected = .{
                 .url = current_url,
@@ -301,9 +309,7 @@ fn maybeEmitChallengeSignals(session: *Session) !void {
         });
         return;
     }
-
-    if (!looks_like_challenge and session.challenge_active) {
-        session.challenge_active = false;
+    if (should_emit_solved) {
         events.emit(session, .{
             .challenge_solved = .{ .url = current_url },
         });

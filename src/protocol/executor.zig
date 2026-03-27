@@ -84,6 +84,7 @@ fn initializeCdpSession(session: *Session) !void {
     try callCdpBestEffort(session, "Network.enable", "{}");
     try callCdpBestEffort(session, "Target.setDiscoverTargets", "{\"discover\":true}");
     try callCdpBestEffort(session, "ServiceWorker.enable", "{}");
+    try installNetworkActivityInstrumentation(session);
 }
 
 fn initializeBidiSession(session: *Session) !void {
@@ -102,6 +103,7 @@ fn initializeBidiSession(session: *Session) !void {
     if (try fetchFirstBidiContext(session)) |context_id| {
         try assignBrowsingContext(session, context_id);
         try subscribeBidiCoreEvents(session);
+        try installNetworkActivityInstrumentation(session);
         return;
     }
 
@@ -111,6 +113,7 @@ fn initializeBidiSession(session: *Session) !void {
     try assignBrowsingContext(session, created_context);
 
     try subscribeBidiCoreEvents(session);
+    try installNetworkActivityInstrumentation(session);
 }
 
 fn subscribeBidiCoreEvents(session: *Session) !void {
@@ -655,18 +658,25 @@ pub fn cdpCloseTarget(session: *Session, target_id: []const u8) ![]u8 {
 }
 
 fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u8 {
-    session.protocol_lock.lock();
-    defer session.protocol_lock.unlock();
+    var queued_notifications: std.ArrayList([]u8) = .empty;
+    defer freeQueuedNotifications(session.allocator, &queued_notifications);
 
+    session.protocol_lock.lock();
+    var lock_held = true;
+    defer if (lock_held) session.protocol_lock.unlock();
     const endpoint = session.endpoint orelse return error.MissingEndpoint;
     const parsed = try common.parseEndpoint(endpoint, .cdp);
     if (parsed.adapter != .cdp) return error.UnsupportedProtocol;
 
-    return callCdpOnce(session, parsed, method, params_json, false) catch |err| {
+    const payload = callCdpOnce(session, parsed, method, params_json, false, &queued_notifications) catch |err| {
         if (!isRetriableCdpTransportError(err)) return err;
         clearCdpEndpointCache(session);
-        return callCdpOnce(session, parsed, method, params_json, true);
+        return callCdpOnce(session, parsed, method, params_json, true, &queued_notifications);
     };
+    session.protocol_lock.unlock();
+    lock_held = false;
+    processQueuedCdpNotifications(session, queued_notifications.items);
+    return payload;
 }
 
 fn callCdpOnce(
@@ -675,26 +685,30 @@ fn callCdpOnce(
     method: []const u8,
     params_json: ?[]const u8,
     force_refresh_endpoint: bool,
+    queued_notifications: *std.ArrayList([]u8),
 ) ![]u8 {
     const ws_endpoint = try ensureCdpEndpoint(session, parsed, force_refresh_endpoint);
     const ws_parts = try parseWsUrl(session.allocator, ws_endpoint);
     defer session.allocator.free(ws_parts.path);
     if (cdpPathNeedsTargetSession(ws_parts.path)) {
         const client = try ensurePersistentCdpClient(session, ws_parts.host, ws_parts.port, ws_parts.path);
-        const routed_session_id = try prepareCdpRoutingSessionId(session, client, ws_parts.path, method);
-        return sendCdpRpc(session, client, method, params_json, routed_session_id, true);
+        const routed_session_id = try prepareCdpRoutingSessionId(session, client, ws_parts.path, method, queued_notifications);
+        return sendCdpRpc(session, client, method, params_json, routed_session_id, true, queued_notifications);
     }
 
     var client = try ws.Client.connect(session.allocator, ws_parts.host, ws_parts.port, ws_parts.path);
     defer client.deinit();
-    const routed_session_id = try prepareCdpRoutingSessionId(session, &client, ws_parts.path, method);
-    return sendCdpRpc(session, &client, method, params_json, routed_session_id, true);
+    const routed_session_id = try prepareCdpRoutingSessionId(session, &client, ws_parts.path, method, queued_notifications);
+    return sendCdpRpc(session, &client, method, params_json, routed_session_id, true, queued_notifications);
 }
 
 fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u8 {
-    session.protocol_lock.lock();
-    defer session.protocol_lock.unlock();
+    var queued_notifications: std.ArrayList([]u8) = .empty;
+    defer freeQueuedNotifications(session.allocator, &queued_notifications);
 
+    session.protocol_lock.lock();
+    var lock_held = true;
+    defer if (lock_held) session.protocol_lock.unlock();
     const endpoint = session.endpoint orelse return error.MissingEndpoint;
     const parsed = try common.parseEndpoint(endpoint, .bidi);
     if (parsed.adapter != .bidi) return error.UnsupportedProtocol;
@@ -716,7 +730,7 @@ fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]
         defer env.deinit(session.allocator);
         if (env.id == null or env.id.? != id) {
             if (env.id == null) {
-                processBidiNotification(session, payload);
+                queueNotificationPayload(session.allocator, &queued_notifications, payload) catch {};
             }
             session.allocator.free(payload);
             continue;
@@ -726,6 +740,9 @@ fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]
             session.allocator.free(payload);
             return error.ProtocolCommandFailed;
         }
+        session.protocol_lock.unlock();
+        lock_held = false;
+        processQueuedBidiNotifications(session, queued_notifications.items);
         return payload;
     }
 }
@@ -776,6 +793,7 @@ fn sendCdpRpc(
     params_json: ?[]const u8,
     routed_session_id: ?[]const u8,
     record_error_diagnostic: bool,
+    queued_notifications: *std.ArrayList([]u8),
 ) ![]u8 {
     const id = session.nextRequestId();
     const request = try encodeCdpRequest(session.allocator, id, method, params_json, routed_session_id);
@@ -791,7 +809,7 @@ fn sendCdpRpc(
         defer env.deinit(session.allocator);
         if (env.id == null or env.id.? != id) {
             if (env.id == null) {
-                processCdpNotification(session, payload);
+                queueNotificationPayload(session.allocator, queued_notifications, payload) catch {};
             }
             session.allocator.free(payload);
             continue;
@@ -870,8 +888,7 @@ fn processBidiNotification(session: *Session, payload: []const u8) void {
         handleBidiBeforeRequest(session, params);
         return;
     }
-    if (std.mem.eql(u8, method, "network.responseCompleted"))
-    {
+    if (std.mem.eql(u8, method, "network.responseCompleted")) {
         handleBidiResponse(session, params);
         return;
     }
@@ -952,6 +969,9 @@ fn handleCdpFrameNavigated(session: *Session, params: std.json.ObjectMap) void {
         .parent_frame_id = jsonObjectString(frame, "parentId"),
         .url = url,
     });
+    if (jsonObjectString(frame, "parentId") == null) {
+        updateCurrentUrl(session, url);
+    }
 }
 
 fn handleCdpFrameAttached(session: *Session, params: std.json.ObjectMap) void {
@@ -1049,6 +1069,81 @@ fn handleBidiContextLifecycle(session: *Session, params: std.json.ObjectMap) voi
         .parent_frame_id = null,
         .url = url,
     });
+    if (session.browsing_context_id == null or std.mem.eql(u8, session.browsing_context_id.?, context)) {
+        updateCurrentUrl(session, url);
+    }
+}
+
+fn installNetworkActivityInstrumentation(session: *Session) !void {
+    const script =
+        "(function(){" ++
+        "if(window.__alldriver_activity_installed)return true;" ++
+        "window.__alldriver_activity_installed=true;" ++
+        "let active=0;" ++
+        "Object.defineProperty(window,'__alldriver_active_requests',{configurable:true,get(){return active;}});" ++
+        "const inc=()=>{active+=1;};" ++
+        "const dec=()=>{if(active>0)active-=1;};" ++
+        "if(typeof window.fetch==='function'){" ++
+        "const origFetch=window.fetch;" ++
+        "window.fetch=function(){inc();try{const result=origFetch.apply(this,arguments);return Promise.resolve(result).finally(dec);}catch(err){dec();throw err;}};" ++
+        "}" ++
+        "if(typeof window.XMLHttpRequest==='function'){" ++
+        "const origSend=window.XMLHttpRequest.prototype.send;" ++
+        "window.XMLHttpRequest.prototype.send=function(){inc();this.addEventListener('loadend',dec,{once:true});return origSend.apply(this,arguments);};" ++
+        "}" ++
+        "return true;" ++
+        "})();";
+
+    switch (session.transport) {
+        .cdp_ws => {
+            const source = try json_util.escapeJsonString(session.allocator, script);
+            defer session.allocator.free(source);
+            const preload_params = try std.fmt.allocPrint(session.allocator, "{{\"source\":\"{s}\"}}", .{source});
+            defer session.allocator.free(preload_params);
+            try callCdpBestEffort(session, "Page.addScriptToEvaluateOnNewDocument", preload_params);
+
+            const eval_params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"expression\":\"{s}\",\"returnByValue\":true}}",
+                .{source},
+            );
+            defer session.allocator.free(eval_params);
+            try callCdpBestEffort(session, "Runtime.evaluate", eval_params);
+        },
+        .bidi_ws => {
+            const context_id = session.browsing_context_id orelse return;
+            const declaration_raw = try std.fmt.allocPrint(session.allocator, "() => {{ {s} }}", .{script});
+            defer session.allocator.free(declaration_raw);
+            const declaration = try json_util.escapeJsonString(session.allocator, declaration_raw);
+            defer session.allocator.free(declaration);
+            const preload_params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"functionDeclaration\":\"{s}\",\"contexts\":[\"{s}\"]}}",
+                .{ declaration, context_id },
+            );
+            defer session.allocator.free(preload_params);
+            const preload_raw = callBidi(session, "script.addPreloadScript", preload_params) catch null;
+            if (preload_raw) |payload| session.allocator.free(payload);
+
+            const expression = try json_util.escapeJsonString(session.allocator, script);
+            defer session.allocator.free(expression);
+            const eval_params = try std.fmt.allocPrint(
+                session.allocator,
+                "{{\"target\":{{\"context\":\"{s}\"}},\"expression\":\"{s}\",\"awaitPromise\":true,\"resultOwnership\":\"none\"}}",
+                .{ context_id, expression },
+            );
+            defer session.allocator.free(eval_params);
+            const eval_raw = callBidi(session, "script.evaluate", eval_params) catch null;
+            if (eval_raw) |payload| session.allocator.free(payload);
+        },
+    }
+}
+
+fn updateCurrentUrl(session: *Session, url: []const u8) void {
+    session.state_lock.lock();
+    defer session.state_lock.unlock();
+    if (session.current_url) |old| session.allocator.free(old);
+    session.current_url = session.allocator.dupe(u8, url) catch null;
 }
 
 fn stringifyObjectField(
@@ -1121,10 +1216,11 @@ fn prepareCdpRoutingSessionId(
     client: *ws.Client,
     ws_path: []const u8,
     method: []const u8,
+    queued_notifications: *std.ArrayList([]u8),
 ) !?[]const u8 {
     if (!cdpPathNeedsTargetSession(ws_path)) return null;
     if (!cdpMethodNeedsTargetSession(method)) return null;
-    return try createAttachedCdpSession(session, client);
+    return try createAttachedCdpSession(session, client, queued_notifications);
 }
 
 fn cdpPathNeedsTargetSession(path: []const u8) bool {
@@ -1137,27 +1233,35 @@ fn cdpMethodNeedsTargetSession(method: []const u8) bool {
     return true;
 }
 
-fn createAttachedCdpSession(session: *Session, client: *ws.Client) ![]const u8 {
+fn createAttachedCdpSession(
+    session: *Session,
+    client: *ws.Client,
+    queued_notifications: *std.ArrayList([]u8),
+) ![]const u8 {
     if (session.cdp_attached_session_id) |attached| return attached;
-    const target_id = try ensurePinnedCdpTargetId(session, client);
-    const attached_session_id = attachToTargetAndGetSessionId(session, client, target_id) catch {
+    const target_id = try ensurePinnedCdpTargetId(session, client, queued_notifications);
+    const attached_session_id = attachToTargetAndGetSessionId(session, client, target_id, queued_notifications) catch {
         clearPinnedCdpTargetId(session);
-        const refreshed_target_id = try ensurePinnedCdpTargetId(session, client);
-        return attachToTargetAndGetSessionId(session, client, refreshed_target_id);
+        const refreshed_target_id = try ensurePinnedCdpTargetId(session, client, queued_notifications);
+        return attachToTargetAndGetSessionId(session, client, refreshed_target_id, queued_notifications);
     };
     session.cdp_attached_session_id = attached_session_id;
-    primeAttachedCdpSession(session, client, attached_session_id);
+    primeAttachedCdpSession(session, client, attached_session_id, queued_notifications);
     return attached_session_id;
 }
 
-fn ensurePinnedCdpTargetId(session: *Session, client: *ws.Client) ![]const u8 {
+fn ensurePinnedCdpTargetId(
+    session: *Session,
+    client: *ws.Client,
+    queued_notifications: *std.ArrayList([]u8),
+) ![]const u8 {
     if (session.cdp_target_id) |target_id| return target_id;
-    if (try firstNavigableTargetId(session, client)) |target_id| {
+    if (try firstNavigableTargetId(session, client, queued_notifications)) |target_id| {
         errdefer session.allocator.free(target_id);
         session.cdp_target_id = target_id;
         return target_id;
     }
-    const target_id = try createBlankTargetId(session, client);
+    const target_id = try createBlankTargetId(session, client, queued_notifications);
     errdefer session.allocator.free(target_id);
     session.cdp_target_id = target_id;
     return target_id;
@@ -1174,19 +1278,32 @@ fn clearPinnedCdpTargetId(session: *Session) void {
     }
 }
 
-fn firstNavigableTargetId(session: *Session, client: *ws.Client) !?[]u8 {
-    const payload = try sendCdpRpc(session, client, "Target.getTargets", "{}", null, false);
+fn firstNavigableTargetId(
+    session: *Session,
+    client: *ws.Client,
+    queued_notifications: *std.ArrayList([]u8),
+) !?[]u8 {
+    const payload = try sendCdpRpc(session, client, "Target.getTargets", "{}", null, false, queued_notifications);
     defer session.allocator.free(payload);
     return extractNavigableTargetIdFromTargetsPayload(session.allocator, payload);
 }
 
-fn createBlankTargetId(session: *Session, client: *ws.Client) ![]u8 {
-    const payload = try sendCdpRpc(session, client, "Target.createTarget", "{\"url\":\"about:blank\"}", null, false);
+fn createBlankTargetId(
+    session: *Session,
+    client: *ws.Client,
+    queued_notifications: *std.ArrayList([]u8),
+) ![]u8 {
+    const payload = try sendCdpRpc(session, client, "Target.createTarget", "{\"url\":\"about:blank\"}", null, false, queued_notifications);
     defer session.allocator.free(payload);
     return extractJsonStringAtPath(session.allocator, payload, "result", "targetId");
 }
 
-fn attachToTargetAndGetSessionId(session: *Session, client: *ws.Client, target_id: []const u8) ![]u8 {
+fn attachToTargetAndGetSessionId(
+    session: *Session,
+    client: *ws.Client,
+    target_id: []const u8,
+    queued_notifications: *std.ArrayList([]u8),
+) ![]u8 {
     const escaped_target = try json_util.escapeJsonString(session.allocator, target_id);
     defer session.allocator.free(escaped_target);
     const params = try std.fmt.allocPrint(
@@ -1195,19 +1312,49 @@ fn attachToTargetAndGetSessionId(session: *Session, client: *ws.Client, target_i
         .{escaped_target},
     );
     defer session.allocator.free(params);
-    const payload = try sendCdpRpc(session, client, "Target.attachToTarget", params, null, false);
+    const payload = try sendCdpRpc(session, client, "Target.attachToTarget", params, null, false, queued_notifications);
     defer session.allocator.free(payload);
     return extractJsonStringAtPath(session.allocator, payload, "result", "sessionId");
 }
 
-fn primeAttachedCdpSession(session: *Session, client: *ws.Client, attached_session_id: []const u8) void {
+fn primeAttachedCdpSession(
+    session: *Session,
+    client: *ws.Client,
+    attached_session_id: []const u8,
+    queued_notifications: *std.ArrayList([]u8),
+) void {
     const methods = [_][]const u8{
         "Page.enable",
         "Runtime.enable",
     };
     for (methods) |method| {
-        const payload = sendCdpRpc(session, client, method, "{}", attached_session_id, false) catch continue;
+        const payload = sendCdpRpc(session, client, method, "{}", attached_session_id, false, queued_notifications) catch continue;
         session.allocator.free(payload);
+    }
+}
+
+fn queueNotificationPayload(
+    allocator: std.mem.Allocator,
+    queued_notifications: *std.ArrayList([]u8),
+    payload: []const u8,
+) !void {
+    try queued_notifications.append(allocator, try allocator.dupe(u8, payload));
+}
+
+fn freeQueuedNotifications(allocator: std.mem.Allocator, queued_notifications: *std.ArrayList([]u8)) void {
+    for (queued_notifications.items) |payload| allocator.free(payload);
+    queued_notifications.deinit(allocator);
+}
+
+fn processQueuedCdpNotifications(session: *Session, queued_notifications: []const []u8) void {
+    for (queued_notifications) |payload| {
+        processCdpNotification(session, payload);
+    }
+}
+
+fn processQueuedBidiNotifications(session: *Session, queued_notifications: []const []u8) void {
+    for (queued_notifications) |payload| {
+        processBidiNotification(session, payload);
     }
 }
 
@@ -1572,6 +1719,28 @@ fn makeNotificationTestSession(
     };
 }
 
+var notification_callback_saw_unlocked_protocol: bool = false;
+var notification_callback_session: ?*Session = null;
+
+fn resetNotificationCallbackState() void {
+    notification_callback_saw_unlocked_protocol = false;
+    notification_callback_session = null;
+}
+
+fn captureNotificationLifecycleEvent(event: types.LifecycleEvent) void {
+    switch (event) {
+        .network_request_observed => {
+            if (notification_callback_session) |session| {
+                if (session.protocol_lock.tryLock()) {
+                    session.protocol_lock.unlock();
+                    notification_callback_saw_unlocked_protocol = true;
+                }
+            }
+        },
+        else => {},
+    }
+}
+
 test "cdp notifications populate network/frame/service-worker telemetry" {
     const allocator = std.testing.allocator;
     var session = try makeNotificationTestSession(allocator, .cdp_ws, .chromium);
@@ -1608,6 +1777,8 @@ test "cdp notifications populate network/frame/service-worker telemetry" {
     defer session.freeFrameInfos(allocator, frames);
     try std.testing.expectEqual(@as(usize, 1), frames.len);
     try std.testing.expectEqualStrings("root", frames[0].frame_id);
+    try std.testing.expect(session.current_url != null);
+    try std.testing.expectEqualStrings("https://example.com/next", session.current_url.?);
 
     const workers = try session.serviceWorkerInfos(allocator);
     defer session.freeServiceWorkerInfos(allocator, workers);
@@ -1640,4 +1811,32 @@ test "bidi notifications populate network and frame telemetry" {
     defer session.freeFrameInfos(allocator, frames);
     try std.testing.expectEqual(@as(usize, 1), frames.len);
     try std.testing.expectEqualStrings("ctx-main", frames[0].frame_id);
+    try std.testing.expect(session.current_url != null);
+    try std.testing.expectEqualStrings("https://example.org/a", session.current_url.?);
+}
+
+test "queued notification processing happens outside protocol lock" {
+    const allocator = std.testing.allocator;
+    var session = try makeNotificationTestSession(allocator, .cdp_ws, .chromium);
+    defer session.deinit();
+
+    const subscription_id = try session.onEvent(
+        .{ .kinds = &.{.network_request_observed} },
+        captureNotificationLifecycleEvent,
+    );
+    defer _ = session.offEvent(subscription_id);
+    resetNotificationCallbackState();
+    notification_callback_session = &session;
+
+    var queued_notifications: std.ArrayList([]u8) = .empty;
+    defer freeQueuedNotifications(allocator, &queued_notifications);
+    try queueNotificationPayload(allocator, &queued_notifications,
+        \\{"method":"Network.requestWillBeSent","params":{"requestId":"r2","request":{"url":"https://example.com/queued","method":"GET","headers":{"accept":"*/*"}}}}
+    );
+
+    session.protocol_lock.lock();
+    session.protocol_lock.unlock();
+    processQueuedCdpNotifications(&session, queued_notifications.items);
+
+    try std.testing.expect(notification_callback_saw_unlocked_protocol);
 }

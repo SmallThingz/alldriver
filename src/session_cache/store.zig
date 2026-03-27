@@ -8,9 +8,9 @@ pub const SessionCacheStore = struct {
     root_dir: []u8,
 
     pub fn open(allocator: std.mem.Allocator, root_dir: []const u8) !SessionCacheStore {
-        const owned_root = try allocator.dupe(u8, root_dir);
+        try std.fs.cwd().makePath(root_dir);
+        const owned_root = try std.fs.cwd().realpathAlloc(allocator, root_dir);
         errdefer allocator.free(owned_root);
-        try std.fs.cwd().makePath(owned_root);
         return .{
             .allocator = allocator,
             .root_dir = owned_root,
@@ -37,12 +37,18 @@ pub const SessionCacheStore = struct {
         };
         defer allocator.free(payload);
 
-        var entry = try parseEntry(allocator, payload);
+        var entry = parseEntry(allocator, payload) catch |err| switch (err) {
+            error.CorruptEntry, error.IncompatibleSchema => {
+                _ = self.invalidate(domain, profile_key) catch {};
+                return null;
+            },
+            else => return err,
+        };
         errdefer deinitEntry(allocator, &entry);
         if (!std.mem.eql(u8, entry.domain, domain) or !std.mem.eql(u8, entry.profile_key, profile_key)) {
             _ = self.invalidate(domain, profile_key) catch {};
             deinitEntry(allocator, &entry);
-            return error.InvalidState;
+            return null;
         }
 
         if (entry.expires_at_ms) |expires_at| {
@@ -76,7 +82,7 @@ pub const SessionCacheStore = struct {
         defer self.allocator.free(path);
 
         if (!force_refresh) {
-            if (try self.load(self.allocator, entry.domain, entry.profile_key)) |existing| {
+            if (self.load(self.allocator, entry.domain, entry.profile_key) catch null) |existing| {
                 var mutable = existing;
                 deinitEntry(self.allocator, &mutable);
                 return;
@@ -122,7 +128,11 @@ pub const SessionCacheStore = struct {
             const payload = readFileAlloc(self.allocator, file_path, 8 * 1024 * 1024) catch continue;
             defer self.allocator.free(payload);
 
-            const expires = parseExpiresFromPayload(self.allocator, payload) catch continue;
+            const expires = parseExpiresFromPayload(self.allocator, payload) catch {
+                std.fs.cwd().deleteFile(file_path) catch {};
+                removed += 1;
+                continue;
+            };
             if (expires) |expires_at| {
                 if (expires_at <= nowMs()) {
                     std.fs.cwd().deleteFile(file_path) catch continue;
@@ -639,7 +649,8 @@ test "session cache load rejects mismatched identity payload" {
     ;
     try atomicWriteFile(path, payload);
 
-    try std.testing.expectError(error.InvalidState, store.load(allocator, "example.com", "default"));
+    const loaded = try store.load(allocator, "example.com", "default");
+    try std.testing.expect(loaded == null);
 }
 
 test "session cache ttl expiry invalidates on load" {

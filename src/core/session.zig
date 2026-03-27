@@ -33,11 +33,16 @@ pub const Session = struct {
     request_id_lock: std.Thread.Mutex = .{},
     protocol_lock: std.Thread.Mutex = .{},
     timeout_policy: types.TimeoutPolicy = .{},
+    diagnostic_lock: std.Thread.Mutex = .{},
     last_diagnostic_value: ?types.Diagnostic = null,
+    diagnostic_owned_strings: std.ArrayList([]u8) = .empty,
 
     child: ?std.process.Child = null,
     owned_argv: ?[]const []const u8 = null,
     ephemeral_profile_dir: ?[]u8 = null,
+    async_lock: std.Thread.Mutex = .{},
+    async_cond: std.Thread.Condition = .{},
+    active_async_ops: usize = 0,
 
     rules: std.ArrayList(types.NetworkRule) = .empty,
     on_request: ?*const fn (types.RequestEvent) void = null,
@@ -57,6 +62,12 @@ pub const Session = struct {
     snapshots: std.ArrayList(types.SnapshotBundle) = .empty,
 
     pub fn deinit(self: *Session) void {
+        self.async_lock.lock();
+        while (self.active_async_ops != 0) {
+            self.async_cond.wait(&self.async_lock);
+        }
+        self.async_lock.unlock();
+
         if (self.child) |*child| {
             _ = child.kill() catch {};
         }
@@ -91,6 +102,8 @@ pub const Session = struct {
         network.deinitTelemetry(self);
 
         self.clearDiagnostic();
+        for (self.diagnostic_owned_strings.items) |value| self.allocator.free(value);
+        self.diagnostic_owned_strings.deinit(self.allocator);
 
         self.allocator.free(self.install.path);
         if (self.install.version) |version| self.allocator.free(version);
@@ -122,7 +135,7 @@ pub const Session = struct {
 
     pub fn navigate(self: *Session, url: []const u8) !void {
         events.emit(self, .{ .navigation_started = .{ .url = url, .cause = .navigate } });
-        capturePhaseSnapshotBestEffort(self, .navigation_started, url);
+        capturePhaseSnapshotBestEffort(self, .navigation_started, null);
         const started = std.time.milliTimestamp();
         actions.navigate(self, url) catch |err| {
             self.recordDiagnostic(.{
@@ -139,13 +152,15 @@ pub const Session = struct {
                     .cause = .navigate,
                 },
             });
-            capturePhaseSnapshotBestEffort(self, .navigation_failed, url);
+            capturePhaseSnapshotBestEffort(self, .navigation_failed, null);
             return err;
         };
         try emitNavigationMilestones(self, url, .navigate);
         self.clearDiagnostic();
-        events.emit(self, .{ .navigation_completed = .{ .url = url, .cause = .navigate } });
-        capturePhaseSnapshotBestEffort(self, .navigation_completed, url);
+        const completed_url = try currentUrlForLifecycle(self);
+        defer self.allocator.free(completed_url);
+        events.emit(self, .{ .navigation_completed = .{ .url = completed_url, .cause = .navigate } });
+        capturePhaseSnapshotBestEffort(self, .navigation_completed, null);
     }
 
     pub fn reload(self: *Session) !void {
@@ -153,7 +168,7 @@ pub const Session = struct {
         defer self.allocator.free(url);
         events.emit(self, .{ .navigation_started = .{ .url = url, .cause = .reload } });
         events.emit(self, .{ .reload_started = .{ .url = url, .cause = .reload } });
-        capturePhaseSnapshotBestEffort(self, .navigation_started, url);
+        capturePhaseSnapshotBestEffort(self, .navigation_started, null);
         const started = std.time.milliTimestamp();
         actions.reload(self) catch |err| {
             self.recordDiagnostic(.{
@@ -177,14 +192,16 @@ pub const Session = struct {
                     .cause = .reload,
                 },
             });
-            capturePhaseSnapshotBestEffort(self, .navigation_failed, url);
+            capturePhaseSnapshotBestEffort(self, .navigation_failed, null);
             return err;
         };
         try emitNavigationMilestones(self, url, .reload);
         self.clearDiagnostic();
-        events.emit(self, .{ .reload_completed = .{ .url = url, .cause = .reload } });
-        events.emit(self, .{ .navigation_completed = .{ .url = url, .cause = .reload } });
-        capturePhaseSnapshotBestEffort(self, .navigation_completed, url);
+        const reloaded_url = try currentUrlForLifecycle(self);
+        defer self.allocator.free(reloaded_url);
+        events.emit(self, .{ .reload_completed = .{ .url = reloaded_url, .cause = .reload } });
+        events.emit(self, .{ .navigation_completed = .{ .url = reloaded_url, .cause = .reload } });
+        capturePhaseSnapshotBestEffort(self, .navigation_completed, null);
     }
 
     pub fn click(self: *Session, selector: []const u8) !void {
@@ -392,16 +409,23 @@ pub const Session = struct {
     }
 
     pub fn lastDiagnostic(self: *const Session) ?types.Diagnostic {
+        @constCast(&self.diagnostic_lock).lock();
+        defer @constCast(&self.diagnostic_lock).unlock();
         return self.last_diagnostic_value;
     }
 
     pub fn recordDiagnostic(self: *Session, diag: types.Diagnostic) void {
-        self.clearDiagnostic();
         const code = self.allocator.dupe(u8, diag.code) catch return;
         errdefer self.allocator.free(code);
         const message = self.allocator.dupe(u8, diag.message) catch return;
         errdefer self.allocator.free(message);
         const transport = if (diag.transport) |t| self.allocator.dupe(u8, t) catch null else null;
+
+        self.diagnostic_lock.lock();
+        defer self.diagnostic_lock.unlock();
+        self.diagnostic_owned_strings.append(self.allocator, code) catch return;
+        self.diagnostic_owned_strings.append(self.allocator, message) catch return;
+        if (transport) |value| self.diagnostic_owned_strings.append(self.allocator, value) catch return;
         self.last_diagnostic_value = .{
             .phase = diag.phase,
             .code = code,
@@ -419,12 +443,9 @@ pub const Session = struct {
     }
 
     pub fn clearDiagnostic(self: *Session) void {
-        if (self.last_diagnostic_value) |diag| {
-            self.allocator.free(diag.code);
-            self.allocator.free(diag.message);
-            if (diag.transport) |transport| self.allocator.free(transport);
-            self.last_diagnostic_value = null;
-        }
+        self.diagnostic_lock.lock();
+        defer self.diagnostic_lock.unlock();
+        self.last_diagnostic_value = null;
     }
 
     pub fn setCookie(self: *Session, cookie: storage.Cookie) !void {
@@ -444,6 +465,8 @@ pub const Session = struct {
     }
 
     pub fn navigateAsync(self: *Session, url: []const u8) !*async_mod.AsyncResult(void) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             url: []u8,
@@ -462,6 +485,7 @@ pub const Session = struct {
             fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
                 const c: *Ctx = @ptrCast(@alignCast(p));
                 a.free(c.url);
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -470,6 +494,8 @@ pub const Session = struct {
     }
 
     pub fn clickAsync(self: *Session, selector: []const u8) !*async_mod.AsyncResult(void) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             selector: []u8,
@@ -485,6 +511,7 @@ pub const Session = struct {
             fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
                 const c: *Ctx = @ptrCast(@alignCast(p));
                 a.free(c.selector);
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -493,6 +520,8 @@ pub const Session = struct {
     }
 
     pub fn typeTextAsync(self: *Session, selector: []const u8, text: []const u8) !*async_mod.AsyncResult(void) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             selector: []u8,
@@ -514,6 +543,7 @@ pub const Session = struct {
                 const c: *Ctx = @ptrCast(@alignCast(p));
                 a.free(c.selector);
                 a.free(c.text);
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -522,6 +552,8 @@ pub const Session = struct {
     }
 
     pub fn evaluateAsync(self: *Session, script: []const u8) !*async_mod.AsyncResult([]u8) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             script: []u8,
@@ -537,6 +569,7 @@ pub const Session = struct {
             fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
                 const c: *Ctx = @ptrCast(@alignCast(p));
                 a.free(c.script);
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -549,6 +582,8 @@ pub const Session = struct {
         target: types.WaitTarget,
         opts: types.WaitOptions,
     ) !*async_mod.AsyncResult(types.WaitResult) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             target: types.WaitTarget,
@@ -578,6 +613,7 @@ pub const Session = struct {
                 const c: *Ctx = @ptrCast(@alignCast(p));
                 freeWaitTarget(a, c.target);
                 if (c.owned_cancel_token) |token| a.destroy(token);
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -607,6 +643,8 @@ pub const Session = struct {
     }
 
     pub fn screenshotAsync(self: *Session, format: artifacts.ScreenshotFormat) !*async_mod.AsyncResult([]u8) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             format: artifacts.ScreenshotFormat,
@@ -621,6 +659,7 @@ pub const Session = struct {
             }
             fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
                 const c: *Ctx = @ptrCast(@alignCast(p));
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -629,6 +668,8 @@ pub const Session = struct {
     }
 
     pub fn startTracingAsync(self: *Session) !*async_mod.AsyncResult(void) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct { session: *Session };
         const ctx = try self.allocator.create(Ctx);
         ctx.* = .{ .session = self };
@@ -640,6 +681,7 @@ pub const Session = struct {
             }
             fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
                 const c: *Ctx = @ptrCast(@alignCast(p));
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -648,6 +690,8 @@ pub const Session = struct {
     }
 
     pub fn stopTracingAsync(self: *Session) !*async_mod.AsyncResult([]u8) {
+        beginAsyncOp(self);
+        errdefer endAsyncOp(self);
         const Ctx = struct { session: *Session };
         const ctx = try self.allocator.create(Ctx);
         ctx.* = .{ .session = self };
@@ -659,6 +703,7 @@ pub const Session = struct {
             }
             fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
                 const c: *Ctx = @ptrCast(@alignCast(p));
+                endAsyncOp(c.session);
                 a.destroy(c);
             }
         };
@@ -666,6 +711,20 @@ pub const Session = struct {
         return async_mod.AsyncResult([]u8).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 };
+
+fn beginAsyncOp(self: *Session) void {
+    self.async_lock.lock();
+    defer self.async_lock.unlock();
+    self.active_async_ops += 1;
+}
+
+fn endAsyncOp(self: *Session) void {
+    self.async_lock.lock();
+    defer self.async_lock.unlock();
+    if (self.active_async_ops == 0) return;
+    self.active_async_ops -= 1;
+    if (self.active_async_ops == 0) self.async_cond.broadcast();
+}
 
 fn freeInterceptAction(allocator: std.mem.Allocator, action: types.InterceptAction) void {
     switch (action) {
@@ -741,41 +800,44 @@ fn currentUrlForLifecycle(self: *Session) ![]u8 {
 }
 
 fn emitNavigationMilestones(self: *Session, url: []const u8, cause: types.NavigationCause) !void {
+    const actual_url = try currentUrlForLifecycle(self);
+    defer self.allocator.free(actual_url);
+    const milestone_url = if (actual_url.len > 0) actual_url else url;
     const timeout_ms = self.timeout_policy.navigate_ms;
     const response_observed = waitForResponseReceivedMilestone(self, timeout_ms);
-    const response_status = network.lastResponseStatusForUrl(self, url);
+    const response_status = network.lastResponseStatusForUrl(self, milestone_url);
     events.emit(self, .{
         .response_received = .{
-            .url = url,
+            .url = milestone_url,
             .cause = cause,
             .status = response_status,
             .observed = response_observed,
         },
     });
-    capturePhaseSnapshotBestEffort(self, .response_received, url);
+    capturePhaseSnapshotBestEffort(self, .response_received, null);
 
     const dom_ready_observed = waitForDomReadyMilestone(self, timeout_ms);
     events.emit(self, .{
         .dom_ready = .{
-            .url = url,
+            .url = milestone_url,
             .cause = cause,
             .observed = dom_ready_observed,
         },
     });
-    capturePhaseSnapshotBestEffort(self, .dom_ready, url);
+    capturePhaseSnapshotBestEffort(self, .dom_ready, null);
 
     const scripts_settled_observed = waitForScriptsSettledMilestone(self, timeout_ms);
     events.emit(self, .{
         .scripts_settled = .{
-            .url = url,
+            .url = milestone_url,
             .cause = cause,
             .observed = scripts_settled_observed,
         },
     });
-    capturePhaseSnapshotBestEffort(self, .scripts_settled, url);
+    capturePhaseSnapshotBestEffort(self, .scripts_settled, null);
 }
 
-fn capturePhaseSnapshotBestEffort(self: *Session, phase: types.SnapshotPhase, url: []const u8) void {
+fn capturePhaseSnapshotBestEffort(self: *Session, phase: types.SnapshotPhase, url: ?[]const u8) void {
     var bundle = network.captureSnapshot(self, self.allocator, phase, url) catch return;
     network.appendNavigationSnapshot(self, bundle) catch {
         network.freeSnapshot(self.allocator, &bundle);
@@ -813,7 +875,7 @@ fn waitForScriptsSettledMilestone(self: *Session, timeout_ms: u32) bool {
     while (elapsedSince(start) < max_wait_ms) {
         const payload = executor.evaluate(
             self,
-            "(function(){const ready=document.readyState==='complete'; const noReq=(!window.__webdriver_active_requests||window.__webdriver_active_requests===0); return ready && noReq;})();",
+            "(function(){const ready=document.readyState==='complete'; const noReq=(!window.__alldriver_active_requests||window.__alldriver_active_requests===0); return ready && noReq;})();",
         ) catch return false;
         defer self.allocator.free(payload);
         if (std.mem.indexOf(u8, payload, "true") != null) return true;
