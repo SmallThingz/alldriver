@@ -788,9 +788,7 @@ fn freeWaitTarget(allocator: std.mem.Allocator, target: types.WaitTarget) void {
 }
 
 fn elapsedSince(start_ms: i64) u32 {
-    const delta = compat.milliTimestamp() - start_ms;
-    if (delta <= 0) return 0;
-    return @intCast(delta);
+    return compat.elapsedSinceMs(start_ms);
 }
 
 fn currentUrlForLifecycle(self: *Session) ![]u8 {

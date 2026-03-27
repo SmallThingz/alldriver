@@ -213,16 +213,8 @@ pub fn downloadLightpandaLatest(
 }
 
 fn cloneLaunchOptions(allocator: std.mem.Allocator, opts: types.LaunchOptions) !types.LaunchOptions {
-    var args = try allocator.alloc([]const u8, opts.args.len);
-    var args_copied: usize = 0;
-    errdefer {
-        for (args[0..args_copied]) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
-    for (opts.args) |arg| {
-        args[args_copied] = try allocator.dupe(u8, arg);
-        args_copied += 1;
-    }
+    const args = try cloneArgSlice(allocator, opts.args);
+    errdefer freeArgSlice(allocator, args);
 
     const install_path = try allocator.dupe(u8, opts.install.path);
     errdefer allocator.free(install_path);
@@ -262,16 +254,8 @@ fn cloneElectronLaunchOptions(
     allocator: std.mem.Allocator,
     opts: types.ElectronWebViewLaunchOptions,
 ) !types.ElectronWebViewLaunchOptions {
-    var args = try allocator.alloc([]const u8, opts.args.len);
-    var args_copied: usize = 0;
-    errdefer {
-        for (args[0..args_copied]) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
-    for (opts.args) |arg| {
-        args[args_copied] = try allocator.dupe(u8, arg);
-        args_copied += 1;
-    }
+    const args = try cloneArgSlice(allocator, opts.args);
+    errdefer freeArgSlice(allocator, args);
 
     const executable_path = try allocator.dupe(u8, opts.executable_path);
     errdefer allocator.free(executable_path);

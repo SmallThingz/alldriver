@@ -289,13 +289,6 @@ fn runOneShotCookieServer(ctx: *OneShotCookieServer) void {
     };
 }
 
-fn findCookieValue(cookies: []const driver.Cookie, name: []const u8) ?[]const u8 {
-    for (cookies) |cookie| {
-        if (std.mem.eql(u8, cookie.name, name)) return cookie.value;
-    }
-    return null;
-}
-
 test "behavioral browser smoke matrix modern-only (opt-in)" {
     if (!helpers.envEnabled("ALLDRIVER_BEHAVIORAL")) return error.SkipZigTest;
 
@@ -471,10 +464,10 @@ test "lightpanda cdp navigation and cookie extraction (opt-in)" {
     const cookies = try storage.getCookies(allocator);
     defer storage.freeCookies(allocator, cookies);
 
-    const server_cookie = findCookieValue(cookies, "lp_server_cookie") orelse return error.CookieMissing;
+    const server_cookie = helpers.findCookieValue(cookies, "lp_server_cookie") orelse return error.CookieMissing;
     try std.testing.expectEqualStrings("server_cookie_value", server_cookie);
 
-    const js_cookie = findCookieValue(cookies, "lp_js_cookie") orelse return error.CookieMissing;
+    const js_cookie = helpers.findCookieValue(cookies, "lp_js_cookie") orelse return error.CookieMissing;
     try std.testing.expectEqualStrings("js_cookie_value", js_cookie);
 
     thread.join();
@@ -601,9 +594,9 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
 
     const cookies = try storage.getCookies(allocator);
     defer storage.freeCookies(allocator, cookies);
-    try std.testing.expect(findCookieValue(cookies, "lp_server_cookie") != null);
-    try std.testing.expect(findCookieValue(cookies, "lp_js_cookie") != null);
-    try std.testing.expect(findCookieValue(cookies, "lp_api_cookie") != null);
+    try std.testing.expect(helpers.findCookieValue(cookies, "lp_server_cookie") != null);
+    try std.testing.expect(helpers.findCookieValue(cookies, "lp_js_cookie") != null);
+    try std.testing.expect(helpers.findCookieValue(cookies, "lp_api_cookie") != null);
 
     const filtered = try storage.queryCookies(allocator, .{
         .name = "lp_api_cookie",
@@ -942,8 +935,8 @@ fn runFlatmates429AndKpRefScenario(
         var storage = session.storage();
         const cookies = try storage.getCookies(allocator);
         defer storage.freeCookies(allocator, cookies);
-        try std.testing.expect(findCookieValue(cookies, "_session") != null);
-        try std.testing.expect(findCookieValue(cookies, "_flatmates_session") != null);
+        try std.testing.expect(helpers.findCookieValue(cookies, "_session") != null);
+        try std.testing.expect(helpers.findCookieValue(cookies, "_flatmates_session") != null);
     }
 
     waitForKpRefCookieIntercept(session, allocator, timeout_ms) catch |err| {
@@ -973,7 +966,7 @@ fn waitForFlatmatesSessionCookies(
         defer storage.freeCookies(allocator, cookies);
         last_cookie_count = cookies.len;
 
-        if (findCookieValue(cookies, "_session") != null and findCookieValue(cookies, "_flatmates_session") != null) {
+        if (helpers.findCookieValue(cookies, "_session") != null and helpers.findCookieValue(cookies, "_flatmates_session") != null) {
             return;
         }
 

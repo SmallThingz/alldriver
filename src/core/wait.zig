@@ -353,9 +353,7 @@ fn evaluateForWait(session: *Session, script: []const u8) ![]u8 {
 }
 
 fn elapsedSince(start_ms: i64) u32 {
-    const delta = compat.milliTimestamp() - start_ms;
-    if (delta <= 0) return 0;
-    return @intCast(delta);
+    return compat.elapsedSinceMs(start_ms);
 }
 
 fn escapeJsString(allocator: std.mem.Allocator, value: []const u8) ![]u8 {

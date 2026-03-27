@@ -2,6 +2,7 @@ const std = @import("std");
 const session_mod = @import("session.zig");
 const executor = @import("../protocol/executor.zig");
 const types = @import("../types.zig");
+const cdp_target_json = @import("cdp_target_json.zig");
 
 pub const TargetInfo = struct {
     id: []const u8,
@@ -129,56 +130,26 @@ fn isStaleDetachSessionDiagnostic(diag: ?types.Diagnostic) bool {
 }
 
 fn parseTargetList(allocator: std.mem.Allocator, payload: []const u8) ![]TargetInfo {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidResponse;
-    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
-    if (result != .object) return error.InvalidResponse;
-    const target_infos = result.object.get("targetInfos") orelse return error.InvalidResponse;
-    if (target_infos != .array) return error.InvalidResponse;
+    const parsed_targets = try cdp_target_json.parseTargetInfos(allocator, payload);
+    errdefer cdp_target_json.freeTargetInfos(allocator, parsed_targets);
 
-    var out: std.ArrayList(TargetInfo) = .empty;
-    errdefer {
-        for (out.items) |target| {
-            allocator.free(target.id);
-            allocator.free(target.kind);
-        }
-        out.deinit(allocator);
+    const out = try allocator.alloc(TargetInfo, parsed_targets.len);
+    for (parsed_targets, 0..) |item, idx| {
+        out[idx] = .{
+            .id = item.id,
+            .kind = item.kind,
+        };
     }
-
-    for (target_infos.array.items) |item| {
-        if (item != .object) continue;
-        const id_value = item.object.get("targetId") orelse continue;
-        const type_value = item.object.get("type") orelse continue;
-        if (id_value != .string or type_value != .string) continue;
-        try out.append(allocator, .{
-            .id = try allocator.dupe(u8, id_value.string),
-            .kind = try allocator.dupe(u8, type_value.string),
-        });
-    }
-    return out.toOwnedSlice(allocator);
+    allocator.free(parsed_targets);
+    return out;
 }
 
 fn extractAttachedSessionId(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidResponse;
-    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
-    if (result != .object) return error.InvalidResponse;
-    const session_id = result.object.get("sessionId") orelse return error.InvalidResponse;
-    if (session_id != .string) return error.InvalidResponse;
-    return allocator.dupe(u8, session_id.string);
+    return cdp_target_json.extractResultStringField(allocator, payload, "sessionId");
 }
 
 fn parseCreatedTargetId(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidResponse;
-    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
-    if (result != .object) return error.InvalidResponse;
-    const id_value = result.object.get("targetId") orelse return error.InvalidResponse;
-    if (id_value != .string) return error.InvalidResponse;
-    return allocator.dupe(u8, id_value.string);
+    return cdp_target_json.extractResultStringField(allocator, payload, "targetId");
 }
 
 test "parse target list handles Target.getTargets payload" {

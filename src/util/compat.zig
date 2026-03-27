@@ -9,6 +9,12 @@ pub fn milliTimestamp() i64 {
     return @as(i64, @intCast(@divTrunc(std.Io.Timestamp.now(io(), .real).nanoseconds, std.time.ns_per_ms)));
 }
 
+pub fn elapsedSinceMs(start_ms: i64) u32 {
+    const delta = milliTimestamp() - start_ms;
+    if (delta <= 0) return 0;
+    return @intCast(delta);
+}
+
 pub fn nanoTimestamp() i128 {
     return @as(i128, @intCast(std.Io.Timestamp.now(io(), .real).nanoseconds));
 }

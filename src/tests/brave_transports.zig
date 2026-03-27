@@ -129,13 +129,6 @@ fn runOneShotCookieServer(ctx: *OneShotCookieServer) void {
     };
 }
 
-fn findCookieValue(cookies: []const driver.Cookie, name: []const u8) ?[]const u8 {
-    for (cookies) |cookie| {
-        if (std.mem.eql(u8, cookie.name, name)) return cookie.value;
-    }
-    return null;
-}
-
 fn launchBraveHeadless(allocator: std.mem.Allocator, enable_bidi: bool) !driver.modern.ModernSession {
     var installs = try driver.discover(allocator, .{
         .kinds = &.{.brave},
@@ -298,9 +291,9 @@ fn runCdpFullConformance(
 
     const cookies = try storage.getCookies(allocator);
     defer storage.freeCookies(allocator, cookies);
-    try std.testing.expect(findCookieValue(cookies, "brave_server_cookie") != null);
-    try std.testing.expect(findCookieValue(cookies, "brave_js_cookie") != null);
-    try std.testing.expect(findCookieValue(cookies, "brave_api_cookie") != null);
+    try std.testing.expect(helpers.findCookieValue(cookies, "brave_server_cookie") != null);
+    try std.testing.expect(helpers.findCookieValue(cookies, "brave_js_cookie") != null);
+    try std.testing.expect(helpers.findCookieValue(cookies, "brave_api_cookie") != null);
 
     const filtered = try storage.queryCookies(allocator, .{
         .name = "brave_api_cookie",

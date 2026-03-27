@@ -792,14 +792,14 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
 
     for (cookies_value.array.items) |item| {
         if (item != .object) continue;
-        const name = getJsonString(item.object, "name") orelse continue;
-        const value = getJsonString(item.object, "value") orelse "";
-        const domain = getJsonString(item.object, "domain") orelse "";
-        const path = getJsonString(item.object, "path") orelse "/";
-        const secure = getJsonBool(item.object, "secure") orelse true;
-        const http_only = getJsonBool(item.object, "httpOnly") orelse true;
-        const expires = getJsonI64(item.object, "expires");
-        const same_site = parseSameSite(getJsonString(item.object, "sameSite"));
+        const name = json_util.getStringField(item.object, "name") orelse continue;
+        const value = json_util.getStringField(item.object, "value") orelse "";
+        const domain = json_util.getStringField(item.object, "domain") orelse "";
+        const path = json_util.getStringField(item.object, "path") orelse "/";
+        const secure = json_util.getBoolField(item.object, "secure") orelse true;
+        const http_only = json_util.getBoolField(item.object, "httpOnly") orelse true;
+        const expires = json_util.getI64Field(item.object, "expires");
+        const same_site = json_util.parseCookieSameSite(json_util.getStringField(item.object, "sameSite"));
         try out.append(allocator, .{
             .name = try allocator.dupe(u8, name),
             .value = try allocator.dupe(u8, value),
@@ -870,35 +870,6 @@ fn extractEvaluationValue(value: std.json.Value) ?std.json.Value {
     }
     if (value.object.get("value")) |raw| return raw;
     return null;
-}
-
-fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = obj.get(key) orelse return null;
-    if (value != .string) return null;
-    return value.string;
-}
-
-fn getJsonBool(obj: std.json.ObjectMap, key: []const u8) ?bool {
-    const value = obj.get(key) orelse return null;
-    if (value != .bool) return null;
-    return value.bool;
-}
-
-fn getJsonI64(obj: std.json.ObjectMap, key: []const u8) ?i64 {
-    const value = obj.get(key) orelse return null;
-    return switch (value) {
-        .integer => |n| n,
-        .float => |n| @intFromFloat(n),
-        else => null,
-    };
-}
-
-fn parseSameSite(raw: ?[]const u8) types.CookieSameSite {
-    const value = raw orelse return .unspecified;
-    if (std.ascii.eqlIgnoreCase(value, "strict")) return .strict;
-    if (std.ascii.eqlIgnoreCase(value, "lax")) return .lax;
-    if (std.ascii.eqlIgnoreCase(value, "none")) return .none;
-    return .unspecified;
 }
 
 fn nowMs() u64 {

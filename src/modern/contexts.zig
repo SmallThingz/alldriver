@@ -1,6 +1,7 @@
 const std = @import("std");
 const session_mod = @import("session.zig");
 const executor = @import("../protocol/executor.zig");
+const cdp_target_json = @import("cdp_target_json.zig");
 
 pub const BrowsingContext = struct {
     id: []const u8,
@@ -92,13 +93,8 @@ pub const ContextsClient = struct {
 };
 
 fn parseContextList(allocator: std.mem.Allocator, payload: []const u8) ![]BrowsingContext {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidResponse;
-    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
-    if (result != .object) return error.InvalidResponse;
-    const target_infos = result.object.get("targetInfos") orelse return error.InvalidResponse;
-    if (target_infos != .array) return error.InvalidResponse;
+    const target_infos = try cdp_target_json.parseTargetInfos(allocator, payload);
+    defer cdp_target_json.freeTargetInfos(allocator, target_infos);
 
     var out: std.ArrayList(BrowsingContext) = .empty;
     errdefer {
@@ -106,26 +102,15 @@ fn parseContextList(allocator: std.mem.Allocator, payload: []const u8) ![]Browsi
         out.deinit(allocator);
     }
 
-    for (target_infos.array.items) |item| {
-        if (item != .object) continue;
-        const id_value = item.object.get("targetId") orelse continue;
-        const type_value = item.object.get("type") orelse continue;
-        if (id_value != .string or type_value != .string) continue;
-        if (!isPageLike(type_value.string)) continue;
-        try out.append(allocator, .{ .id = try allocator.dupe(u8, id_value.string) });
+    for (target_infos) |item| {
+        if (!isPageLike(item.kind)) continue;
+        try out.append(allocator, .{ .id = try allocator.dupe(u8, item.id) });
     }
     return out.toOwnedSlice(allocator);
 }
 
 fn parseCreatedContextId(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidResponse;
-    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
-    if (result != .object) return error.InvalidResponse;
-    const id_value = result.object.get("targetId") orelse return error.InvalidResponse;
-    if (id_value != .string) return error.InvalidResponse;
-    return allocator.dupe(u8, id_value.string);
+    return cdp_target_json.extractResultStringField(allocator, payload, "targetId");
 }
 
 fn isPageLike(kind: []const u8) bool {

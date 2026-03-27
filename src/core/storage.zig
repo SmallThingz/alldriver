@@ -230,14 +230,14 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
     for (cookies_value.?.array.items) |item| {
         if (item != .object) continue;
 
-        const name = getStringField(item.object, "name") orelse continue;
-        const value = getStringField(item.object, "value") orelse "";
-        const domain = getStringField(item.object, "domain") orelse "";
-        const path = getStringField(item.object, "path") orelse "/";
-        const secure = getBoolField(item.object, "secure") orelse true;
-        const http_only = getBoolField(item.object, "httpOnly") orelse true;
-        const expires_unix_seconds = getI64Field(item.object, "expires");
-        const same_site = parseSameSite(getStringField(item.object, "sameSite"));
+        const name = json_util.getStringField(item.object, "name") orelse continue;
+        const value = json_util.getStringField(item.object, "value") orelse "";
+        const domain = json_util.getStringField(item.object, "domain") orelse "";
+        const path = json_util.getStringField(item.object, "path") orelse "/";
+        const secure = json_util.getBoolField(item.object, "secure") orelse true;
+        const http_only = json_util.getBoolField(item.object, "httpOnly") orelse true;
+        const expires_unix_seconds = json_util.getI64Field(item.object, "expires");
+        const same_site = json_util.parseCookieSameSite(json_util.getStringField(item.object, "sameSite"));
 
         try out.append(allocator, .{
             .name = try allocator.dupe(u8, name),
@@ -252,35 +252,6 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
     }
 
     return out.toOwnedSlice(allocator);
-}
-
-fn getStringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = obj.get(key) orelse return null;
-    if (value != .string) return null;
-    return value.string;
-}
-
-fn getBoolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
-    const value = obj.get(key) orelse return null;
-    if (value != .bool) return null;
-    return value.bool;
-}
-
-fn getI64Field(obj: std.json.ObjectMap, key: []const u8) ?i64 {
-    const value = obj.get(key) orelse return null;
-    return switch (value) {
-        .integer => |n| n,
-        .float => |n| @intFromFloat(n),
-        else => null,
-    };
-}
-
-fn parseSameSite(raw: ?[]const u8) types.CookieSameSite {
-    const value = raw orelse return .unspecified;
-    if (std.ascii.eqlIgnoreCase(value, "strict")) return .strict;
-    if (std.ascii.eqlIgnoreCase(value, "lax")) return .lax;
-    if (std.ascii.eqlIgnoreCase(value, "none")) return .none;
-    return .unspecified;
 }
 
 fn freeCookieFields(allocator: std.mem.Allocator, cookie: Cookie) void {
