@@ -4,6 +4,7 @@ const catalog = @import("../catalog/browser_kind.zig");
 const path_table = @import("../catalog/path_table.zig");
 const types = @import("../types.zig");
 const util = @import("util.zig");
+const compat = @import("../util/compat.zig");
 
 pub const WindowsHit = struct {
     kind: types.BrowserKind,
@@ -66,10 +67,10 @@ fn collectProgramFilesCandidates(allocator: std.mem.Allocator, kind: types.Brows
         out.deinit(allocator);
     }
 
-    const program_files = std.process.getEnvVarOwned(allocator, "ProgramFiles") catch null;
+    const program_files = compat.getEnvVarOwned(allocator, "ProgramFiles") catch null;
     defer if (program_files) |v| allocator.free(v);
 
-    const program_files_x86 = std.process.getEnvVarOwned(allocator, "ProgramFiles(x86)") catch null;
+    const program_files_x86 = compat.getEnvVarOwned(allocator, "ProgramFiles(x86)") catch null;
     defer if (program_files_x86) |v| allocator.free(v);
 
     var roots: std.ArrayList([]const u8) = .empty;

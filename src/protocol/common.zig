@@ -23,6 +23,13 @@ pub const EndpointParts = struct {
     path: []const u8,
 };
 
+pub fn formatHostPortAuthority(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
+    if (std.mem.indexOfScalar(u8, host, ':') != null and !(std.mem.startsWith(u8, host, "[") and std.mem.endsWith(u8, host, "]"))) {
+        return std.fmt.allocPrint(allocator, "[{s}]:{d}", .{ host, port });
+    }
+    return std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+}
+
 pub fn defaultCapabilityForEngine(engine: types.EngineKind) types.CapabilitySet {
     return switch (engine) {
         .chromium => .{
@@ -103,17 +110,37 @@ pub fn parseEndpoint(endpoint: []const u8, default_adapter: AdapterKind) !Endpoi
     const host_port = rest[0..slash];
     const path = if (slash < rest.len) rest[slash..] else "/";
 
+    const parsed = try parseHostPort(host_port, switch (adapter) {
+        .cdp, .bidi => 9222,
+    });
+
+    return .{ .adapter = adapter, .host = parsed.host, .port = parsed.port, .path = path };
+}
+
+fn parseHostPort(host_port: []const u8, default_port: u16) !struct { host: []const u8, port: u16 } {
+    if (host_port.len == 0) return error.InvalidEndpoint;
+
+    if (host_port[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, host_port, ']') orelse return error.InvalidEndpoint;
+        const host = host_port[1..end];
+        if (host.len == 0) return error.InvalidEndpoint;
+        if (end + 1 == host_port.len) return .{ .host = host, .port = default_port };
+        if (host_port[end + 1] != ':') return error.InvalidEndpoint;
+        return .{
+            .host = host,
+            .port = try std.fmt.parseInt(u16, host_port[end + 2 ..], 10),
+        };
+    }
+
+    if (std.mem.count(u8, host_port, ":") > 1) return error.InvalidEndpoint;
     const colon = std.mem.lastIndexOfScalar(u8, host_port, ':');
     const host = if (colon) |idx| host_port[0..idx] else host_port;
     if (host.len == 0) return error.InvalidEndpoint;
-
-    const port: u16 = if (colon) |idx|
+    const port = if (colon) |idx|
         try std.fmt.parseInt(u16, host_port[idx + 1 ..], 10)
-    else switch (adapter) {
-        .cdp, .bidi => 9222,
-    };
-
-    return .{ .adapter = adapter, .host = host, .port = port, .path = path };
+    else
+        default_port;
+    return .{ .host = host, .port = port };
 }
 
 test "parse endpoint defaults" {
@@ -145,4 +172,18 @@ test "parse endpoint ws uses default adapter for cdp and bidi" {
 
     const bidi_parsed = try parseEndpoint("ws://127.0.0.1:9222/session", .bidi);
     try std.testing.expectEqual(AdapterKind.bidi, bidi_parsed.adapter);
+}
+
+test "parse endpoint supports bracketed IPv6 hosts" {
+    const parsed = try parseEndpoint("cdp://[::1]:9222/devtools/page/1", .cdp);
+    try std.testing.expectEqualStrings("::1", parsed.host);
+    try std.testing.expectEqual(@as(u16, 9222), parsed.port);
+    try std.testing.expectEqualStrings("/devtools/page/1", parsed.path);
+}
+
+test "format host port authority brackets ipv6 literals" {
+    const allocator = std.testing.allocator;
+    const authority = try formatHostPortAuthority(allocator, "::1", 9222);
+    defer allocator.free(authority);
+    try std.testing.expectEqualStrings("[::1]:9222", authority);
 }

@@ -2,9 +2,7 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+    const allocator = std.heap.page_allocator;
 
     var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox },
@@ -29,14 +27,14 @@ pub fn main() !void {
 
     const png = try page.screenshot(allocator, .png);
     defer allocator.free(png);
-    try std.fs.cwd().writeFile(.{ .sub_path = "example-screenshot.png", .data = png });
+    try driver.compat.cwd().writeFile(.{ .sub_path = "example-screenshot.png", .data = png });
 
     if (session.supports(.tracing)) {
         try session.base.startTracing();
         try page.navigate("https://example.com/?traced=1");
         const trace = try session.base.stopTracing(allocator);
         defer allocator.free(trace);
-        try std.fs.cwd().writeFile(.{ .sub_path = "example-trace.json", .data = trace });
+        try driver.compat.cwd().writeFile(.{ .sub_path = "example-trace.json", .data = trace });
     }
 
     std.debug.print("artifacts written\n", .{});

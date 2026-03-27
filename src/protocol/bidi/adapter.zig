@@ -37,7 +37,7 @@ pub fn serializeSubscribe(allocator: std.mem.Allocator, id: u64, event_names: []
     try list.appendSlice(allocator, "[");
     for (event_names, 0..) |name, i| {
         if (i != 0) try list.appendSlice(allocator, ",");
-        try list.writer(allocator).print("\"{s}\"", .{name});
+        try list.print(allocator, "\"{s}\"", .{name});
     }
     try list.appendSlice(allocator, "]");
 

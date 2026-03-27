@@ -5,9 +5,10 @@ const storage = @import("storage.zig");
 const events = @import("events.zig");
 const types = @import("../types.zig");
 const strings = @import("../util/strings.zig");
+const compat = @import("../util/compat.zig");
 
 pub fn waitFor(session: *Session, target: types.WaitTarget, opts: types.WaitOptions) !types.WaitResult {
-    const start_ms = std.time.milliTimestamp();
+    const start_ms = compat.milliTimestamp();
     const timeout_ms = opts.timeout_ms orelse session.timeout_policy.wait_ms;
     const poll_interval_ms = if (opts.poll_interval_ms == 0) @as(u32, 25) else opts.poll_interval_ms;
     const target_tag = std.meta.activeTag(target);
@@ -42,7 +43,7 @@ pub fn waitFor(session: *Session, target: types.WaitTarget, opts: types.WaitOpti
             }
         }
 
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = compat.milliTimestamp();
         if (now_ms >= next_challenge_probe_ms) {
             maybeEmitChallengeSignals(session) catch |err| {
                 const elapsed = elapsedSince(start_ms);
@@ -117,7 +118,7 @@ pub fn waitFor(session: *Session, target: types.WaitTarget, opts: types.WaitOpti
             return error.Timeout;
         }
 
-        std.Thread.sleep(@as(u64, poll_interval_ms) * std.time.ns_per_ms);
+        compat.sleepMs(poll_interval_ms);
     }
 }
 
@@ -352,7 +353,7 @@ fn evaluateForWait(session: *Session, script: []const u8) ![]u8 {
 }
 
 fn elapsedSince(start_ms: i64) u32 {
-    const delta = std.time.milliTimestamp() - start_ms;
+    const delta = compat.milliTimestamp() - start_ms;
     if (delta <= 0) return 0;
     return @intCast(delta);
 }

@@ -20,9 +20,7 @@ fn printMilestone(event: driver.LifecycleEvent) void {
 }
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+    const allocator = std.heap.page_allocator;
 
     var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .brave, .firefox, .lightpanda },

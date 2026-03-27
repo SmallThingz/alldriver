@@ -1,7 +1,8 @@
 const std = @import("std");
+const compat = @import("../util/compat.zig");
 
 pub fn envEnabled(name: []const u8) bool {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
+    const value = compat.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
     defer std.heap.page_allocator.free(value);
 
     if (std.mem.eql(u8, value, "1")) return true;

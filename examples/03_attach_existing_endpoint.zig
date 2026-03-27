@@ -2,9 +2,7 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+    const allocator = std.heap.page_allocator;
 
     // Replace with your existing endpoint.
     var session = try driver.modern.attach(allocator, "cdp://127.0.0.1:9222/devtools/browser/abc");

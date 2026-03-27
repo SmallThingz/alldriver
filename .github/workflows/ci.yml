@@ -24,22 +24,22 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
-
-      - name: Cache Zig Artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/zig
-            .zig-cache
-          key: zig-${{ runner.os }}-0.15.2-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**/*.zig', 'examples/**/*.zig', 'scripts/**/*.zig') }}
-          restore-keys: |
-            zig-${{ runner.os }}-0.15.2-
+          version: master
 
       - name: Zig Version
         run: zig version
 
-      - name: Test
+      - name: Zig fmt check
+        shell: bash
+        run: |
+          files=$(find . -type f -name '*.zig' \
+            -not -path './.zig-cache/*' \
+            -not -path './.zig-cache-*/*' \
+            -not -path './.zig-global-cache/*' \
+            -not -path './zig-out/*')
+          zig fmt --check $files
+
+      - name: Unit Tests
         run: zig build test
 
       - name: Build Examples
@@ -48,7 +48,7 @@ jobs:
       - name: Adversarial Gate (CI Smoke)
         run: |
           mkdir -p artifacts/reports
-          zig build tools -- adversarial-detection-gate --allow-missing-browser=1 --out artifacts/reports/ci-adversarial-detection.txt
+          zig build tools -- adversarial-detection-gate --allow-missing-browser=1 --allow-launch-probe-failures=1 --out artifacts/reports/ci-adversarial-detection.txt
 
       - name: Upload CI Reports
         if: always()

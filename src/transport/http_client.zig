@@ -1,5 +1,7 @@
 const std = @import("std");
+const common = @import("../protocol/common.zig");
 const io_util = @import("../util/io.zig");
+const compat = @import("../util/compat.zig");
 
 pub const HttpMethod = enum {
     GET,
@@ -37,8 +39,12 @@ pub fn requestJsonWithOptions(
     body_json: ?[]const u8,
     options: RequestOptions,
 ) !Response {
-    var stream = try std.net.tcpConnectToHost(allocator, host, port);
-    defer stream.close();
+    const address = if (std.mem.eql(u8, host, "localhost"))
+        try std.Io.net.IpAddress.parseIp4("127.0.0.1", port)
+    else
+        std.Io.net.IpAddress.parse(host, port) catch try std.Io.net.IpAddress.resolve(compat.io(), host, port);
+    var stream = try address.connect(compat.io(), .{ .mode = .stream });
+    defer stream.close(compat.io());
 
     const body = body_json orelse "";
     const method_name = switch (method) {
@@ -46,15 +52,17 @@ pub fn requestJsonWithOptions(
         .POST => "POST",
         .DELETE => "DELETE",
     };
+    const authority = try common.formatHostPortAuthority(allocator, host, port);
+    defer allocator.free(authority);
 
     const request_payload = try std.fmt.allocPrint(
         allocator,
-        "{s} {s} HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}",
-        .{ method_name, path, host, port, body.len, body },
+        "{s} {s} HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ method_name, path, authority, body.len, body },
     );
     defer allocator.free(request_payload);
 
-    try stream.writeAll(request_payload);
+    try io_util.writeAll(&stream, request_payload);
 
     const header_bytes = try readHttpHeaders(allocator, &stream, options.max_header_bytes);
     defer allocator.free(header_bytes);
@@ -90,15 +98,12 @@ pub fn deleteJson(allocator: std.mem.Allocator, host: []const u8, port: u16, pat
     return requestJson(allocator, host, port, .DELETE, path, null);
 }
 
-fn readHttpHeaders(allocator: std.mem.Allocator, stream: *std.net.Stream, max_header_bytes: usize) ![]u8 {
+fn readHttpHeaders(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, max_header_bytes: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    var b: [1]u8 = undefined;
     while (true) {
-        const n = try stream.read(&b);
-        if (n == 0) return error.ConnectionClosed;
-        try out.append(allocator, b[0]);
+        try out.append(allocator, try io_util.readByte(stream));
 
         if (out.items.len > max_header_bytes) return error.HeaderTooLarge;
 
@@ -153,7 +158,7 @@ fn hasChunkedTransferEncoding(header_bytes: []const u8) bool {
 
 fn readFixedBody(
     allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
+    stream: *std.Io.net.Stream,
     content_length: usize,
     max_body_bytes: usize,
 ) ![]u8 {
@@ -166,7 +171,7 @@ fn readFixedBody(
     return body;
 }
 
-fn readChunkedBody(allocator: std.mem.Allocator, stream: *std.net.Stream, max_body_bytes: usize) ![]u8 {
+fn readChunkedBody(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, max_body_bytes: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
@@ -202,13 +207,13 @@ fn readChunkedBody(allocator: std.mem.Allocator, stream: *std.net.Stream, max_bo
     return out.toOwnedSlice(allocator);
 }
 
-fn readBodyUntilClose(allocator: std.mem.Allocator, stream: *std.net.Stream, max_body_bytes: usize) ![]u8 {
+fn readBodyUntilClose(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, max_body_bytes: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = try stream.read(&buf);
+        const n = try io_util.read(stream, &buf);
         if (n == 0) break;
 
         if (out.items.len + n > max_body_bytes) return error.BodyTooLarge;
@@ -218,22 +223,27 @@ fn readBodyUntilClose(allocator: std.mem.Allocator, stream: *std.net.Stream, max
     return out.toOwnedSlice(allocator);
 }
 
-fn readHttpLine(allocator: std.mem.Allocator, stream: *std.net.Stream, max_line_bytes: usize) ![]u8 {
+test "format host authority brackets ipv6 literals" {
+    const allocator = std.testing.allocator;
+    const formatted = try common.formatHostPortAuthority(allocator, "::1", 9222);
+    defer allocator.free(formatted);
+    try std.testing.expectEqualStrings("[::1]:9222", formatted);
+}
+
+fn readHttpLine(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, max_line_bytes: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    var byte: [1]u8 = undefined;
     while (true) {
-        const n = try stream.read(&byte);
-        if (n == 0) return error.ConnectionClosed;
-        if (byte[0] == '\n') {
+        const b = try io_util.readByte(stream);
+        if (b == '\n') {
             if (out.items.len > 0 and out.items[out.items.len - 1] == '\r') {
                 _ = out.pop();
             }
             return out.toOwnedSlice(allocator);
         }
         if (out.items.len >= max_line_bytes) return error.HeaderTooLarge;
-        try out.append(allocator, byte[0]);
+        try out.append(allocator, b);
     }
 }
 

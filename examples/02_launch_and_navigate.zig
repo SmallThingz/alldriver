@@ -2,9 +2,7 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+    const allocator = std.heap.page_allocator;
 
     var launch_op = try driver.modern.launchAutoAsync(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox, .lightpanda },

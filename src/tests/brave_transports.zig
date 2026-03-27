@@ -3,6 +3,8 @@ const driver = @import("../root.zig");
 const helpers = @import("helpers.zig");
 const common = @import("../protocol/common.zig");
 const http = @import("../transport/http_client.zig");
+const compat = @import("../util/compat.zig");
+const io_util = @import("../util/io.zig");
 
 const brave_cookie_probe_html =
     "<!doctype html><html><head><title>brave-transport-ok</title></head><body><button id='btn' onclick='window.__clicked=(window.__clicked||0)+1'>Click</button><input id='name'/><script>window.__clicked=0;document.cookie='brave_js_cookie=js_cookie_value; path=/';localStorage.setItem('seed_local','ready');sessionStorage.setItem('seed_session','ready');</script></body></html>";
@@ -42,7 +44,7 @@ const brave_headless_bidi_args = &.{
     "--enable-bidi-server",
 };
 
-var event_lock: std.Thread.Mutex = .{};
+var event_lock: compat.Mutex = .{};
 var nav_started_count: usize = 0;
 var nav_completed_count: usize = 0;
 var cookie_updated_count: usize = 0;
@@ -81,28 +83,27 @@ fn responseCallback(_: driver.ResponseEvent) void {}
 fn logCallback(_: @import("../modern/log.zig").LogEntry) void {}
 
 const OneShotCookieServer = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     body: []const u8,
     failed: bool = false,
     handled: bool = false,
 
     fn port(self: *const OneShotCookieServer) u16 {
-        const real = self.server.listen_address.in.sa;
-        return std.mem.bigToNative(u16, real.port);
+        return self.server.socket.address.getPort();
     }
 };
 
 fn runOneShotCookieServer(ctx: *OneShotCookieServer) void {
-    defer ctx.server.deinit();
+    defer ctx.server.deinit(compat.io());
 
-    const conn = ctx.server.accept() catch {
+    var stream = ctx.server.accept(compat.io()) catch {
         ctx.failed = true;
         return;
     };
-    defer conn.stream.close();
+    defer stream.close(compat.io());
 
     var req_buf: [4096]u8 = undefined;
-    const req_n = conn.stream.read(&req_buf) catch {
+    const req_n = io_util.read(&stream, &req_buf) catch {
         ctx.failed = true;
         return;
     };
@@ -119,11 +120,11 @@ fn runOneShotCookieServer(ctx: *OneShotCookieServer) void {
         return;
     };
 
-    conn.stream.writeAll(head) catch {
+    io_util.writeAll(&stream, head) catch {
         ctx.failed = true;
         return;
     };
-    conn.stream.writeAll(ctx.body) catch {
+    io_util.writeAll(&stream, ctx.body) catch {
         ctx.failed = true;
     };
 }
@@ -574,8 +575,8 @@ test "brave cdp full endpoints conformance (opt-in)" {
     var session = try launchBraveHeadless(allocator, false);
     defer session.deinit();
 
-    var addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    const server = try addr.listen(.{});
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(compat.io(), .{ .reuse_address = true });
     var server_ctx = OneShotCookieServer{
         .server = server,
         .body = brave_cookie_probe_html,
@@ -583,8 +584,10 @@ test "brave cdp full endpoints conformance (opt-in)" {
     const thread = try std.Thread.spawn(.{}, runOneShotCookieServer, .{&server_ctx});
     var joined = false;
     defer if (!joined) {
-        if (std.net.Address.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
-            if (std.net.tcpConnectToAddress(wake_addr)) |stream| stream.close() else |_| {}
+        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
+            if (wake_addr.connect(compat.io(), .{ .mode = .stream })) |stream| {
+                stream.close(compat.io());
+            } else |_| {}
         } else |_| {}
         thread.join();
     };
@@ -616,8 +619,8 @@ test "brave bidi endpoints conformance (opt-in)" {
     };
     defer bidi_session.deinit();
 
-    var addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    const server = try addr.listen(.{});
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(compat.io(), .{ .reuse_address = true });
     var server_ctx = OneShotCookieServer{
         .server = server,
         .body = brave_cookie_probe_html,
@@ -625,8 +628,10 @@ test "brave bidi endpoints conformance (opt-in)" {
     const thread = try std.Thread.spawn(.{}, runOneShotCookieServer, .{&server_ctx});
     var joined = false;
     defer if (!joined) {
-        if (std.net.Address.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
-            if (std.net.tcpConnectToAddress(wake_addr)) |stream| stream.close() else |_| {}
+        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
+            if (wake_addr.connect(compat.io(), .{ .mode = .stream })) |stream| {
+                stream.close(compat.io());
+            } else |_| {}
         } else |_| {}
         thread.join();
     };

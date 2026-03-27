@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const driver = @import("alldriver");
+const compat = driver.compat;
 
 const Allocator = std.mem.Allocator;
 const containsIgnoreCase = driver.strings.containsIgnoreCase;
@@ -60,20 +61,17 @@ fn printUsage() void {
     , .{});
 }
 
-pub fn main() !void {
+pub fn mainWithArgs(args: []const []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
         printUsage();
         return ToolError.InvalidArgs;
     }
 
-    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const root = try compat.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(root);
 
     const cmd = args[1];
@@ -147,16 +145,32 @@ fn ensureDir(path: []const u8) !void {
 }
 
 fn ensurePath(path: []const u8) !void {
-    var dir = std.fs.cwd();
+    var dir = compat.cwd();
     try dir.makePath(path);
 }
 
 fn nowStamp(allocator: Allocator) ![]u8 {
-    return try runCaptureTrimmed(allocator, &.{ "date", "-u", "+%Y%m%dT%H%M%SZ" }, null, null);
+    return try formatUtcNow(allocator, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z");
 }
 
 fn nowRfc3339(allocator: Allocator) ![]u8 {
-    return try runCaptureTrimmed(allocator, &.{ "date", "-u", "+%Y-%m-%dT%H:%M:%SZ" }, null, null);
+    return try formatUtcNow(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z");
+}
+
+fn formatUtcNow(allocator: Allocator, comptime fmt: []const u8) ![]u8 {
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @as(u64, @intCast(compat.timestamp())) };
+    const year_day = epoch_seconds.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch_seconds.getDaySeconds();
+
+    return std.fmt.allocPrint(allocator, fmt, .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+        day_seconds.getSecondsIntoMinute(),
+    });
 }
 
 fn getHostPlatform() []const u8 {
@@ -170,15 +184,15 @@ fn getHostPlatform() []const u8 {
 
 fn commandExists(allocator: Allocator, command: []const u8) !bool {
     const which_cmd = if (isWindowsHost()) "where" else "which";
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    const result = try std.process.run(allocator, compat.io(), .{
         .argv = &.{ which_cmd, command },
-        .max_output_bytes = 64 * 1024,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     return switch (result.term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
 }
@@ -187,45 +201,48 @@ fn runCaptureTrimmed(
     allocator: Allocator,
     argv: []const []const u8,
     cwd: ?[]const u8,
-    env_map: ?*const std.process.EnvMap,
+    env_map: ?*const std.process.Environ.Map,
 ) ![]u8 {
-    const res = try std.process.Child.run(.{
-        .allocator = allocator,
+    const res = try std.process.run(allocator, compat.io(), .{
         .argv = argv,
-        .cwd = cwd,
-        .env_map = env_map,
-        .max_output_bytes = 8 * 1024 * 1024,
+        .cwd = if (cwd) |path| .{ .path = path } else .inherit,
+        .environ_map = env_map,
+        .stdout_limit = .limited(8 * 1024 * 1024),
+        .stderr_limit = .limited(8 * 1024 * 1024),
     });
     defer allocator.free(res.stderr);
     if (switch (res.term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     } == false) {
         defer allocator.free(res.stdout);
         return ToolError.CommandFailed;
     }
     const out = res.stdout;
-    const trimmed = std.mem.trimRight(u8, out, "\r\n\t ");
+    const trimmed = std.mem.trim(u8, out, "\r\n\t ");
     const duped = try allocator.dupe(u8, trimmed);
     allocator.free(out);
     return duped;
 }
 
 fn runInherit(
-    allocator: Allocator,
+    _: Allocator,
     argv: []const []const u8,
     cwd: ?[]const u8,
-    env_map: ?*const std.process.EnvMap,
+    env_map: ?*const std.process.Environ.Map,
 ) !void {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    child.cwd = cwd;
-    child.env_map = env_map;
-    const term = try child.spawnAndWait();
+    var child = try std.process.spawn(compat.io(), .{
+        .argv = argv,
+        .cwd = if (cwd) |path| .{ .path = path } else .inherit,
+        .environ_map = env_map,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    defer child.kill(compat.io());
+    const term = try child.wait(compat.io());
     const ok = switch (term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
     if (!ok) return ToolError.CommandFailed;
@@ -235,40 +252,40 @@ fn runCollect(
     allocator: Allocator,
     argv: []const []const u8,
     cwd: ?[]const u8,
-    env_map: ?*const std.process.EnvMap,
+    env_map: ?*const std.process.Environ.Map,
 ) !struct { ok: bool, stdout: []u8, stderr: []u8 } {
-    const res = try std.process.Child.run(.{
-        .allocator = allocator,
+    const res = try std.process.run(allocator, compat.io(), .{
         .argv = argv,
-        .cwd = cwd,
-        .env_map = env_map,
-        .max_output_bytes = 64 * 1024 * 1024,
+        .cwd = if (cwd) |path| .{ .path = path } else .inherit,
+        .environ_map = env_map,
+        .stdout_limit = .limited(64 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024 * 1024),
     });
     const ok = switch (res.term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
     return .{ .ok = ok, .stdout = res.stdout, .stderr = res.stderr };
 }
 
 fn writeFile(path: []const u8, contents: []const u8) !void {
-    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = contents });
+    try compat.cwd().writeFile(.{ .sub_path = path, .data = contents });
 }
 
 fn envOrDefault(name: []const u8, fallback: []const u8) []const u8 {
-    return std.posix.getenv(name) orelse fallback;
+    return compat.getEnvVarOwned(std.heap.page_allocator, name) catch fallback;
 }
 
 fn writeFileAbs(path: []const u8, contents: []const u8) !void {
     const dir_path = std.fs.path.dirname(path) orelse "/";
-    try std.fs.cwd().makePath(dir_path);
-    var f = try std.fs.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(contents);
+    try compat.cwd().makePath(dir_path);
+    const f = try compat.createFileAbsolute(path, .{});
+    defer f.close(compat.io());
+    try f.writeStreamingAll(compat.io(), contents);
 }
 
 fn readFileAlloc(allocator: Allocator, path: []const u8, max: usize) ![]u8 {
-    return try std.fs.cwd().readFileAlloc(allocator, path, max);
+    return try compat.cwd().readFileAlloc(allocator, path, max);
 }
 
 fn parseKvFile(allocator: Allocator, path: []const u8) !std.StringHashMap([]u8) {
@@ -347,8 +364,9 @@ fn parseFlags(allocator: Allocator, args: []const []const u8) !std.StringHashMap
     return map;
 }
 
-fn setDefaultZigGlobalCache(allocator: Allocator, root: []const u8) !std.process.EnvMap {
-    var env = try std.process.getEnvMap(allocator);
+fn setDefaultZigGlobalCache(allocator: Allocator, root: []const u8) !std.process.Environ.Map {
+    const threaded = std.Options.debug_threaded_io orelse return error.Unexpected;
+    var env = try std.process.Environ.createMap(threaded.environ.process_environ, allocator);
     if (env.get("ZIG_GLOBAL_CACHE_DIR") == null) {
         const cache = try path_util.pathJoin(allocator, &.{ root, ".zig-global-cache" });
         try ensurePath(cache);
@@ -360,7 +378,7 @@ fn setDefaultZigGlobalCache(allocator: Allocator, root: []const u8) !std.process
 fn runStepWithLog(
     allocator: Allocator,
     root: []const u8,
-    env: ?*const std.process.EnvMap,
+    env: ?*const std.process.Environ.Map,
     out_dir: []const u8,
     name: []const u8,
     argv: []const []const u8,
@@ -369,12 +387,14 @@ fn runStepWithLog(
     defer allocator.free(logs_dir);
     try ensurePath(logs_dir);
 
-    const log_path = try path_util.pathJoin(allocator, &.{ logs_dir, try std.fmt.allocPrint(allocator, "{s}.log", .{name}) });
+    const log_name = try std.fmt.allocPrint(allocator, "{s}.log", .{name});
+    defer allocator.free(log_name);
+    const log_path = try path_util.pathJoin(allocator, &.{ logs_dir, log_name });
     defer allocator.free(log_path);
 
     var log: std.ArrayList(u8) = .empty;
     defer log.deinit(allocator);
-    try log.writer(allocator).print("[matrix] running: {s}\n", .{name});
+    try log.print(allocator, "[matrix] running: {s}\n", .{name});
 
     const res = try runCollect(allocator, argv, root, env);
     defer allocator.free(res.stdout);
@@ -385,7 +405,9 @@ fn runStepWithLog(
     try writeFile(log_path, log.items);
 
     const status = if (res.ok) "PASS" else "FAIL";
-    const status_path = try path_util.pathJoin(allocator, &.{ logs_dir, try std.fmt.allocPrint(allocator, "{s}.status", .{name}) });
+    const status_name = try std.fmt.allocPrint(allocator, "{s}.status", .{name});
+    defer allocator.free(status_name);
+    const status_path = try path_util.pathJoin(allocator, &.{ logs_dir, status_name });
     defer allocator.free(status_path);
     try writeFile(status_path, status);
 
@@ -394,13 +416,13 @@ fn runStepWithLog(
 
 fn listReports(allocator: Allocator, matrix_root: []const u8) !std.ArrayList([]u8) {
     var reports: std.ArrayList([]u8) = .empty;
-    var dir = try std.fs.openDirAbsolute(matrix_root, .{ .iterate = true });
-    defer dir.close();
+    var dir = try compat.openDirAbsolute(matrix_root, .{ .iterate = true });
+    defer dir.close(compat.io());
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(compat.io())) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.eql(u8, std.fs.path.basename(entry.path), "matrix-report.txt")) {
             const full = try path_util.pathJoin(allocator, &.{ matrix_root, entry.path });
@@ -496,11 +518,11 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
 
     var out_file = flags.get("out");
 
-    var dir = std.fs.openDirAbsolute(matrix_root, .{}) catch {
+    var dir = compat.openDirAbsolute(matrix_root, .{}) catch {
         std.debug.print("matrix root not found: {s}\n", .{matrix_root});
         return ToolError.NotFound;
     };
-    dir.close();
+    dir.close(compat.io());
 
     var reports = try listReports(allocator, matrix_root);
     defer {
@@ -517,13 +539,15 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
     defer allocator.free(ts);
 
     if (out_file == null) {
-        out_file = try path_util.pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{ts}) });
+        const summary_name = try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{ts});
+        defer allocator.free(summary_name);
+        out_file = try path_util.pathJoin(allocator, &.{ matrix_root, summary_name });
     }
     const out = out_file.?;
 
     var content: std.ArrayList(u8) = .empty;
     defer content.deinit(allocator);
-    try content.writer(allocator).print("Matrix Summary\ntimestamp_utc: {s}\nroot: {s}\nstrict_ga: {d}\n\n", .{ ts, matrix_root, @intFromBool(strict_ga) });
+    try content.print(allocator, "Matrix Summary\ntimestamp_utc: {s}\nroot: {s}\nstrict_ga: {d}\n\n", .{ ts, matrix_root, @intFromBool(strict_ga) });
 
     var overall_pass = true;
     var strict_overall = true;
@@ -554,8 +578,8 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         var sig_status: []const u8 = "N/A";
         const asc_path = try std.fmt.allocPrint(allocator, "{s}.asc", .{report});
         defer allocator.free(asc_path);
-        if (std.fs.openFileAbsolute(asc_path, .{}) catch null) |f| {
-            f.close();
+        if (compat.openFileAbsolute(asc_path, .{}) catch null) |f| {
+            f.close(compat.io());
             if (try commandExists(allocator, "gpg")) {
                 const verify_res = try runCollect(allocator, &.{ "gpg", "--verify", asc_path, report }, null, null);
                 defer allocator.free(verify_res.stdout);
@@ -613,7 +637,8 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
             }
         }
 
-        try content.writer(allocator).print(
+        try content.print(
+            allocator,
             "run: {s}\nreport: {s}\nplatform: {s}\nstatus: {s}\nsignature: {s}\nstrict_report_ok: {d}\nbehavioral_pass: {d}\nadversarial_pass: {d}\nadversarial_tier_ok: {d}\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\nandroid_bridge_tool_present: {d}\nios_bridge_tool_present: {d}\n\n",
             .{
                 platform_run,
@@ -642,9 +667,10 @@ fn cmdMatrixCollect(allocator: Allocator, root: []const u8, args: []const []cons
         }
     }
 
-    try content.writer(allocator).print("OVERALL: {s}\n", .{if (overall_pass) "PASS" else "FAIL"});
+    try content.print(allocator, "OVERALL: {s}\n", .{if (overall_pass) "PASS" else "FAIL"});
     if (strict_ga) {
-        try content.writer(allocator).print(
+        try content.print(
+            allocator,
             "STRICT_OVERALL: {s}\nSTRICT_PLATFORM_LINUX: {d}\nSTRICT_PLATFORM_WINDOWS: {d}\nSTRICT_PLATFORM_MACOS: {d}\nSTRICT_ANDROID_BRIDGE: {d}\nSTRICT_IOS_BRIDGE: {d}\n",
             .{
                 if (strict_overall) "PASS" else "FAIL",
@@ -866,6 +892,20 @@ const WebViewSessionProbe = struct {
     launched: bool,
 };
 
+fn canCreateIpv4TcpSocket() bool {
+    if (builtin.os.tag != .linux) return true;
+    const linux = std.os.linux;
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {
+            _ = linux.close(@intCast(rc));
+            return true;
+        },
+        .PERM, .ACCES => return false,
+        else => return true,
+    }
+}
+
 fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
     _ = root;
 
@@ -907,7 +947,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     var totals: GateTotals = .{};
     var report: std.ArrayList(u8) = .empty;
     defer report.deinit(allocator);
-    try report.writer(allocator).print(
+    try report.print(
+        allocator,
         "Adversarial Detection Gate\nplatform={s}\nexpectation={s}\n\n",
         .{
             host_platform,
@@ -915,14 +956,74 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         },
     );
 
-    try report.writer(allocator).writeAll("[browser_targets]\n");
+    if (!canCreateIpv4TcpSocket()) {
+        const soft_skip = allow_missing_browser or allow_launch_probe_failures;
+        try report.appendSlice(allocator, "[browser_targets]\n");
+        for (target_browser_kinds) |kind| {
+            totals.targeted += 1;
+            totals.skipped += 1;
+            if (driver.support_tier.browserTier(kind) == .modern) totals.modern_targeted += 1;
+            try report.print(
+                allocator,
+                "target=browser api={s} kind={s} engine={s} platform={s} status={s} discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=socket_restricted\n",
+                .{
+                    apiTierName(driver.support_tier.browserTier(kind)),
+                    @tagName(kind),
+                    @tagName(driver.engineFor(kind)),
+                    host_platform,
+                    if (soft_skip) "SKIP" else "FAIL",
+                },
+            );
+        }
+        try report.appendSlice(allocator, "\n[webview_targets]\n");
+        for (target_webview_kinds) |kind| {
+            totals.targeted += 1;
+            totals.skipped += 1;
+            if (driver.support_tier.webViewTier(kind) == .modern) totals.modern_targeted += 1;
+            try report.print(
+                allocator,
+                "target=webview api={s} kind={s} engine={s} platform={s} status={s} discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=socket_restricted\n",
+                .{
+                    apiTierName(driver.support_tier.webViewTier(kind)),
+                    @tagName(kind),
+                    @tagName(webviewEngineForKind(kind)),
+                    webViewPlatformName(kind, host_platform),
+                    if (soft_skip) "SKIP" else "FAIL",
+                },
+            );
+        }
+        try report.print(
+            allocator,
+            "\ntotals targeted={d} discovered=0 launched=0 probed=0 detected=0 failed={d} skipped={d} modern_targeted={d} modern_discovered=0 modern_failed={d}\n",
+            .{
+                totals.targeted,
+                if (soft_skip) 0 else totals.targeted,
+                totals.skipped,
+                totals.modern_targeted,
+                if (soft_skip) 0 else totals.modern_targeted,
+            },
+        );
+        try report.appendSlice(allocator, if (soft_skip) "OVERALL: SKIP\n" else "OVERALL: FAIL\n");
+        if (out_path) |out| {
+            try writeFile(out, report.items);
+            std.debug.print("adversarial-detection-gate report: {s}\n", .{out});
+        }
+        if (soft_skip) {
+            std.debug.print("adversarial-detection-gate: sockets unavailable in current environment; skipping by request\n", .{});
+            return;
+        }
+        return ToolError.VerificationFailed;
+    }
+
+    try report.appendSlice(allocator, "[browser_targets]\n");
     for (target_browser_kinds) |kind| {
         const api_tier = driver.support_tier.browserTier(kind);
         totals.targeted += 1;
         if (api_tier == .modern) totals.modern_targeted += 1;
         if (api_tier == .unsupported) {
             totals.skipped += 1;
-            try report.writer(allocator).print(
+            try report.print(
+                allocator,
                 "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=unsupported_api\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(driver.engineFor(kind)), host_platform },
             );
@@ -931,7 +1032,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         const install_opt = firstInstallForKind(installs.items, kind);
         if (install_opt == null) {
             totals.skipped += 1;
-            try report.writer(allocator).print(
+            try report.print(
+                allocator,
                 "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=missing_install\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(driver.engineFor(kind)), host_platform },
             );
@@ -952,14 +1054,16 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             }) catch |err| {
                 if (allow_launch_probe_failures) {
                     totals.skipped += 1;
-                    try report.writer(allocator).print(
+                    try report.print(
+                        allocator,
                         "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error_ignored error={s}\n",
                         .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
                     );
                 } else {
                     totals.failed += 1;
                     totals.modern_failed += 1;
-                    try report.writer(allocator).print(
+                    try report.print(
+                        allocator,
                         "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_error error={s}\n",
                         .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
                     );
@@ -982,14 +1086,16 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         ) catch |err| {
             if (allow_launch_probe_failures) {
                 totals.skipped += 1;
-                try report.writer(allocator).print(
+                try report.print(
+                    allocator,
                     "target=browser api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error_ignored error={s}\n",
                     .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
                 );
             } else {
                 totals.failed += 1;
                 totals.modern_failed += 1;
-                try report.writer(allocator).print(
+                try report.print(
+                    allocator,
                     "target=browser api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=1 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
                     .{ apiTierName(api_tier), @tagName(kind), @tagName(install.engine), host_platform, @errorName(err) },
                 );
@@ -1010,7 +1116,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             }
         }
 
-        try report.writer(allocator).print(
+        try report.print(
+            allocator,
             "target=browser api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched=1 probed=1 detected={d} signal_count={d} high_confidence_count={d} score={d} reason={s}\n",
             .{
                 apiTierName(api_tier),
@@ -1027,7 +1134,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         );
     }
 
-    try report.writer(allocator).writeAll("\n[webview_targets]\n");
+    try report.appendSlice(allocator, "\n[webview_targets]\n");
     for (target_webview_kinds) |kind| {
         const api_tier = driver.support_tier.webViewTier(kind);
         totals.targeted += 1;
@@ -1035,7 +1142,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         const runtime_opt = bestWebViewRuntimeForKind(webview_runtimes.items, kind);
         if (runtime_opt == null) {
             totals.skipped += 1;
-            try report.writer(allocator).print(
+            try report.print(
+                allocator,
                 "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=0 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=missing_runtime\n",
                 .{ apiTierName(api_tier), @tagName(kind), @tagName(webviewEngineForKind(kind)), webViewPlatformName(kind, host_platform) },
             );
@@ -1049,14 +1157,16 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         var probe_session = launchOrAttachWebViewForProbe(allocator, runtime) catch |err| {
             if (allow_launch_probe_failures) {
                 totals.skipped += 1;
-                try report.writer(allocator).print(
+                try report.print(
+                    allocator,
                     "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_or_attach_error_ignored error={s}\n",
                     .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
                 );
             } else {
                 totals.failed += 1;
                 totals.modern_failed += 1;
-                try report.writer(allocator).print(
+                try report.print(
+                    allocator,
                     "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched=0 probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=launch_or_attach_error error={s}\n",
                     .{ apiTierName(api_tier), @tagName(kind), @tagName(runtime.engine), webViewPlatformName(kind, host_platform), @errorName(err) },
                 );
@@ -1077,7 +1187,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
         ) catch |err| {
             if (allow_launch_probe_failures) {
                 totals.skipped += 1;
-                try report.writer(allocator).print(
+                try report.print(
+                    allocator,
                     "target=webview api={s} kind={s} engine={s} platform={s} status=SKIP discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error_ignored error={s}\n",
                     .{
                         apiTierName(api_tier),
@@ -1091,7 +1202,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             } else {
                 totals.failed += 1;
                 totals.modern_failed += 1;
-                try report.writer(allocator).print(
+                try report.print(
+                    allocator,
                     "target=webview api={s} kind={s} engine={s} platform={s} status=FAIL discovered=1 launched={d} probed=0 detected=0 signal_count=0 high_confidence_count=0 score=0 reason=probe_error error={s}\n",
                     .{
                         apiTierName(api_tier),
@@ -1119,7 +1231,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             }
         }
 
-        try report.writer(allocator).print(
+        try report.print(
+            allocator,
             "target=webview api={s} kind={s} engine={s} platform={s} status={s} discovered=1 launched={d} probed=1 detected={d} signal_count={d} high_confidence_count={d} score={d} reason={s}\n",
             .{
                 apiTierName(api_tier),
@@ -1139,7 +1252,8 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
 
     if (totals.discovered == 0) {
         if (allow_missing_browser) {
-            try report.writer(allocator).print(
+            try report.print(
+                allocator,
                 "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d}\n",
                 .{
                     totals.targeted,
@@ -1151,7 +1265,7 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
                     totals.skipped,
                 },
             );
-            try report.writer(allocator).writeAll("OVERALL: SKIP\n");
+            try report.appendSlice(allocator, "OVERALL: SKIP\n");
             if (out_path) |out| {
                 try writeFile(out, report.items);
                 std.debug.print("adversarial-detection-gate report: {s}\n", .{out});
@@ -1159,12 +1273,13 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
             std.debug.print("adversarial-detection-gate: no targets discovered; skipping by request\n", .{});
             return;
         }
-        try report.writer(allocator).writeAll("OVERALL: FAIL\n");
+        try report.appendSlice(allocator, "OVERALL: FAIL\n");
         if (out_path) |out| try writeFile(out, report.items);
         return ToolError.NotFound;
     }
 
-    try report.writer(allocator).print(
+    try report.print(
+        allocator,
         "\ntotals targeted={d} discovered={d} launched={d} probed={d} detected={d} failed={d} skipped={d} modern_targeted={d} modern_discovered={d} modern_failed={d}\n",
         .{
             totals.targeted,
@@ -1181,9 +1296,9 @@ fn cmdAdversarialDetectionGate(allocator: Allocator, root: []const u8, args: []c
     );
 
     const overall_pass = totals.failed == 0;
-    try report.writer(allocator).print("OVERALL: {s}\n", .{if (overall_pass) "PASS" else "FAIL"});
+    try report.print(allocator, "OVERALL: {s}\n", .{if (overall_pass) "PASS" else "FAIL"});
     if (soft_verification and !overall_pass) {
-        try report.writer(allocator).writeAll("SOFT_VERIFICATION: enabled\n");
+        try report.appendSlice(allocator, "SOFT_VERIFICATION: enabled\n");
     }
     if (out_path) |out| {
         try writeFile(out, report.items);
@@ -1394,7 +1509,7 @@ fn retryProbeStep(session: *driver.Session, comptime step: fn (*driver.Session) 
     while (true) : (attempts += 1) {
         step(session) catch |err| {
             if (attempts >= 9 or !isTransientProbeError(err)) return err;
-            std.Thread.sleep(150 * std.time.ns_per_ms);
+            compat.sleepMs(150);
             continue;
         };
         return;
@@ -1406,7 +1521,7 @@ fn retryProbeEvaluate(session: *driver.Session, script: []const u8) ![]u8 {
     while (true) : (attempts += 1) {
         const payload = session.evaluate(script) catch |err| {
             if (attempts >= 9 or !isTransientProbeError(err)) return err;
-            std.Thread.sleep(150 * std.time.ns_per_ms);
+            compat.sleepMs(150);
             continue;
         };
         return payload;
@@ -1547,13 +1662,13 @@ fn scanForbiddenMarkers(allocator: Allocator, root: []const u8, max_hits: usize)
         hits.deinit(allocator);
     }
 
-    var dir = try std.fs.openDirAbsolute(root, .{ .iterate = true });
-    defer dir.close();
+    var dir = try compat.openDirAbsolute(root, .{ .iterate = true });
+    defer dir.close(compat.io());
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(compat.io())) |entry| {
         if (entry.kind != .file) continue;
         if (isIgnoredScanPath(entry.path)) continue;
 
@@ -1563,9 +1678,7 @@ fn scanForbiddenMarkers(allocator: Allocator, root: []const u8, max_hits: usize)
         const abs = try path_util.pathJoin(allocator, &.{ root, entry.path });
         defer allocator.free(abs);
         const data = blk: {
-            var f = std.fs.openFileAbsolute(abs, .{}) catch continue;
-            defer f.close();
-            break :blk f.readToEndAlloc(allocator, 4 * 1024 * 1024) catch continue;
+            break :blk compat.cwd().readFileAlloc(allocator, abs, 4 * 1024 * 1024) catch continue;
         };
         defer allocator.free(data);
 
@@ -1612,7 +1725,9 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
     var out_default: ?[]u8 = null;
     defer if (out_default) |p| allocator.free(p);
     const out_raw = flags.get("out") orelse blk: {
-        out_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "reports", try std.fmt.allocPrint(allocator, "production-gate-{s}.txt", .{ts}) });
+        const report_name = try std.fmt.allocPrint(allocator, "production-gate-{s}.txt", .{ts});
+        defer allocator.free(report_name);
+        out_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "reports", report_name });
         break :blk out_default.?;
     };
     const out = try path_util.toAbsolutePath(allocator, root, out_raw);
@@ -1621,7 +1736,7 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
 
     var report: std.ArrayList(u8) = .empty;
     defer report.deinit(allocator);
-    try report.writer(allocator).print("Production Gate\ntimestamp_utc: {s}\nroot: {s}\nstrict_ga: {d}\nmatrix_root: {s}\n\n", .{ ts, root, @intFromBool(strict_ga), matrix_root });
+    try report.print(allocator, "Production Gate\ntimestamp_utc: {s}\nroot: {s}\nstrict_ga: {d}\nmatrix_root: {s}\n\n", .{ ts, root, @intFromBool(strict_ga), matrix_root });
 
     var all_pass = true;
 
@@ -1667,7 +1782,10 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
 
     if (reports.items.len == 0 and !strict_ga) {
         const host = getHostPlatform();
-        const run_out = try path_util.pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host, ts }) });
+        const run_name = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host, ts });
+        defer allocator.free(run_name);
+        const run_out = try path_util.pathJoin(allocator, &.{ matrix_root, run_name });
+        defer allocator.free(run_out);
         var ran = true;
         cmdMatrixRun(allocator, root, &.{ "--platform", host, "--allow-platform-mismatch", "--out", run_out }) catch {
             ran = false;
@@ -1710,9 +1828,9 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
         for (required_files) |rel| {
             const p = try path_util.pathJoin(allocator, &.{ root, rel });
             defer allocator.free(p);
-            if (std.fs.openFileAbsolute(p, .{}) catch null == null) {
+            if (compat.openFileAbsolute(p, .{}) catch null == null) {
                 docs_ok = false;
-                try report.writer(allocator).print("missing_doc: {s}\n", .{rel});
+                try report.print(allocator, "missing_doc: {s}\n", .{rel});
             }
         }
         if (!docs_ok) all_pass = false;
@@ -1732,9 +1850,9 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
         const marker_ok = hits.items.len == 0;
         if (!marker_ok) {
             all_pass = false;
-            try report.writer(allocator).print("forbidden_marker_hits:\n", .{});
+            try report.print(allocator, "forbidden_marker_hits:\n", .{});
             for (hits.items) |hit| {
-                try report.writer(allocator).print("- {s}\n", .{hit});
+                try report.print(allocator, "- {s}\n", .{hit});
             }
         }
         try steps.append(allocator, .{
@@ -1778,15 +1896,15 @@ fn cmdProductionGate(allocator: Allocator, root: []const u8, args: []const []con
         });
     }
 
-    try report.writer(allocator).print("checks:\n", .{});
+    try report.print(allocator, "checks:\n", .{});
     for (steps.items) |s| {
-        try report.writer(allocator).print("- {s}: {s} ({s})\n", .{
+        try report.print(allocator, "- {s}: {s} ({s})\n", .{
             s.name,
             if (s.ok) "PASS" else "FAIL",
             s.detail,
         });
     }
-    try report.writer(allocator).print("\nOVERALL: {s}\n", .{if (all_pass) "PASS" else "FAIL"});
+    try report.print(allocator, "\nOVERALL: {s}\n", .{if (all_pass) "PASS" else "FAIL"});
 
     try writeFile(out, report.items);
 
@@ -1833,7 +1951,9 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     var out_dir_default: ?[]u8 = null;
     defer if (out_dir_default) |p| allocator.free(p);
     const out_dir_raw = flags.get("out") orelse blk: {
-        out_dir_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ platform, ts }) });
+        const out_dir_name = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ platform, ts });
+        defer allocator.free(out_dir_name);
+        out_dir_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix", out_dir_name });
         break :blk out_dir_default.?;
     };
     const out_dir = try path_util.toAbsolutePath(allocator, root, out_dir_raw);
@@ -1927,7 +2047,8 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
 
     var env_txt: std.ArrayList(u8) = .empty;
     defer env_txt.deinit(allocator);
-    try env_txt.writer(allocator).print(
+    try env_txt.print(
+        allocator,
         "platform={s}\nhost_uname={s}\nprofile_mode={s}\nstrict_ga={d}\ntimestamp_utc={s}\ngit_commit={s}\nzig_version={s}\n\n[browser_versions]\n",
         .{ platform, host_platform, profile_mode, @intFromBool(strict_ga), ts, head_commit, zig_ver },
     );
@@ -1950,9 +2071,9 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         const res = runCaptureTrimmed(allocator, &.{ "bash", "-lc", cmd }, root, null) catch null;
         if (res) |line| {
             defer allocator.free(line);
-            try env_txt.writer(allocator).print("{s} => {s}\n", .{ cmd, line });
+            try env_txt.print(allocator, "{s} => {s}\n", .{ cmd, line });
         } else {
-            try env_txt.writer(allocator).print("{s} => NOT_FOUND\n", .{cmd});
+            try env_txt.print(allocator, "{s} => NOT_FOUND\n", .{cmd});
         }
     }
 
@@ -1962,9 +2083,9 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
             const tool_path = try runCaptureTrimmed(allocator, &.{ if (isWindowsHost()) "where" else "which", tool }, null, null);
             defer allocator.free(tool_path);
             const first_line = std.mem.sliceTo(tool_path, '\n');
-            try env_txt.writer(allocator).print("{s}={s}\n", .{ tool, first_line });
+            try env_txt.print(allocator, "{s}={s}\n", .{ tool, first_line });
         } else {
-            try env_txt.writer(allocator).print("{s}=NOT_FOUND\n", .{tool});
+            try env_txt.print(allocator, "{s}=NOT_FOUND\n", .{tool});
         }
     }
 
@@ -1974,10 +2095,10 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     defer allocator.free(logs_dir);
 
     var overall = true;
-    var logs_abs = try std.fs.openDirAbsolute(logs_dir, .{ .iterate = true });
-    defer logs_abs.close();
+    var logs_abs = try compat.openDirAbsolute(logs_dir, .{ .iterate = true });
+    defer logs_abs.close(compat.io());
     var it = logs_abs.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(compat.io())) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".status")) continue;
         const status_path = try path_util.pathJoin(allocator, &.{ logs_dir, entry.name });
@@ -1993,7 +2114,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     const report = try path_util.pathJoin(allocator, &.{ out_dir, "matrix-report.txt" });
     var rpt: std.ArrayList(u8) = .empty;
     defer rpt.deinit(allocator);
-    try rpt.writer(allocator).print("Matrix Report\nplatform: {s}\ntimestamp_utc: {s}\ncommit: {s}\nprofile_mode: {s}\nstrict_ga: {d}\n\nChecks:\n", .{
+    try rpt.print(allocator, "Matrix Report\nplatform: {s}\ntimestamp_utc: {s}\ncommit: {s}\nprofile_mode: {s}\nstrict_ga: {d}\n\nChecks:\n", .{
         platform,
         ts,
         head_commit,
@@ -2001,15 +2122,15 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         @intFromBool(strict_ga),
     });
 
-    var logs_abs2 = try std.fs.openDirAbsolute(logs_dir, .{ .iterate = true });
-    defer logs_abs2.close();
+    var logs_abs2 = try compat.openDirAbsolute(logs_dir, .{ .iterate = true });
+    defer logs_abs2.close(compat.io());
     var it2 = logs_abs2.iterate();
     var status_paths: std.ArrayList([]u8) = .empty;
     defer {
         for (status_paths.items) |p| allocator.free(p);
         status_paths.deinit(allocator);
     }
-    while (try it2.next()) |entry| {
+    while (try it2.next(compat.io())) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".status")) continue;
         const p = try path_util.pathJoin(allocator, &.{ logs_dir, entry.name });
@@ -2026,11 +2147,12 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         const status_data = try readFileAlloc(allocator, p, 64);
         defer allocator.free(status_data);
         const st = std.mem.trim(u8, status_data, "\r\n\t ");
-        try rpt.writer(allocator).print("- {s}: {s}\n", .{ name, st });
+        try rpt.print(allocator, "- {s}: {s}\n", .{ name, st });
     }
 
     const adversarial_counts = parseAdversarialTierCounts(allocator, adversarial_report_path) catch AdversarialTierCounts{};
-    try rpt.writer(allocator).print(
+    try rpt.print(
+        allocator,
         "\nadversarial_modern_targets: {d}\nadversarial_modern_failures: {d}\n",
         .{
             adversarial_counts.modern_targets,
@@ -2038,7 +2160,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
         },
     );
 
-    try rpt.writer(allocator).print("\nOVERALL: {s}\n\n", .{if (overall) "PASS" else "FAIL"});
+    try rpt.print(allocator, "\nOVERALL: {s}\n\n", .{if (overall) "PASS" else "FAIL"});
     const env_data = try readFileAlloc(allocator, env_txt_path, 4 * 1024 * 1024);
     defer allocator.free(env_data);
     try rpt.appendSlice(allocator, env_data);
@@ -2055,7 +2177,7 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
     if (strict_ga) {
         const asc = try std.fmt.allocPrint(allocator, "{s}.asc", .{report});
         defer allocator.free(asc);
-        if (std.fs.openFileAbsolute(asc, .{}) catch null == null) {
+        if (compat.openFileAbsolute(asc, .{}) catch null == null) {
             std.debug.print("strict GA requires a signed report (.asc missing)\n", .{});
             return ToolError.VerificationFailed;
         }
@@ -2071,13 +2193,13 @@ fn cmdMatrixRun(allocator: Allocator, root: []const u8, args: []const []const u8
 
 fn copyTree(allocator: Allocator, src_root: []const u8, dst_root: []const u8) !void {
     try ensurePath(dst_root);
-    var src = try std.fs.openDirAbsolute(src_root, .{ .iterate = true });
-    defer src.close();
+    var src = try compat.openDirAbsolute(src_root, .{ .iterate = true });
+    defer src.close(compat.io());
 
     var walker = try src.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(compat.io())) |entry| {
         const src_path = try path_util.pathJoin(allocator, &.{ src_root, entry.path });
         defer allocator.free(src_path);
         const dst_path = try path_util.pathJoin(allocator, &.{ dst_root, entry.path });
@@ -2089,7 +2211,7 @@ fn copyTree(allocator: Allocator, src_root: []const u8, dst_root: []const u8) !v
                 if (std.fs.path.dirname(dst_path)) |parent| {
                     try ensurePath(parent);
                 }
-                try std.fs.copyFileAbsolute(src_path, dst_path, .{});
+                try std.Io.Dir.copyFileAbsolute(src_path, dst_path, compat.io(), .{});
             },
             else => {},
         }
@@ -2097,13 +2219,16 @@ fn copyTree(allocator: Allocator, src_root: []const u8, dst_root: []const u8) !v
 }
 
 fn sha256FileHex(allocator: Allocator, path: []const u8) ![]u8 {
-    var file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
+    var file = try compat.openFileAbsolute(path, .{});
+    defer file.close(compat.io());
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [64 * 1024]u8 = undefined;
+    var reader = file.reader(compat.io(), &buf);
     while (true) {
-        const n = try file.read(&buf);
+        const n = reader.interface.readSliceShort(&buf) catch {
+            return reader.err.?;
+        };
         if (n == 0) break;
         hasher.update(buf[0..n]);
     }
@@ -2124,7 +2249,12 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
     const strict_ga_bundle = !std.mem.eql(u8, mapGetOr(&flags, "no-strict-ga", "0"), "1");
 
     var release_id = flags.get("release-id");
-    const matrix_root = mapGetOr(&flags, "matrix-root", try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" }));
+    var matrix_root_default: ?[]u8 = null;
+    defer if (matrix_root_default) |p| allocator.free(p);
+    const matrix_root = mapGetOr(&flags, "matrix-root", blk: {
+        matrix_root_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" });
+        break :blk matrix_root_default.?;
+    });
 
     if (release_id == null) {
         const short = try runCaptureTrimmed(allocator, &.{ "git", "rev-parse", "--short", "HEAD" }, root, null);
@@ -2134,7 +2264,10 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         release_id = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ short, ts });
     }
 
-    const summary_path = try path_util.pathJoin(allocator, &.{ matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) });
+    const summary_name = try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?});
+    defer allocator.free(summary_name);
+    const summary_path = try path_util.pathJoin(allocator, &.{ matrix_root, summary_name });
+    defer allocator.free(summary_path);
     if (std.mem.eql(u8, mapGetOr(&flags, "no-strict-ga", "0"), "1")) {
         try cmdMatrixCollect(allocator, root, &.{ "--matrix-root", matrix_root, "--out", summary_path });
     } else {
@@ -2144,10 +2277,17 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
     try runInherit(allocator, &.{ "zig", "build", "-Doptimize=ReleaseSafe" }, root, &env);
 
     const bundle_dir = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release", release_id.? });
+    defer allocator.free(bundle_dir);
     try ensurePath(bundle_dir);
-    try ensurePath(try path_util.pathJoin(allocator, &.{ bundle_dir, "bin" }));
-    try ensurePath(try path_util.pathJoin(allocator, &.{ bundle_dir, "docs" }));
-    try ensurePath(try path_util.pathJoin(allocator, &.{ bundle_dir, "logs" }));
+    const bundle_bin_dir = try path_util.pathJoin(allocator, &.{ bundle_dir, "bin" });
+    defer allocator.free(bundle_bin_dir);
+    try ensurePath(bundle_bin_dir);
+    const bundle_docs_dir = try path_util.pathJoin(allocator, &.{ bundle_dir, "docs" });
+    defer allocator.free(bundle_docs_dir);
+    try ensurePath(bundle_docs_dir);
+    const bundle_logs_dir = try path_util.pathJoin(allocator, &.{ bundle_dir, "logs" });
+    defer allocator.free(bundle_logs_dir);
+    try ensurePath(bundle_logs_dir);
 
     const bin_unix = try path_util.pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver" });
     const bin_win = try path_util.pathJoin(allocator, &.{ root, "zig-out", "bin", "alldriver.exe" });
@@ -2160,12 +2300,12 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         allocator.free(out_bin_win);
     }
 
-    if (std.fs.openFileAbsolute(bin_unix, .{}) catch null) |f| {
-        f.close();
-        try std.fs.copyFileAbsolute(bin_unix, out_bin_unix, .{});
-    } else if (std.fs.openFileAbsolute(bin_win, .{}) catch null) |f| {
-        f.close();
-        try std.fs.copyFileAbsolute(bin_win, out_bin_win, .{});
+    if (compat.openFileAbsolute(bin_unix, .{}) catch null) |f| {
+        f.close(compat.io());
+        try std.Io.Dir.copyFileAbsolute(bin_unix, out_bin_unix, compat.io(), .{});
+    } else if (compat.openFileAbsolute(bin_win, .{}) catch null) |f| {
+        f.close(compat.io());
+        try std.Io.Dir.copyFileAbsolute(bin_win, out_bin_win, compat.io(), .{});
     } else {
         std.debug.print("release binary not found in zig-out/bin\n", .{});
         return ToolError.NotFound;
@@ -2177,12 +2317,12 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         defer allocator.free(src_doc);
         const dst_doc = try path_util.pathJoin(allocator, &.{ bundle_dir, "docs", doc });
         defer allocator.free(dst_doc);
-        try std.fs.copyFileAbsolute(src_doc, dst_doc, .{});
+        try std.Io.Dir.copyFileAbsolute(src_doc, dst_doc, compat.io(), .{});
     }
 
     const summary_dst = try path_util.pathJoin(allocator, &.{ bundle_dir, "logs", std.fs.path.basename(summary_path) });
     defer allocator.free(summary_dst);
-    try std.fs.copyFileAbsolute(summary_path, summary_dst, .{});
+    try std.Io.Dir.copyFileAbsolute(summary_path, summary_dst, compat.io(), .{});
 
     const matrix_runs_dst = try path_util.pathJoin(allocator, &.{ bundle_dir, "logs", "matrix-runs" });
     defer allocator.free(matrix_runs_dst);
@@ -2206,11 +2346,11 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         for (files.items) |p| allocator.free(p);
         files.deinit(allocator);
     }
-    var bdir = try std.fs.openDirAbsolute(bundle_dir, .{ .iterate = true });
-    defer bdir.close();
+    var bdir = try compat.openDirAbsolute(bundle_dir, .{ .iterate = true });
+    defer bdir.close(compat.io());
     var walker = try bdir.walk(allocator);
     defer walker.deinit();
-    while (try walker.next()) |entry| {
+    while (try walker.next(compat.io())) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.eql(u8, entry.path, "SHA256SUMS") or std.mem.eql(u8, entry.path, "SHA256SUMS.asc")) continue;
         try files.append(allocator, try allocator.dupe(u8, entry.path));
@@ -2230,7 +2370,7 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         defer allocator.free(abs);
         const hash = try sha256FileHex(allocator, abs);
         defer allocator.free(hash);
-        try sums.writer(allocator).print("{s}  ./{s}\n", .{ hash, rel });
+        try sums.print(allocator, "{s}  ./{s}\n", .{ hash, rel });
     }
     try writeFile(sums_path, sums.items);
 
@@ -2240,9 +2380,13 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         try runInherit(allocator, &.{ "gpg", "--batch", "--yes", "--local-user", env.get("RELEASE_GPG_KEY_ID").?, "--armor", "--detach-sign", "--output", asc, sums_path }, root, null);
     }
 
-    const tarball = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release", try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{release_id.?}) });
+    const tarball_name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{release_id.?});
+    defer allocator.free(tarball_name);
+    const tarball = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release", tarball_name });
     defer allocator.free(tarball);
-    try runInherit(allocator, &.{ "tar", "-C", try path_util.pathJoin(allocator, &.{ root, "artifacts", "release" }), "-czf", tarball, release_id.? }, root, null);
+    const release_root = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release" });
+    defer allocator.free(release_root);
+    try runInherit(allocator, &.{ "tar", "-C", release_root, "-czf", tarball, release_id.? }, root, null);
 
     std.debug.print("release bundle ready\nbundle_dir={s}\ntarball={s}\n", .{ bundle_dir, tarball });
 }
@@ -2258,7 +2402,12 @@ fn cmdMatrixRunRemote(allocator: Allocator, root: []const u8, args: []const []co
     const platform = flags.get("platform") orelse return ToolError.InvalidArgs;
     const repo_path = flags.get("repo-path") orelse return ToolError.InvalidArgs;
     const port = mapGetOr(&flags, "port", "22");
-    const matrix_root = mapGetOr(&flags, "matrix-root", try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" }));
+    var matrix_root_default: ?[]u8 = null;
+    defer if (matrix_root_default) |p| allocator.free(p);
+    const matrix_root = mapGetOr(&flags, "matrix-root", blk: {
+        matrix_root_default = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix" });
+        break :blk matrix_root_default.?;
+    });
     const strict_ga = !std.mem.eql(u8, mapGetOr(&flags, "no-strict-ga", "0"), "1");
 
     var run_id = flags.get("run-id");
@@ -2286,6 +2435,7 @@ fn cmdMatrixRunRemote(allocator: Allocator, root: []const u8, args: []const []co
     try runInherit(allocator, &.{ "scp", "-P", port, "-r", src, matrix_root }, root, null);
 
     const local_dir = try path_util.pathJoin(allocator, &.{ matrix_root, run_id.? });
+    defer allocator.free(local_dir);
     std.debug.print("remote matrix run collected\nrun_id={s}\nlocal_dir={s}\n", .{ run_id.?, local_dir });
 }
 
@@ -2304,11 +2454,11 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
     const config = try path_util.toAbsolutePath(allocator, root, config_raw);
     defer allocator.free(config);
 
-    const cfg_file = std.fs.openFileAbsolute(config, .{}) catch {
+    const cfg_file = compat.openFileAbsolute(config, .{}) catch {
         std.debug.print("config not found: {s}\n", .{config});
         return ToolError.NotFound;
     };
-    cfg_file.close();
+    cfg_file.close(compat.io());
 
     var cfg = try readEnvConfig(allocator, config);
     defer freeStringMap(allocator, &cfg);
@@ -2331,28 +2481,44 @@ fn cmdMatrixGa(allocator: Allocator, root: []const u8, args: []const []const u8)
     if (std.mem.eql(u8, linux_mode, "local")) {
         const run_id = try std.fmt.allocPrint(allocator, "linux-{s}", .{release_id.?});
         defer allocator.free(run_id);
-        try cmdMatrixRun(allocator, root, &.{ "--platform", "linux", "--strict-ga", "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id }) });
+        const out_path = try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id });
+        defer allocator.free(out_path);
+        try cmdMatrixRun(allocator, root, &.{ "--platform", "linux", "--strict-ga", "--out", out_path });
     } else if (std.mem.eql(u8, linux_mode, "ssh")) {
-        try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "LINUX_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "LINUX_SSH_PORT", "22"), "--platform", "linux", "--repo-path", mapGetRequired(&cfg, "LINUX_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", try std.fmt.allocPrint(allocator, "linux-{s}", .{release_id.?}), "--matrix-root", matrix_root.? });
+        const run_id = try std.fmt.allocPrint(allocator, "linux-{s}", .{release_id.?});
+        defer allocator.free(run_id);
+        try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "LINUX_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "LINUX_SSH_PORT", "22"), "--platform", "linux", "--repo-path", mapGetRequired(&cfg, "LINUX_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", run_id, "--matrix-root", matrix_root.? });
     } else return ToolError.InvalidArgs;
 
     if (std.mem.eql(u8, windows_mode, "local")) {
         const run_id = try std.fmt.allocPrint(allocator, "windows-{s}", .{release_id.?});
         defer allocator.free(run_id);
-        try cmdMatrixRun(allocator, root, &.{ "--platform", "windows", "--strict-ga", "--allow-platform-mismatch", "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id }) });
+        const out_path = try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id });
+        defer allocator.free(out_path);
+        try cmdMatrixRun(allocator, root, &.{ "--platform", "windows", "--strict-ga", "--allow-platform-mismatch", "--out", out_path });
     } else if (std.mem.eql(u8, windows_mode, "ssh")) {
-        try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "WINDOWS_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "WINDOWS_SSH_PORT", "22"), "--platform", "windows", "--repo-path", mapGetRequired(&cfg, "WINDOWS_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", try std.fmt.allocPrint(allocator, "windows-{s}", .{release_id.?}), "--matrix-root", matrix_root.? });
+        const run_id = try std.fmt.allocPrint(allocator, "windows-{s}", .{release_id.?});
+        defer allocator.free(run_id);
+        try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "WINDOWS_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "WINDOWS_SSH_PORT", "22"), "--platform", "windows", "--repo-path", mapGetRequired(&cfg, "WINDOWS_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", run_id, "--matrix-root", matrix_root.? });
     } else return ToolError.InvalidArgs;
 
     if (std.mem.eql(u8, macos_mode, "local")) {
         const run_id = try std.fmt.allocPrint(allocator, "macos-{s}", .{release_id.?});
         defer allocator.free(run_id);
-        try cmdMatrixRun(allocator, root, &.{ "--platform", "macos", "--strict-ga", "--allow-platform-mismatch", "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id }) });
+        const out_path = try path_util.pathJoin(allocator, &.{ matrix_root.?, run_id });
+        defer allocator.free(out_path);
+        try cmdMatrixRun(allocator, root, &.{ "--platform", "macos", "--strict-ga", "--allow-platform-mismatch", "--out", out_path });
     } else if (std.mem.eql(u8, macos_mode, "ssh")) {
-        try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "MACOS_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "MACOS_SSH_PORT", "22"), "--platform", "macos", "--repo-path", mapGetRequired(&cfg, "MACOS_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", try std.fmt.allocPrint(allocator, "macos-{s}", .{release_id.?}), "--matrix-root", matrix_root.? });
+        const run_id = try std.fmt.allocPrint(allocator, "macos-{s}", .{release_id.?});
+        defer allocator.free(run_id);
+        try cmdMatrixRunRemote(allocator, root, &.{ "--host", mapGetRequired(&cfg, "MACOS_SSH_HOST") catch return ToolError.InvalidArgs, "--port", mapGetOr(&cfg, "MACOS_SSH_PORT", "22"), "--platform", "macos", "--repo-path", mapGetRequired(&cfg, "MACOS_REPO_PATH") catch return ToolError.InvalidArgs, "--run-id", run_id, "--matrix-root", matrix_root.? });
     } else return ToolError.InvalidArgs;
 
-    try cmdMatrixCollect(allocator, root, &.{ "--strict-ga", "--matrix-root", matrix_root.?, "--out", try path_util.pathJoin(allocator, &.{ matrix_root.?, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) }) });
+    const summary_out_name = try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?});
+    defer allocator.free(summary_out_name);
+    const summary_out = try path_util.pathJoin(allocator, &.{ matrix_root.?, summary_out_name });
+    defer allocator.free(summary_out);
+    try cmdMatrixCollect(allocator, root, &.{ "--strict-ga", "--matrix-root", matrix_root.?, "--out", summary_out });
     try cmdReleaseBundle(allocator, root, &.{ "--release-id", release_id.?, "--matrix-root", matrix_root.? });
 
     std.debug.print("GA matrix and bundle complete\nrelease_id={s}\n", .{release_id.?});
@@ -2374,8 +2540,8 @@ fn cmdVmCheckPrereqs(allocator: Allocator, _: []const u8, _: []const []const u8)
     }
 
     if (!isWindowsHost()) {
-        if (std.fs.openFileAbsolute("/dev/kvm", .{}) catch null) |f| {
-            f.close();
+        if (compat.openFileAbsolute("/dev/kvm", .{}) catch null) |f| {
+            f.close(compat.io());
             std.debug.print("OK: /dev/kvm present\n", .{});
         } else {
             std.debug.print("WARN: /dev/kvm missing, VM will run with TCG only\n", .{});
@@ -2485,11 +2651,11 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
     const meta_data = try path_util.pathJoin(allocator, &.{ cloud_init_dir, "meta-data" });
     defer allocator.free(meta_data);
 
-    if (std.fs.openFileAbsolute(base_img, .{}) catch null == null) {
+    if (compat.openFileAbsolute(base_img, .{}) catch null == null) {
         std.debug.print("downloading base image: {s}\n", .{base_url});
         const tmp = try std.fmt.allocPrint(allocator, "{s}.partial", .{base_img});
         defer allocator.free(tmp);
-        _ = std.fs.deleteFileAbsolute(tmp) catch {};
+        _ = compat.cwd().deleteFile(tmp) catch {};
         try runInherit(allocator, &.{ "curl", "-fL", base_url, "-o", tmp }, root, null);
         if (base_sha256.len > 0) {
             if (!(try commandExists(allocator, "sha256sum"))) return ToolError.MissingDependency;
@@ -2497,16 +2663,16 @@ fn cmdVmCreateLinux(allocator: Allocator, root: []const u8, args: []const []cons
             defer allocator.free(sh_cmd);
             try runInherit(allocator, &.{ "bash", "-lc", sh_cmd }, root, null);
         }
-        try std.fs.renameAbsolute(tmp, base_img);
+        try compat.cwd().rename(tmp, base_img);
     }
 
-    if (std.fs.openFileAbsolute(overlay_img, .{}) catch null == null) {
+    if (compat.openFileAbsolute(overlay_img, .{}) catch null == null) {
         try runInherit(allocator, &.{ "qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base_img, overlay_img, "80G" }, root, null);
     }
 
     const ssh_key = try path_util.pathJoin(allocator, &.{ vm_dir, "id_ed25519" });
     defer allocator.free(ssh_key);
-    if (std.fs.openFileAbsolute(ssh_key, .{}) catch null == null) {
+    if (compat.openFileAbsolute(ssh_key, .{}) catch null == null) {
         try runInherit(allocator, &.{ "ssh-keygen", "-t", "ed25519", "-N", "", "-f", ssh_key }, root, null);
     }
 
@@ -2595,7 +2761,7 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
     defer allocator.free(vm_dir);
     const vm_env_path = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env_path);
-    if (std.fs.openFileAbsolute(vm_env_path, .{}) catch null == null) {
+    if (compat.openFileAbsolute(vm_env_path, .{}) catch null == null) {
         std.debug.print("vm metadata missing: {s}\ncreate vm first: vm-create-linux\n", .{vm_env_path});
         return ToolError.NotFound;
     }
@@ -2612,7 +2778,7 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
         break :blk try path_util.pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
     };
     defer if (disk_path.ptr != vm.vm_disk_image.ptr) allocator.free(disk_path);
-    if (std.fs.openFileAbsolute(disk_path, .{}) catch null == null) {
+    if (compat.openFileAbsolute(disk_path, .{}) catch null == null) {
         std.debug.print("vm disk image missing: {s}\n", .{disk_path});
         return ToolError.NotFound;
     }
@@ -2621,7 +2787,7 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
         break :blk try path_util.pathJoin(allocator, &.{ vm_dir, "cloud-init" });
     };
     defer if (cloud_init_dir.ptr != vm.vm_cloud_init_dir.ptr) allocator.free(cloud_init_dir);
-    if (std.fs.openDirAbsolute(cloud_init_dir, .{}) catch null == null) {
+    if (compat.openDirAbsolute(cloud_init_dir, .{}) catch null == null) {
         std.debug.print("cloud-init dir missing: {s}\n", .{cloud_init_dir});
         return ToolError.NotFound;
     }
@@ -2640,10 +2806,10 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
     var server_thread = try std.Thread.spawn(.{}, runCloudInitServer, .{&ctx});
     defer {
         stop.store(true, .release);
-        const wake_addr = std.net.Address.parseIp("127.0.0.1", cloud_init_port) catch null;
+        const wake_addr = std.Io.net.IpAddress.parse("127.0.0.1", cloud_init_port) catch null;
         if (wake_addr) |addr| {
-            const wake = std.net.tcpConnectToAddress(addr) catch null;
-            if (wake) |stream| stream.close();
+            const wake = addr.connect(compat.io(), .{ .mode = .stream }) catch null;
+            if (wake) |stream| stream.close(compat.io());
         }
         server_thread.join();
     }
@@ -2681,23 +2847,23 @@ fn cmdVmStartLinux(allocator: Allocator, root: []const u8, args: []const []const
 }
 
 fn runCloudInitServer(ctx: *CloudInitServerCtx) void {
-    const address = std.net.Address.parseIp("127.0.0.1", ctx.port) catch return;
-    var server = address.listen(.{ .reuse_address = true }) catch return;
-    defer server.deinit();
+    const address = std.Io.net.IpAddress.parse("127.0.0.1", ctx.port) catch return;
+    var server = address.listen(compat.io(), .{ .reuse_address = true }) catch return;
+    defer server.deinit(compat.io());
 
     while (!ctx.stop.load(.acquire)) {
-        var conn = server.accept() catch {
+        var conn = server.accept(compat.io()) catch {
             if (ctx.stop.load(.acquire)) break;
             continue;
         };
-        defer conn.stream.close();
-        handleCloudInitConnection(ctx, &conn.stream) catch {};
+        defer conn.close(compat.io());
+        handleCloudInitConnection(ctx, &conn) catch {};
     }
 }
 
-fn handleCloudInitConnection(ctx: *const CloudInitServerCtx, stream: *std.net.Stream) !void {
+fn handleCloudInitConnection(ctx: *const CloudInitServerCtx, stream: *std.Io.net.Stream) !void {
     var req_buf: [4096]u8 = undefined;
-    const n = try stream.read(&req_buf);
+    const n = try driver.io.read(stream, &req_buf);
     if (n == 0) return;
 
     const req = req_buf[0..n];
@@ -2727,12 +2893,12 @@ fn handleCloudInitConnection(ctx: *const CloudInitServerCtx, stream: *std.net.St
         return;
     };
 
-    const file = std.fs.openFileAbsolute(full_path, .{}) catch {
+    const file = compat.openFileAbsolute(full_path, .{}) catch {
         try writeSimpleHttpResponse(stream, "404 Not Found", "not found");
         return;
     };
-    defer file.close();
-    const body = file.readToEndAlloc(std.heap.page_allocator, 1 * 1024 * 1024) catch {
+    defer file.close(compat.io());
+    const body = compat.cwd().readFileAlloc(std.heap.page_allocator, full_path, 1 * 1024 * 1024) catch {
         try writeSimpleHttpResponse(stream, "404 Not Found", "not found");
         return;
     };
@@ -2744,19 +2910,19 @@ fn handleCloudInitConnection(ctx: *const CloudInitServerCtx, stream: *std.net.St
         "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
         .{body.len},
     );
-    try stream.writeAll(header);
-    try stream.writeAll(body);
+    try driver.io.writeAll(stream, header);
+    try driver.io.writeAll(stream, body);
 }
 
-fn writeSimpleHttpResponse(stream: *std.net.Stream, status: []const u8, body: []const u8) !void {
+fn writeSimpleHttpResponse(stream: *std.Io.net.Stream, status: []const u8, body: []const u8) !void {
     var header_buf: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(
         &header_buf,
         "HTTP/1.1 {s}\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
         .{ status, body.len },
     );
-    try stream.writeAll(header);
-    try stream.writeAll(body);
+    try driver.io.writeAll(stream, header);
+    try driver.io.writeAll(stream, body);
 }
 
 fn cmdVmRunLinuxMatrix(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
@@ -2776,7 +2942,7 @@ fn cmdVmRunLinuxMatrix(allocator: Allocator, root: []const u8, args: []const []c
     const vm_env_path = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env_path);
 
-    if (std.fs.openFileAbsolute(vm_env_path, .{}) catch null == null) {
+    if (compat.openFileAbsolute(vm_env_path, .{}) catch null == null) {
         std.debug.print("vm metadata missing: {s}\ncreate vm first: vm-create-linux\n", .{vm_env_path});
         return ToolError.NotFound;
     }
@@ -2808,19 +2974,28 @@ fn cmdVmRunLinuxMatrix(allocator: Allocator, root: []const u8, args: []const []c
     );
     defer allocator.free(remote_cmd);
 
-    try runInherit(allocator, &.{ "ssh", "-i", vm.ssh_key, "-p", vm.ssh_port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", try std.fmt.allocPrint(allocator, "{s}@127.0.0.1", .{vm.vm_user}), remote_cmd }, root, null);
+    const ssh_target = try std.fmt.allocPrint(allocator, "{s}@127.0.0.1", .{vm.vm_user});
+    defer allocator.free(ssh_target);
+    try runInherit(allocator, &.{ "ssh", "-i", vm.ssh_key, "-p", vm.ssh_port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", ssh_target, remote_cmd }, root, null);
 
     const ts = try nowStamp(allocator);
     defer allocator.free(ts);
-    const local_matrix_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ vm_name, ts }) });
+    const matrix_dir_name = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ vm_name, ts });
+    defer allocator.free(matrix_dir_name);
+    const local_matrix_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", matrix_dir_name });
+    defer allocator.free(local_matrix_dir);
     try ensurePath(local_matrix_dir);
 
+    const rsync_ssh = try std.fmt.allocPrint(allocator, "ssh -i {s} -p {s} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", .{ vm.ssh_key, vm.ssh_port });
+    defer allocator.free(rsync_ssh);
+    const rsync_src = try std.fmt.allocPrint(allocator, "{s}@127.0.0.1:{s}/artifacts/matrix/", .{ vm.vm_user, remote_repo });
+    defer allocator.free(rsync_src);
     try runInherit(
         allocator,
         &.{
-            "rsync",                                                                                                "-a",
-            "-e",                                                                                                   try std.fmt.allocPrint(allocator, "ssh -i {s} -p {s} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", .{ vm.ssh_key, vm.ssh_port }),
-            try std.fmt.allocPrint(allocator, "{s}@127.0.0.1:{s}/artifacts/matrix/", .{ vm.vm_user, remote_repo }), local_matrix_dir,
+            "rsync",   "-a",
+            "-e",      rsync_ssh,
+            rsync_src, local_matrix_dir,
         },
         root,
         null,
@@ -2843,7 +3018,7 @@ fn cmdVmRunRemoteMatrix(allocator: Allocator, root: []const u8, args: []const []
 
     const manifest = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "hosts", host_name, "host.env" });
     defer allocator.free(manifest);
-    if (std.fs.openFileAbsolute(manifest, .{}) catch null == null) {
+    if (compat.openFileAbsolute(manifest, .{}) catch null == null) {
         std.debug.print("host not registered: {s}\n", .{host_name});
         return ToolError.NotFound;
     }
@@ -2872,17 +3047,23 @@ fn cmdVmRunRemoteMatrix(allocator: Allocator, root: []const u8, args: []const []
     for (ssh_opts.items) |opt| {
         if (!first) try ssh_opt_str.append(allocator, ' ');
         first = false;
-        try ssh_opt_str.writer(allocator).print("{s}", .{opt});
+        try ssh_opt_str.print(allocator, "{s}", .{opt});
     }
 
+    const push_ssh = try std.fmt.allocPrint(allocator, "ssh {s}", .{ssh_opt_str.items});
+    defer allocator.free(push_ssh);
+    const push_src = try std.fmt.allocPrint(allocator, "{s}/", .{root});
+    defer allocator.free(push_src);
+    const push_dst = try std.fmt.allocPrint(allocator, "{s}:{s}/", .{ address, remote_repo });
+    defer allocator.free(push_dst);
     try runInherit(
         allocator,
         &.{
-            "rsync",                                                            "-a",                                               "--delete",
-            "--exclude",                                                        ".git",                                             "--exclude",
-            ".zig-cache",                                                       "--exclude",                                        "zig-out",
-            "--exclude",                                                        "artifacts",                                        "-e",
-            try std.fmt.allocPrint(allocator, "ssh {s}", .{ssh_opt_str.items}), try std.fmt.allocPrint(allocator, "{s}/", .{root}), try std.fmt.allocPrint(allocator, "{s}:{s}/", .{ address, remote_repo }),
+            "rsync",      "-a",        "--delete",
+            "--exclude",  ".git",      "--exclude",
+            ".zig-cache", "--exclude", "zig-out",
+            "--exclude",  "artifacts", "-e",
+            push_ssh,     push_src,    push_dst,
         },
         root,
         null,
@@ -2909,15 +3090,22 @@ fn cmdVmRunRemoteMatrix(allocator: Allocator, root: []const u8, args: []const []
 
     const ts = try nowStamp(allocator);
     defer allocator.free(ts);
-    const local_matrix_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host_name, ts }) });
+    const local_matrix_name = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ host_name, ts });
+    defer allocator.free(local_matrix_name);
+    const local_matrix_dir = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix", local_matrix_name });
+    defer allocator.free(local_matrix_dir);
     try ensurePath(local_matrix_dir);
 
+    const collect_ssh = try std.fmt.allocPrint(allocator, "ssh {s}", .{ssh_opt_str.items});
+    defer allocator.free(collect_ssh);
+    const collect_src = try std.fmt.allocPrint(allocator, "{s}:{s}/artifacts/matrix/", .{ address, remote_repo });
+    defer allocator.free(collect_src);
     try runInherit(
         allocator,
         &.{
-            "rsync",                                                                                   "-a",
-            "-e",                                                                                      try std.fmt.allocPrint(allocator, "ssh {s}", .{ssh_opt_str.items}),
-            try std.fmt.allocPrint(allocator, "{s}:{s}/artifacts/matrix/", .{ address, remote_repo }), local_matrix_dir,
+            "rsync",     "-a",
+            "-e",        collect_ssh,
+            collect_src, local_matrix_dir,
         },
         root,
         null,
@@ -2945,25 +3133,26 @@ fn cmdVmGaCollectAndBundle(allocator: Allocator, root: []const u8, args: []const
 
     const project_matrix_root = try path_util.pathJoin(allocator, &.{ vm_lab_dir, "projects", project, "matrix" });
     defer allocator.free(project_matrix_root);
-    if (std.fs.openDirAbsolute(project_matrix_root, .{}) catch null == null) {
+    if (compat.openDirAbsolute(project_matrix_root, .{}) catch null == null) {
         std.debug.print("matrix root missing: {s}\n", .{project_matrix_root});
         return ToolError.NotFound;
     }
 
     const stage_matrix_root = try path_util.pathJoin(allocator, &.{ root, "artifacts", "matrix-ga", release_id.? });
+    defer allocator.free(stage_matrix_root);
     try ensurePath(stage_matrix_root);
 
     const hosts = [_][]const u8{ linux_host, macos_host, windows_host };
     for (hosts) |host| {
-        var pdir = try std.fs.openDirAbsolute(project_matrix_root, .{ .iterate = true });
-        defer pdir.close();
+        var pdir = try compat.openDirAbsolute(project_matrix_root, .{ .iterate = true });
+        defer pdir.close(compat.io());
         var it = pdir.iterate();
         var matches: std.ArrayList([]u8) = .empty;
         defer {
             for (matches.items) |m| allocator.free(m);
             matches.deinit(allocator);
         }
-        while (try it.next()) |e| {
+        while (try it.next(compat.io())) |e| {
             if (e.kind != .directory) continue;
             if (std.mem.startsWith(u8, e.name, host) and e.name.len > host.len and e.name[host.len] == '-') {
                 try matches.append(allocator, try allocator.dupe(u8, e.name));
@@ -2987,7 +3176,10 @@ fn cmdVmGaCollectAndBundle(allocator: Allocator, root: []const u8, args: []const
         try copyTree(allocator, src, dst);
     }
 
-    const out = try path_util.pathJoin(allocator, &.{ stage_matrix_root, try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?}) });
+    const stage_summary_name = try std.fmt.allocPrint(allocator, "matrix-summary-{s}.txt", .{release_id.?});
+    defer allocator.free(stage_summary_name);
+    const out = try path_util.pathJoin(allocator, &.{ stage_matrix_root, stage_summary_name });
+    defer allocator.free(out);
     try cmdMatrixCollect(allocator, root, &.{ "--matrix-root", stage_matrix_root, "--out", out });
     try cmdReleaseBundle(allocator, root, &.{ "--release-id", release_id.?, "--matrix-root", stage_matrix_root });
 
@@ -3044,14 +3236,16 @@ fn cmdVmImageSources(allocator: Allocator, _: []const u8, args: []const []const 
     if (download) {
         if (!(try commandExists(allocator, "curl"))) return ToolError.MissingDependency;
         try ensurePath(out_dir);
-        const out_file = try path_util.pathJoin(allocator, &.{ out_dir, try std.fmt.allocPrint(allocator, "noble-server-cloudimg-{s}.img", .{arch}) });
+        const image_name = try std.fmt.allocPrint(allocator, "noble-server-cloudimg-{s}.img", .{arch});
+        defer allocator.free(image_name);
+        const out_file = try path_util.pathJoin(allocator, &.{ out_dir, image_name });
         defer allocator.free(out_file);
         const tmp = try std.fmt.allocPrint(allocator, "{s}.partial", .{out_file});
         defer allocator.free(tmp);
-        _ = std.fs.deleteFileAbsolute(tmp) catch {};
+        _ = compat.cwd().deleteFile(tmp) catch {};
         std.debug.print("\ndownloading {s}\n", .{ubuntu_current});
         try runInherit(allocator, &.{ "curl", "-fL", ubuntu_current, "-o", tmp }, null, null);
-        try std.fs.renameAbsolute(tmp, out_file);
+        try compat.cwd().rename(tmp, out_file);
         std.debug.print("saved: {s}\n", .{out_file});
     }
 }
@@ -3086,15 +3280,17 @@ fn cmdVmQemuCreate(allocator: Allocator, root: []const u8, args: []const []const
     const vm_dir = try path_util.pathJoin(allocator, &.{ vm_root, "alldriver", platform, name });
     try ensurePath(vm_dir);
     const image_path = try path_util.pathJoin(allocator, &.{ vm_dir, "disk.qcow2" });
-    if (std.fs.openFileAbsolute(image_path, .{}) catch null == null) {
-        try runInherit(allocator, &.{ "qemu-img", "create", "-f", "qcow2", image_path, try std.fmt.allocPrint(allocator, "{s}G", .{disk_gb}) }, root, null);
+    if (compat.openFileAbsolute(image_path, .{}) catch null == null) {
+        const disk_size = try std.fmt.allocPrint(allocator, "{s}G", .{disk_gb});
+        defer allocator.free(disk_size);
+        try runInherit(allocator, &.{ "qemu-img", "create", "-f", "qcow2", image_path, disk_size }, root, null);
     }
 
     if ((std.mem.eql(u8, platform, "windows") or std.mem.eql(u8, platform, "macos")) and iso_path.len == 0) {
         std.debug.print("platform '{s}' requires --iso for installer media\n", .{platform});
         return ToolError.InvalidArgs;
     }
-    if (iso_path.len > 0 and std.fs.openFileAbsolute(iso_path, .{}) catch null == null) {
+    if (iso_path.len > 0 and compat.openFileAbsolute(iso_path, .{}) catch null == null) {
         std.debug.print("iso not found: {s}\n", .{iso_path});
         return ToolError.NotFound;
     }
@@ -3118,17 +3314,17 @@ fn cmdVmQemuList(allocator: Allocator, _: []const u8, _: []const []const u8) !vo
     const vm_root = envOrDefault("ALLDRIVER_VM_ROOT", "/tmp/codex-vms");
     const base = try path_util.pathJoin(allocator, &.{ vm_root, "alldriver" });
 
-    if (std.fs.openDirAbsolute(base, .{}) catch null == null) {
+    if (compat.openDirAbsolute(base, .{}) catch null == null) {
         std.debug.print("no VMs registered under {s}\n", .{base});
         return;
     }
 
-    var root_dir = try std.fs.openDirAbsolute(base, .{ .iterate = true });
-    defer root_dir.close();
+    var root_dir = try compat.openDirAbsolute(base, .{ .iterate = true });
+    defer root_dir.close(compat.io());
     var walker = try root_dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(compat.io())) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.eql(u8, std.fs.path.basename(entry.path), "vm.env")) continue;
         const env_path = try path_util.pathJoin(allocator, &.{ base, entry.path });
@@ -3160,7 +3356,7 @@ fn cmdVmQemuStart(allocator: Allocator, root: []const u8, args: []const []const 
     defer allocator.free(vm_dir);
     const vm_env = try path_util.pathJoin(allocator, &.{ vm_dir, "vm.env" });
     defer allocator.free(vm_env);
-    if (std.fs.openFileAbsolute(vm_env, .{}) catch null == null) {
+    if (compat.openFileAbsolute(vm_env, .{}) catch null == null) {
         std.debug.print("vm env not found: {s}\n", .{vm_env});
         return ToolError.NotFound;
     }
@@ -3274,7 +3470,7 @@ test "parseKvFile strips optional quotes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "env.txt",
         .data =
         \\KEY_A=value
@@ -3300,8 +3496,8 @@ test "matrix collect non-strict pass with single report" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("matrix/linux-run");
-    try tmp.dir.writeFile(.{
+    try compat.dirMakePath(tmp.dir, "matrix/linux-run");
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "matrix/linux-run/matrix-report.txt",
         .data =
         \\Matrix Report
@@ -3320,7 +3516,7 @@ test "matrix collect non-strict pass with single report" {
         ,
     });
 
-    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const root = try compat.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(root);
     const matrix_root = try tmpAbsPath(allocator, tmp, "matrix");
     defer allocator.free(matrix_root);
@@ -3339,9 +3535,9 @@ test "matrix collect strict mode fails without signed strict reports" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("matrix/linux-run");
-    try tmp.dir.makePath("matrix/windows-run");
-    try tmp.dir.makePath("matrix/macos-run");
+    try compat.dirMakePath(tmp.dir, "matrix/linux-run");
+    try compat.dirMakePath(tmp.dir, "matrix/windows-run");
+    try compat.dirMakePath(tmp.dir, "matrix/macos-run");
 
     const report_data =
         \\Matrix Report
@@ -3355,11 +3551,11 @@ test "matrix collect strict mode fails without signed strict reports" {
         \\
     ;
 
-    try tmp.dir.writeFile(.{ .sub_path = "matrix/linux-run/matrix-report.txt", .data = "platform: linux\n" ++ report_data });
-    try tmp.dir.writeFile(.{ .sub_path = "matrix/windows-run/matrix-report.txt", .data = "platform: windows\n" ++ report_data });
-    try tmp.dir.writeFile(.{ .sub_path = "matrix/macos-run/matrix-report.txt", .data = "platform: macos\n" ++ report_data });
+    try compat.dirWriteFile(tmp.dir, .{ .sub_path = "matrix/linux-run/matrix-report.txt", .data = "platform: linux\n" ++ report_data });
+    try compat.dirWriteFile(tmp.dir, .{ .sub_path = "matrix/windows-run/matrix-report.txt", .data = "platform: windows\n" ++ report_data });
+    try compat.dirWriteFile(tmp.dir, .{ .sub_path = "matrix/macos-run/matrix-report.txt", .data = "platform: macos\n" ++ report_data });
 
-    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const root = try compat.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(root);
     const matrix_root = try tmpAbsPath(allocator, tmp, "matrix");
     defer allocator.free(matrix_root);
@@ -3374,7 +3570,7 @@ test "matrix collect strict mode fails without signed strict reports" {
 
 test "vm image sources rejects unsupported arch" {
     const allocator = std.testing.allocator;
-    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const root = try compat.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(root);
 
     try std.testing.expectError(
@@ -3388,19 +3584,19 @@ test "forbidden marker scan detects source markers and ignores artifacts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("src");
-    try tmp.dir.makePath("artifacts");
+    try compat.dirMakePath(tmp.dir, "src");
+    try compat.dirMakePath(tmp.dir, "artifacts");
 
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "src/file.zig",
         .data = "const x = 1; // " ++ ("TO" ++ "DO:") ++ " remove\n",
     });
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "artifacts/generated.txt",
         .data = ("TO" ++ "DO:") ++ " should be ignored in artifacts\n",
     });
 
-    const cwd_abs = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const cwd_abs = try compat.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd_abs);
     const rel_root = try tmpAbsPath(allocator, tmp, "");
     defer allocator.free(rel_root);
@@ -3557,8 +3753,8 @@ test "matrix collect summary records adversarial step status" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("matrix/linux-run");
-    try tmp.dir.writeFile(.{
+    try compat.dirMakePath(tmp.dir, "matrix/linux-run");
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "matrix/linux-run/matrix-report.txt",
         .data =
         \\Matrix Report
@@ -3575,7 +3771,7 @@ test "matrix collect summary records adversarial step status" {
         ,
     });
 
-    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const root = try compat.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(root);
     const matrix_root = try tmpAbsPath(allocator, tmp, "matrix");
     defer allocator.free(matrix_root);

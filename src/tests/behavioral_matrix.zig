@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const driver = @import("../root.zig");
 const helpers = @import("helpers.zig");
 const strings = @import("../util/strings.zig");
+const compat = @import("../util/compat.zig");
+const io_util = @import("../util/io.zig");
 
 const example_url = "data:text/html,<html><head><title>gate</title></head><body>gate</body></html>";
 const flatmates_url = "https://flatmates.com.au/share-house-melbourne-oakleigh-east-3166-P1436583";
@@ -136,7 +138,7 @@ const lightpanda_cookie_probe_html =
 const data_page_one = "data:text/html,<html><head><title>lp-page-one</title></head><body><button id='btn'>one</button><input id='name' value=''/></body></html>";
 const data_page_two = "data:text/html,<html><head><title>lp-page-two</title></head><body><button id='btn'>two</button><input id='name' value=''/></body></html>";
 
-var endpoint_event_lock: std.Thread.Mutex = .{};
+var endpoint_event_lock: compat.Mutex = .{};
 var endpoint_nav_started_count: usize = 0;
 var endpoint_nav_completed_count: usize = 0;
 var endpoint_nav_failed_count: usize = 0;
@@ -241,28 +243,27 @@ fn behavioralKinds() []const driver.BrowserKind {
 }
 
 const OneShotCookieServer = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     body: []const u8,
     failed: bool = false,
     handled: bool = false,
 
     fn port(self: *const OneShotCookieServer) u16 {
-        const real = self.server.listen_address.in.sa;
-        return std.mem.bigToNative(u16, real.port);
+        return self.server.socket.address.getPort();
     }
 };
 
 fn runOneShotCookieServer(ctx: *OneShotCookieServer) void {
-    defer ctx.server.deinit();
+    defer ctx.server.deinit(compat.io());
 
-    const conn = ctx.server.accept() catch {
+    var stream = ctx.server.accept(compat.io()) catch {
         ctx.failed = true;
         return;
     };
-    defer conn.stream.close();
+    defer stream.close(compat.io());
 
     var req_buf: [4096]u8 = undefined;
-    const req_n = conn.stream.read(&req_buf) catch {
+    const req_n = io_util.read(&stream, &req_buf) catch {
         ctx.failed = true;
         return;
     };
@@ -279,11 +280,11 @@ fn runOneShotCookieServer(ctx: *OneShotCookieServer) void {
         return;
     };
 
-    conn.stream.writeAll(head) catch {
+    io_util.writeAll(&stream, head) catch {
         ctx.failed = true;
         return;
     };
-    conn.stream.writeAll(ctx.body) catch {
+    io_util.writeAll(&stream, ctx.body) catch {
         ctx.failed = true;
     };
 }
@@ -409,8 +410,8 @@ test "lightpanda cdp navigation and cookie extraction (opt-in)" {
     defer installs.deinit();
     if (installs.items.len == 0) return error.NoLightpandaFound;
 
-    var addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    const server = try addr.listen(.{});
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(compat.io(), .{ .reuse_address = true });
     var server_ctx = OneShotCookieServer{
         .server = server,
         .body = lightpanda_cookie_probe_html,
@@ -418,8 +419,10 @@ test "lightpanda cdp navigation and cookie extraction (opt-in)" {
     const thread = try std.Thread.spawn(.{}, runOneShotCookieServer, .{&server_ctx});
     var joined = false;
     defer if (!joined) {
-        if (std.net.Address.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
-            if (std.net.tcpConnectToAddress(wake_addr)) |stream| stream.close() else |_| {}
+        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
+            if (wake_addr.connect(compat.io(), .{ .mode = .stream })) |stream| {
+                stream.close(compat.io());
+            } else |_| {}
         } else |_| {}
         thread.join();
     };
@@ -495,8 +498,8 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
     defer installs.deinit();
     if (installs.items.len == 0) return error.NoLightpandaFound;
 
-    var addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    const server = try addr.listen(.{});
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(compat.io(), .{ .reuse_address = true });
     var server_ctx = OneShotCookieServer{
         .server = server,
         .body = lightpanda_cookie_probe_html,
@@ -504,8 +507,10 @@ test "lightpanda all modern endpoints conformance (opt-in)" {
     const thread = try std.Thread.spawn(.{}, runOneShotCookieServer, .{&server_ctx});
     var joined = false;
     defer if (!joined) {
-        if (std.net.Address.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
-            if (std.net.tcpConnectToAddress(wake_addr)) |stream| stream.close() else |_| {}
+        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
+            if (wake_addr.connect(compat.io(), .{ .mode = .stream })) |stream| {
+                stream.close(compat.io());
+            } else |_| {}
         } else |_| {}
         thread.join();
     };
@@ -953,16 +958,16 @@ fn waitForFlatmatesSessionCookies(
     timeout_ms: u32,
 ) !void {
     var storage = session.storage();
-    const started = std.time.milliTimestamp();
+    const started = compat.milliTimestamp();
     const deadline = started + @as(i64, @intCast(timeout_ms));
     var reloaded = false;
 
     var last_cookie_count: usize = 0;
 
-    while (std.time.milliTimestamp() < deadline) {
+    while (compat.milliTimestamp() < deadline) {
         nudgeFlatmatesChallenge(session) catch {};
         const cookies = storage.getCookies(allocator) catch {
-            std.Thread.sleep(300 * std.time.ns_per_ms);
+            compat.sleepMs(300);
             continue;
         };
         defer storage.freeCookies(allocator, cookies);
@@ -972,11 +977,11 @@ fn waitForFlatmatesSessionCookies(
             return;
         }
 
-        if (!reloaded and std.time.milliTimestamp() - started > @as(i64, @intCast(timeout_ms / 2))) {
+        if (!reloaded and compat.milliTimestamp() - started > @as(i64, @intCast(timeout_ms / 2))) {
             session.base.reload() catch {};
             reloaded = true;
         }
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        compat.sleepMs(300);
     }
     std.debug.print("flatmates session cookies missing after timeout (observed cookie count={d})\n", .{last_cookie_count});
     return error.Timeout;
@@ -987,19 +992,19 @@ fn waitForKpRefCookieIntercept(
     allocator: std.mem.Allocator,
     timeout_ms: u32,
 ) !void {
-    const started = std.time.milliTimestamp();
+    const started = compat.milliTimestamp();
     const deadline = started + @as(i64, @intCast(timeout_ms));
     var reloaded = false;
     var last_intercepts: ?[]u8 = null;
     defer if (last_intercepts) |payload| allocator.free(payload);
 
-    while (std.time.milliTimestamp() < deadline) {
+    while (compat.milliTimestamp() < deadline) {
         const payload = session.base.evaluate(
             \\(function() {
             \\    return JSON.stringify(window.__kp_cookie_intercepts || []);
             \\})();
         ) catch {
-            std.Thread.sleep(300 * std.time.ns_per_ms);
+            compat.sleepMs(300);
             continue;
         };
         if (last_intercepts) |prev| allocator.free(prev);
@@ -1010,12 +1015,12 @@ fn waitForKpRefCookieIntercept(
             return;
         }
 
-        if (!reloaded and std.time.milliTimestamp() - started > @as(i64, @intCast(timeout_ms / 2))) {
+        if (!reloaded and compat.milliTimestamp() - started > @as(i64, @intCast(timeout_ms / 2))) {
             session.base.reload() catch {};
             reloaded = true;
         }
         nudgeFlatmatesChallenge(session) catch {};
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        compat.sleepMs(300);
     }
 
     if (last_intercepts) |payload| {
@@ -1073,22 +1078,22 @@ fn nudgeFlatmatesChallenge(session: *driver.modern.ModernSession) !void {
 }
 
 fn flatmatesTimeoutMs() u32 {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ALLDRIVER_FLATMATES_TIMEOUT_MS") catch return 180_000;
+    const value = compat.getEnvVarOwned(std.heap.page_allocator, "ALLDRIVER_FLATMATES_TIMEOUT_MS") catch return 180_000;
     defer std.heap.page_allocator.free(value);
     return std.fmt.parseInt(u32, value, 10) catch 180_000;
 }
 
 fn flatmatesBravePresetFilter(allocator: std.mem.Allocator) ?[]u8 {
-    return std.process.getEnvVarOwned(allocator, "ALLDRIVER_FLATMATES_BRAVE_PRESET") catch null;
+    return compat.getEnvVarOwned(allocator, "ALLDRIVER_FLATMATES_BRAVE_PRESET") catch null;
 }
 
 fn allocBraveFlatmatesProfileDir(allocator: std.mem.Allocator, preset_name: []const u8) ![]u8 {
     var nonce_buf: [8]u8 = undefined;
-    std.crypto.random.bytes(&nonce_buf);
+    compat.io().random(&nonce_buf);
     const nonce = std.mem.readInt(u64, &nonce_buf, .little);
     const leaf = try std.fmt.allocPrint(allocator, "flatmates-brave-{s}-{x}-{x}", .{
         preset_name,
-        @as(u64, @intCast(std.time.nanoTimestamp())),
+        @as(u64, @intCast(compat.nanoTimestamp())),
         nonce,
     });
     defer allocator.free(leaf);

@@ -3,6 +3,7 @@ const catalog = @import("../catalog/browser_kind.zig");
 const path_table = @import("../catalog/path_table.zig");
 const types = @import("../types.zig");
 const util = @import("util.zig");
+const compat = @import("../util/compat.zig");
 
 pub const PathHit = struct {
     kind: types.BrowserKind,
@@ -13,7 +14,7 @@ pub const PathHit = struct {
 };
 
 pub fn collect(allocator: std.mem.Allocator, kinds: []const types.BrowserKind) ![]PathHit {
-    const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return allocator.alloc(PathHit, 0);
+    const path_env = compat.getEnvVarOwned(allocator, "PATH") catch return allocator.alloc(PathHit, 0);
     defer allocator.free(path_env);
     return collectFromPathValue(allocator, kinds, path_env);
 }
@@ -71,7 +72,7 @@ test "collect from explicit PATH value finds executable alias" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = exec_name,
         .data = "stub\n",
     });

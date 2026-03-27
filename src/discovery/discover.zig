@@ -10,6 +10,7 @@ const cache_manager = @import("../provision/cache_manager.zig");
 const extensions = @import("../extensions/api.zig");
 const util = @import("util.zig");
 const string_util = @import("../util/strings.zig");
+const compat = @import("../util/compat.zig");
 
 const Candidate = struct {
     install: types.BrowserInstall,
@@ -469,14 +470,14 @@ test "discover returns explicit path and infers kind" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "firefox",
         .data = "#!/bin/sh\nexit 0\n",
     });
     if (@import("builtin").os.tag != .windows) {
-        const file = try tmp.dir.openFile("firefox", .{});
-        defer file.close();
-        try file.chmod(0o755);
+        const file = try tmp.dir.openFile(compat.io(), "firefox", .{});
+        defer file.close(compat.io());
+        try file.setPermissions(compat.io(), .executable_file);
     }
 
     const explicit_path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "firefox" });
@@ -507,15 +508,15 @@ test "discover managed cache candidate even when managed download is disabled" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("chrome/current");
-    try tmp.dir.writeFile(.{
+    try compat.dirMakePath(tmp.dir, "chrome/current");
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "chrome/current/google-chrome",
         .data = "stub\n",
     });
     if (@import("builtin").os.tag != .windows) {
-        const file = try tmp.dir.openFile("chrome/current/google-chrome", .{});
-        defer file.close();
-        try file.chmod(0o755);
+        const file = try tmp.dir.openFile(compat.io(), "chrome/current/google-chrome", .{});
+        defer file.close(compat.io());
+        try file.setPermissions(compat.io(), .executable_file);
     }
 
     const cache_root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
@@ -545,15 +546,15 @@ test "discover deduplicates same path preferring explicit over managed cache" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("chrome/current");
-    try tmp.dir.writeFile(.{
+    try compat.dirMakePath(tmp.dir, "chrome/current");
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "chrome/current/google-chrome",
         .data = "stub\n",
     });
     if (@import("builtin").os.tag != .windows) {
-        const file = try tmp.dir.openFile("chrome/current/google-chrome", .{});
-        defer file.close();
-        try file.chmod(0o755);
+        const file = try tmp.dir.openFile(compat.io(), "chrome/current/google-chrome", .{});
+        defer file.close(compat.io());
+        try file.setPermissions(compat.io(), .executable_file);
     }
 
     const cache_root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });

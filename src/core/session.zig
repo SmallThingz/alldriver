@@ -12,6 +12,7 @@ const async_mod = @import("async.zig");
 const executor = @import("../protocol/executor.zig");
 const logging = @import("../logging.zig");
 const ws_client = @import("../transport/ws_client.zig");
+const compat = @import("../util/compat.zig");
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -27,38 +28,38 @@ pub const Session = struct {
     cdp_attached_session_id: ?[]u8 = null,
     cdp_client: ?ws_client.Client = null,
     current_url: ?[]u8 = null,
-    state_lock: std.Thread.Mutex = .{},
+    state_lock: compat.Mutex = .{},
     browsing_context_id: ?[]u8 = null,
     request_id: u64 = 0,
-    request_id_lock: std.Thread.Mutex = .{},
-    protocol_lock: std.Thread.Mutex = .{},
+    request_id_lock: compat.Mutex = .{},
+    protocol_lock: compat.Mutex = .{},
     timeout_policy: types.TimeoutPolicy = .{},
-    diagnostic_lock: std.Thread.Mutex = .{},
+    diagnostic_lock: compat.Mutex = .{},
     last_diagnostic_value: ?types.Diagnostic = null,
     diagnostic_owned_strings: std.ArrayList([]u8) = .empty,
 
     child: ?std.process.Child = null,
     owned_argv: ?[]const []const u8 = null,
     ephemeral_profile_dir: ?[]u8 = null,
-    async_lock: std.Thread.Mutex = .{},
-    async_cond: std.Thread.Condition = .{},
+    async_lock: compat.Mutex = .{},
+    async_cond: compat.Condition = .{},
     active_async_ops: usize = 0,
 
     rules: std.ArrayList(types.NetworkRule) = .empty,
     on_request: ?*const fn (types.RequestEvent) void = null,
     on_response: ?*const fn (types.ResponseEvent) void = null,
-    event_lock: std.Thread.Mutex = .{},
+    event_lock: compat.Mutex = .{},
     event_subscriptions: std.ArrayList(events.EventSubscription) = .empty,
     next_event_subscription_id: u64 = 1,
     challenge_active: bool = false,
-    challenge_lock: std.Thread.Mutex = .{},
-    network_lock: std.Thread.Mutex = .{},
+    challenge_lock: compat.Mutex = .{},
+    network_lock: compat.Mutex = .{},
     network_records: std.ArrayList(types.NetworkRecord) = .empty,
-    frames_lock: std.Thread.Mutex = .{},
+    frames_lock: compat.Mutex = .{},
     frames: std.ArrayList(types.FrameInfo) = .empty,
-    service_workers_lock: std.Thread.Mutex = .{},
+    service_workers_lock: compat.Mutex = .{},
     service_workers: std.ArrayList(types.ServiceWorkerInfo) = .empty,
-    snapshot_lock: std.Thread.Mutex = .{},
+    snapshot_lock: compat.Mutex = .{},
     snapshots: std.ArrayList(types.SnapshotBundle) = .empty,
 
     pub fn deinit(self: *Session) void {
@@ -69,7 +70,7 @@ pub const Session = struct {
         self.async_lock.unlock();
 
         if (self.child) |*child| {
-            _ = child.kill() catch {};
+            child.kill(compat.io());
         }
 
         if (self.current_url) |url| self.allocator.free(url);
@@ -86,7 +87,7 @@ pub const Session = struct {
         }
 
         if (self.ephemeral_profile_dir) |profile_dir| {
-            std.fs.cwd().deleteTree(profile_dir) catch {};
+            compat.cwd().deleteTree(profile_dir) catch {};
             self.allocator.free(profile_dir);
         }
 
@@ -136,7 +137,7 @@ pub const Session = struct {
     pub fn navigate(self: *Session, url: []const u8) !void {
         events.emit(self, .{ .navigation_started = .{ .url = url, .cause = .navigate } });
         capturePhaseSnapshotBestEffort(self, .navigation_started, null);
-        const started = std.time.milliTimestamp();
+        const started = compat.milliTimestamp();
         actions.navigate(self, url) catch |err| {
             self.recordDiagnostic(.{
                 .phase = .navigate,
@@ -169,7 +170,7 @@ pub const Session = struct {
         events.emit(self, .{ .navigation_started = .{ .url = url, .cause = .reload } });
         events.emit(self, .{ .reload_started = .{ .url = url, .cause = .reload } });
         capturePhaseSnapshotBestEffort(self, .navigation_started, null);
-        const started = std.time.milliTimestamp();
+        const started = compat.milliTimestamp();
         actions.reload(self) catch |err| {
             self.recordDiagnostic(.{
                 .phase = .navigate,
@@ -233,7 +234,7 @@ pub const Session = struct {
     }
 
     pub fn evaluate(self: *Session, script: []const u8) ![]u8 {
-        const started = std.time.milliTimestamp();
+        const started = compat.milliTimestamp();
         events.emit(self, .{ .action_started = .{ .kind = .evaluate } });
         const payload = actions.evaluate(self, script) catch |err| {
             self.recordDiagnostic(.{
@@ -787,7 +788,7 @@ fn freeWaitTarget(allocator: std.mem.Allocator, target: types.WaitTarget) void {
 }
 
 fn elapsedSince(start_ms: i64) u32 {
-    const delta = std.time.milliTimestamp() - start_ms;
+    const delta = compat.milliTimestamp() - start_ms;
     if (delta <= 0) return 0;
     return @intCast(delta);
 }
@@ -848,7 +849,7 @@ fn capturePhaseSnapshotBestEffort(self: *Session, phase: types.SnapshotPhase, ur
 fn waitForResponseReceivedMilestone(self: *Session, timeout_ms: u32) bool {
     if (!self.supports(.js_eval)) return false;
     const max_wait_ms: u32 = @min(timeout_ms, 5_000);
-    const start = std.time.milliTimestamp();
+    const start = compat.milliTimestamp();
     while (elapsedSince(start) < max_wait_ms) {
         const payload = executor.evaluate(
             self,
@@ -856,7 +857,7 @@ fn waitForResponseReceivedMilestone(self: *Session, timeout_ms: u32) bool {
         ) catch return false;
         defer self.allocator.free(payload);
         if (std.mem.indexOf(u8, payload, "true") != null) return true;
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        compat.sleepMs(50);
     }
     return false;
 }
@@ -871,7 +872,7 @@ fn waitForDomReadyMilestone(self: *Session, timeout_ms: u32) bool {
 fn waitForScriptsSettledMilestone(self: *Session, timeout_ms: u32) bool {
     if (!self.supports(.js_eval)) return false;
     const max_wait_ms: u32 = @min(timeout_ms, 10_000);
-    const start = std.time.milliTimestamp();
+    const start = compat.milliTimestamp();
     while (elapsedSince(start) < max_wait_ms) {
         const payload = executor.evaluate(
             self,
@@ -879,13 +880,13 @@ fn waitForScriptsSettledMilestone(self: *Session, timeout_ms: u32) bool {
         ) catch return false;
         defer self.allocator.free(payload);
         if (std.mem.indexOf(u8, payload, "true") != null) return true;
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        compat.sleepMs(50);
     }
     return false;
 }
 
 pub fn nextSessionId() u64 {
-    return @as(u64, @intCast(std.time.milliTimestamp()));
+    return @as(u64, @intCast(compat.milliTimestamp()));
 }
 
 fn makeTestSession(allocator: std.mem.Allocator, capabilities: types.CapabilitySet) !Session {

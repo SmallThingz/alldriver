@@ -4,6 +4,7 @@ const types = @import("../types.zig");
 const events = @import("events.zig");
 const executor = @import("../protocol/executor.zig");
 const json_util = @import("../util/json.zig");
+const compat = @import("../util/compat.zig");
 
 pub const Cookie = types.Cookie;
 pub const CookieQuery = types.CookieQuery;
@@ -292,7 +293,7 @@ fn freeCookieFields(allocator: std.mem.Allocator, cookie: Cookie) void {
 fn isExpired(cookie: Cookie) bool {
     const expiry = cookie.expires_unix_seconds orelse return false;
     if (expiry < 0) return false;
-    return std.time.timestamp() >= expiry;
+    return compat.timestamp() >= expiry;
 }
 
 fn matchesQuery(cookie: Cookie, q: CookieQuery) bool {
@@ -438,7 +439,7 @@ test "cookie domain/path matching helpers" {
 }
 
 test "cookie query filters secure and expired" {
-    const now = std.time.timestamp();
+    const now = compat.timestamp();
     const active: Cookie = .{
         .name = "sid",
         .value = "ok",

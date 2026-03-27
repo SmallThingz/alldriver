@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../util/compat.zig");
 
 pub fn AsyncResult(comptime T: type) type {
     return struct {
@@ -8,8 +9,8 @@ pub fn AsyncResult(comptime T: type) type {
         const Canceler = *const fn (allocator: std.mem.Allocator, ctx: *anyopaque) void;
 
         allocator: std.mem.Allocator,
-        mutex: std.Thread.Mutex = .{},
-        cond: std.Thread.Condition = .{},
+        mutex: compat.Mutex = .{},
+        cond: compat.Condition = .{},
         thread: ?std.Thread = null,
 
         runner: Runner,
@@ -61,15 +62,13 @@ pub fn AsyncResult(comptime T: type) type {
             defer self.mutex.unlock();
 
             if (timeout_ms) |ms| {
-                const deadline_ns = std.time.nanoTimestamp() + @as(i128, @intCast(ms)) * std.time.ns_per_ms;
+                const deadline_ns = compat.nanoTimestamp() + @as(i128, @intCast(ms)) * std.time.ns_per_ms;
                 while (self.state == .pending) {
-                    const now = std.time.nanoTimestamp();
+                    const now = compat.nanoTimestamp();
                     if (now >= deadline_ns) return error.Timeout;
-
-                    const remaining: u64 = @intCast(deadline_ns - now);
-                    self.cond.timedWait(&self.mutex, remaining) catch |err| switch (err) {
-                        error.Timeout => return error.Timeout,
-                    };
+                    self.mutex.unlock();
+                    compat.sleepMs(1);
+                    self.mutex.lock();
                 }
             } else {
                 while (self.state == .pending) {
@@ -163,7 +162,7 @@ test "async await timeout" {
 
     const Runner = struct {
         fn run(_: std.mem.Allocator, _: *anyopaque) anyerror!u32 {
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+            compat.sleepMs(100);
             return 1;
         }
 
@@ -188,7 +187,7 @@ test "async cancel before completion" {
 
     const Runner = struct {
         fn run(_: std.mem.Allocator, _: *anyopaque) anyerror!u32 {
-            std.Thread.sleep(80 * std.time.ns_per_ms);
+            compat.sleepMs(80);
             return 2;
         }
 

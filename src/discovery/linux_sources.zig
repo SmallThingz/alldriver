@@ -4,6 +4,7 @@ const catalog = @import("../catalog/browser_kind.zig");
 const path_table = @import("../catalog/path_table.zig");
 const types = @import("../types.zig");
 const util = @import("util.zig");
+const compat = @import("../util/compat.zig");
 
 pub const LinuxHit = struct {
     kind: types.BrowserKind,
@@ -62,7 +63,7 @@ fn parseDesktopEntries(allocator: std.mem.Allocator, kind: types.BrowserKind, hi
         out.deinit(allocator);
     }
 
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+    const home = compat.getEnvVarOwned(allocator, "HOME") catch null;
     defer if (home) |h| allocator.free(h);
 
     var dirs: std.ArrayList([]const u8) = .empty;
@@ -83,18 +84,18 @@ fn parseDesktopEntries(allocator: std.mem.Allocator, kind: types.BrowserKind, hi
     }
 
     for (dirs.items) |dir_path| {
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(compat.io(), dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(compat.io());
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(compat.io())) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".desktop")) continue;
 
             const full_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
             defer allocator.free(full_path);
 
-            const file_data = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch continue;
+            const file_data = compat.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch continue;
             defer allocator.free(file_data);
 
             const exec_line = findExecLine(file_data) orelse continue;
@@ -157,7 +158,7 @@ fn resolveExecutablePath(allocator: std.mem.Allocator, executable: []const u8) !
         return allocator.dupe(u8, executable);
     }
 
-    const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return allocator.dupe(u8, executable);
+    const path_env = compat.getEnvVarOwned(allocator, "PATH") catch return allocator.dupe(u8, executable);
     defer allocator.free(path_env);
 
     var dir_it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);

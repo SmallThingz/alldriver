@@ -11,6 +11,7 @@ const executor = @import("protocol/executor.zig");
 const http_client = @import("transport/http_client.zig");
 const logging = @import("logging.zig");
 const extensions = @import("extensions/api.zig");
+const compat = @import("util/compat.zig");
 
 pub const Session = session_mod.Session;
 
@@ -38,11 +39,11 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     const transport = common.transportForAdapter(adapter_kind);
     const capability_set = capabilitiesFor(opts.install.engine, adapter_kind);
     const effective_profile_dir = try resolveEffectiveProfileDir(allocator, opts.profile_mode, opts.profile_dir);
-    const should_cleanup_ephemeral_profile = opts.profile_mode == .ephemeral;
+    const should_cleanup_ephemeral_profile = opts.profile_mode == .ephemeral and opts.profile_dir == null;
     var profile_dir_owned = true;
     defer if (profile_dir_owned) allocator.free(effective_profile_dir);
     errdefer if (should_cleanup_ephemeral_profile) {
-        std.fs.cwd().deleteTree(effective_profile_dir) catch {};
+        compat.cwd().deleteTree(effective_profile_dir) catch {};
     };
 
     const effective_ignore_tls_errors = opts.ignore_tls_errors or hasTlsAliasArg(opts.args);
@@ -94,16 +95,17 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         allocator.free(final_args);
     }
 
-    var child = std.process.Child.init(final_args, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
-    child.spawn() catch |err| {
+    var child = std.process.spawn(compat.io(), .{
+        .argv = final_args,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+    }) catch |err| {
         logHardLaunchError(transport, @errorName(err), "failed to spawn browser process");
         return error.SpawnFailed;
     };
     errdefer {
-        _ = child.kill() catch {};
+        child.kill(compat.io());
     }
 
     const launch_timeout_ms = (opts.timeout_policy orelse types.TimeoutPolicy{}).launch_ms;
@@ -264,16 +266,17 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         allocator.free(argv);
     }
 
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
-    child.spawn() catch |err| {
+    var child = std.process.spawn(compat.io(), .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+    }) catch |err| {
         logHardLaunchError(.cdp_ws, @errorName(err), "failed to spawn webview host process");
         return error.SpawnFailed;
     };
     errdefer {
-        _ = child.kill() catch {};
+        child.kill(compat.io());
     }
 
     const endpoint = if (opts.endpoint) |ep|
@@ -520,9 +523,9 @@ fn createEphemeralProfileDir(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(base_dir);
 
     var nonce_bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&nonce_bytes);
+    compat.io().random(&nonce_bytes);
     const nonce = std.mem.readInt(u64, &nonce_bytes, .little);
-    const stamp = @as(u64, @intCast(std.time.nanoTimestamp()));
+    const stamp = @as(u64, @intCast(compat.nanoTimestamp()));
     const leaf = try std.fmt.allocPrint(allocator, "alldriver-ephemeral-{x}-{x}", .{ stamp, nonce });
     defer allocator.free(leaf);
 
@@ -535,24 +538,24 @@ fn createEphemeralProfileDir(allocator: std.mem.Allocator) ![]u8 {
 fn tempBaseDirAlloc(allocator: std.mem.Allocator) ![]u8 {
     switch (builtin.os.tag) {
         .windows => {
-            if (std.process.getEnvVarOwned(allocator, "TMP")) |dir| return dir else |_| {}
-            if (std.process.getEnvVarOwned(allocator, "TEMP")) |dir| return dir else |_| {}
-            if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |dir| return dir else |_| {}
+            if (compat.getEnvVarOwned(allocator, "TMP")) |dir| return dir else |_| {}
+            if (compat.getEnvVarOwned(allocator, "TEMP")) |dir| return dir else |_| {}
+            if (compat.getEnvVarOwned(allocator, "USERPROFILE")) |dir| return dir else |_| {}
             return allocator.dupe(u8, ".");
         },
         else => {
-            if (std.process.getEnvVarOwned(allocator, "TMPDIR")) |dir| return dir else |_| {}
+            if (compat.getEnvVarOwned(allocator, "TMPDIR")) |dir| return dir else |_| {}
             return allocator.dupe(u8, "/tmp");
         },
     }
 }
 
 fn ensureDirPathExists(path: []const u8) !void {
-    try std.fs.cwd().makePath(path);
+    try compat.cwd().makePath(path);
 }
 
 fn realpathAllocMaybe(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    return std.fs.cwd().realpathAlloc(allocator, path) catch {
+    return compat.cwd().realpathAlloc(allocator, path) catch {
         if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
         return std.fs.path.resolve(allocator, &.{path});
     };
@@ -562,31 +565,52 @@ fn writeGeckoInsecureTlsPrefs(allocator: std.mem.Allocator, profile_dir: []const
     const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
     defer allocator.free(user_js_path);
 
-    var file = try std.fs.cwd().createFile(user_js_path, .{ .truncate = false, .read = false });
-    defer file.close();
-    try file.seekFromEnd(0);
-    try file.writeAll(
-        \\user_pref("webdriver_accept_untrusted_certs", true);
-        \\user_pref("webdriver_assume_untrusted_issuer", false);
-        \\user_pref("security.cert_pinning.enforcement_level", 0);
-        \\user_pref("network.stricttransportsecurity.preloadlist", false);
-        \\user_pref("security.enterprise_roots.enabled", true);
-        \\
-    );
+    const existing = compat.cwd().readFileAlloc(allocator, user_js_path, 1024 * 1024) catch null;
+    defer if (existing) |data| allocator.free(data);
+    const contents = if (existing) |data|
+        try std.mem.concat(allocator, u8, &.{
+            data,
+            \\user_pref("webdriver_accept_untrusted_certs", true);
+            \\user_pref("webdriver_assume_untrusted_issuer", false);
+            \\user_pref("security.cert_pinning.enforcement_level", 0);
+            \\user_pref("network.stricttransportsecurity.preloadlist", false);
+            \\user_pref("security.enterprise_roots.enabled", true);
+            \\
+        })
+    else
+        try allocator.dupe(u8,
+            \\user_pref("webdriver_accept_untrusted_certs", true);
+            \\user_pref("webdriver_assume_untrusted_issuer", false);
+            \\user_pref("security.cert_pinning.enforcement_level", 0);
+            \\user_pref("network.stricttransportsecurity.preloadlist", false);
+            \\user_pref("security.enterprise_roots.enabled", true);
+            \\
+        );
+    defer allocator.free(contents);
+    try compat.cwd().writeFile(.{ .sub_path = user_js_path, .data = contents });
 }
 
 fn writeGeckoStealthPrefs(allocator: std.mem.Allocator, profile_dir: []const u8) !void {
     const user_js_path = try std.fs.path.join(allocator, &.{ profile_dir, "user.js" });
     defer allocator.free(user_js_path);
 
-    var file = try std.fs.cwd().createFile(user_js_path, .{ .truncate = false, .read = false });
-    defer file.close();
-    try file.seekFromEnd(0);
-    try file.writeAll(
-        \\user_pref("dom.webdriver.enabled", false);
-        \\user_pref("privacy.resistFingerprinting", true);
-        \\
-    );
+    const existing = compat.cwd().readFileAlloc(allocator, user_js_path, 1024 * 1024) catch null;
+    defer if (existing) |data| allocator.free(data);
+    const contents = if (existing) |data|
+        try std.mem.concat(allocator, u8, &.{
+            data,
+            \\user_pref("dom.webdriver.enabled", false);
+            \\user_pref("privacy.resistFingerprinting", true);
+            \\
+        })
+    else
+        try allocator.dupe(u8,
+            \\user_pref("dom.webdriver.enabled", false);
+            \\user_pref("privacy.resistFingerprinting", true);
+            \\
+        );
+    defer allocator.free(contents);
+    try compat.cwd().writeFile(.{ .sub_path = user_js_path, .data = contents });
 }
 
 fn capabilitiesFor(engine: types.EngineKind, adapter: common.AdapterKind) types.CapabilitySet {
@@ -605,7 +629,9 @@ fn buildEndpoint(allocator: std.mem.Allocator, adapter: common.AdapterKind, sess
 }
 
 fn cdpEndpointForHostPort(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
-    return std.fmt.allocPrint(allocator, "cdp://{s}:{d}/", .{ host, port });
+    const authority = try common.formatHostPortAuthority(allocator, host, port);
+    defer allocator.free(authority);
+    return std.fmt.allocPrint(allocator, "cdp://{s}/", .{authority});
 }
 
 fn adapterForWebViewKind(kind: types.WebViewKind) common.AdapterKind {
@@ -622,11 +648,10 @@ fn browserKindForWebView(kind: types.WebViewKind) types.BrowserKind {
 }
 
 fn reserveLocalPort() !u16 {
-    var address = try std.net.Address.parseIp4("127.0.0.1", 0);
-    var server = try address.listen(.{});
-    defer server.deinit();
-    const real = server.listen_address.in.sa;
-    return std.mem.bigToNative(u16, real.port);
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(compat.io(), .{ .reuse_address = true });
+    defer server.deinit(compat.io());
+    return server.socket.address.getPort();
 }
 
 fn waitForDebugEndpointReady(
@@ -635,32 +660,44 @@ fn waitForDebugEndpointReady(
     port: u16,
     timeout_ms: u32,
 ) !void {
-    const address = try std.net.Address.parseIp4("127.0.0.1", port);
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    const deadline_ms = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (compat.milliTimestamp() < deadline_ms) {
         if (childExitedPosixNoHang(child)) return error.SpawnFailed;
         switch (adapter) {
             .cdp => {
                 if (cdpHttpEndpointReady(port)) return;
             },
             .bidi => {
-                const stream = std.net.tcpConnectToAddress(address) catch {
-                    std.Thread.sleep(25 * std.time.ns_per_ms);
+                var stream = address.connect(compat.io(), .{ .mode = .stream }) catch {
+                    compat.sleepMs(25);
                     continue;
                 };
-                stream.close();
+                stream.close(compat.io());
                 return;
             },
         }
-        std.Thread.sleep(25 * std.time.ns_per_ms);
+        compat.sleepMs(25);
     }
     return error.Timeout;
 }
 
 fn childExitedPosixNoHang(child: *std.process.Child) bool {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return false;
-    const wait_result = std.posix.waitpid(child.id, std.posix.W.NOHANG);
-    return wait_result.pid != 0;
+    const pid = child.id orelse return true;
+    var status: if (@import("builtin").link_libc) std.c.c_int else u32 = undefined;
+    switch (std.posix.errno(std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG))) {
+        .SUCCESS => {
+            child.id = null;
+            return true;
+        },
+        .INTR => return false,
+        .CHILD => {
+            child.id = null;
+            return true;
+        },
+        else => return false,
+    }
 }
 
 fn cdpHttpEndpointReady(port: u16) bool {

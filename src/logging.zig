@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("util/compat.zig");
 const builtin = @import("builtin");
 const types = @import("types.zig");
 
@@ -12,7 +13,7 @@ pub const HardErrorLog = struct {
 
 pub const HardErrorLogger = fn (entry: HardErrorLog) void;
 
-var logger_lock: std.Thread.Mutex = .{};
+var logger_lock: compat.Mutex = .{};
 var logger_callback: ?*const HardErrorLogger = null;
 
 pub fn setHardErrorLogger(callback: ?*const HardErrorLogger) void {

@@ -1,9 +1,11 @@
 const std = @import("std");
+const common = @import("../protocol/common.zig");
 const io_util = @import("../util/io.zig");
+const compat = @import("../util/compat.zig");
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -11,22 +13,28 @@ pub const Client = struct {
         port: u16,
         path: []const u8,
     ) !Client {
-        var stream = try std.net.tcpConnectToHost(allocator, host, port);
-        errdefer stream.close();
+        const address = if (std.mem.eql(u8, host, "localhost"))
+            try std.Io.net.IpAddress.parseIp4("127.0.0.1", port)
+        else
+            std.Io.net.IpAddress.parse(host, port) catch try std.Io.net.IpAddress.resolve(compat.io(), host, port);
+        var stream = try address.connect(compat.io(), .{ .mode = .stream });
+        errdefer stream.close(compat.io());
 
         var key_src: [16]u8 = undefined;
-        std.crypto.random.bytes(&key_src);
+        compat.io().random(&key_src);
         var key_buf: [std.base64.standard.Encoder.calcSize(16)]u8 = undefined;
         const ws_key = std.base64.standard.Encoder.encode(&key_buf, &key_src);
+        const authority = try common.formatHostPortAuthority(allocator, host, port);
+        defer allocator.free(authority);
 
         const handshake = try std.fmt.allocPrint(
             allocator,
-            "GET {s} HTTP/1.1\r\nHost: {s}:{d}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n\r\n",
-            .{ path, host, port, ws_key },
+            "GET {s} HTTP/1.1\r\nHost: {s}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            .{ path, authority, ws_key },
         );
         defer allocator.free(handshake);
 
-        try stream.writeAll(handshake);
+        try io_util.writeAll(&stream, handshake);
 
         const response = try readHttpHeaders(allocator, &stream);
         defer allocator.free(response);
@@ -44,7 +52,7 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        self.stream.close();
+        self.stream.close(compat.io());
         self.* = undefined;
     }
 
@@ -71,11 +79,11 @@ pub const Client = struct {
         }
 
         var mask: [4]u8 = undefined;
-        std.crypto.random.bytes(&mask);
+        compat.io().random(&mask);
         @memcpy(header[hlen .. hlen + 4], &mask);
         hlen += 4;
 
-        try self.stream.writeAll(header[0..hlen]);
+        try io_util.writeAll(&self.stream, header[0..hlen]);
 
         var masked = try self.allocator.alloc(u8, payload.len);
         defer self.allocator.free(masked);
@@ -83,7 +91,7 @@ pub const Client = struct {
         for (payload, 0..) |b, i| {
             masked[i] = b ^ mask[i % 4];
         }
-        try self.stream.writeAll(masked);
+        try io_util.writeAll(&self.stream, masked);
     }
 
     pub fn recvText(self: *Client, allocator: std.mem.Allocator) ![]u8 {
@@ -161,15 +169,15 @@ pub const Client = struct {
         header[1] = 0x80 | @as(u8, @intCast(payload.len));
 
         var mask: [4]u8 = undefined;
-        std.crypto.random.bytes(&mask);
+        compat.io().random(&mask);
         @memcpy(header[2..6], &mask);
 
-        try self.stream.writeAll(&header);
+        try io_util.writeAll(&self.stream, &header);
 
         var masked = try self.allocator.alloc(u8, payload.len);
         defer self.allocator.free(masked);
         for (payload, 0..) |b, i| masked[i] = b ^ mask[i % 4];
-        try self.stream.writeAll(masked);
+        try io_util.writeAll(&self.stream, masked);
     }
 };
 
@@ -211,15 +219,17 @@ fn getHeaderValue(headers: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-fn readHttpHeaders(allocator: std.mem.Allocator, stream: *std.net.Stream) ![]u8 {
+fn readHttpHeaders(allocator: std.mem.Allocator, stream: *std.Io.net.Stream) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    var b: [1]u8 = undefined;
+    var reader = stream.reader(compat.io(), &.{});
     while (true) {
-        const n = try stream.read(&b);
-        if (n == 0) return error.ConnectionClosed;
-        try out.append(allocator, b[0]);
+        const byte = reader.interface.takeByte() catch |err| switch (err) {
+            error.ReadFailed => return reader.err.?,
+            error.EndOfStream => return error.ConnectionClosed,
+        };
+        try out.append(allocator, byte);
 
         if (out.items.len > 64 * 1024) return error.HeaderTooLarge;
 
@@ -241,4 +251,11 @@ test "header lookup" {
     const headers = "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: abc\r\n\r\n";
     try std.testing.expect(getHeaderValue(headers, "sec-websocket-accept") != null);
     try std.testing.expect(std.mem.eql(u8, getHeaderValue(headers, "Sec-WebSocket-Accept").?, "abc"));
+}
+
+test "format host authority brackets ipv6 literals" {
+    const allocator = std.testing.allocator;
+    const formatted = try common.formatHostPortAuthority(allocator, "::1", 9222);
+    defer allocator.free(formatted);
+    try std.testing.expectEqualStrings("[::1]:9222", formatted);
 }

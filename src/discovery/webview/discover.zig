@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const types = @import("../../types.zig");
 const util = @import("../util.zig");
 const string_util = @import("../../util/strings.zig");
+const compat = @import("../../util/compat.zig");
 
 const Candidate = struct {
     runtime: types.WebViewRuntime,
@@ -312,7 +313,7 @@ fn inferKindFromPath(path: []const u8, allowed: []const types.WebViewKind) types
 }
 
 fn findInPath(allocator: std.mem.Allocator, exe_name: []const u8) ![]u8 {
-    const path_env = try std.process.getEnvVarOwned(allocator, "PATH");
+    const path_env = try compat.getEnvVarOwned(allocator, "PATH");
     defer allocator.free(path_env);
 
     var it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
@@ -366,7 +367,7 @@ test "webview discover explicit path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "msedgewebview2.exe",
         .data = "stub\n",
     });
@@ -407,7 +408,7 @@ test "webview discover explicit path infers electron kind" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "electron",
         .data = "stub\n",
     });
@@ -435,7 +436,7 @@ test "webview discover explicit path infers android bridge kind from shizuku bin
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try compat.dirWriteFile(tmp.dir, .{
         .sub_path = "shizuku",
         .data = "stub\n",
     });

@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("../types.zig");
+const compat = @import("../util/compat.zig");
 
 const schema_version: u32 = 1;
 
@@ -8,8 +9,8 @@ pub const SessionCacheStore = struct {
     root_dir: []u8,
 
     pub fn open(allocator: std.mem.Allocator, root_dir: []const u8) !SessionCacheStore {
-        try std.fs.cwd().makePath(root_dir);
-        const owned_root = try std.fs.cwd().realpathAlloc(allocator, root_dir);
+        try compat.cwd().makePath(root_dir);
+        const owned_root = try compat.cwd().realpathAlloc(allocator, root_dir);
         errdefer allocator.free(owned_root);
         return .{
             .allocator = allocator,
@@ -105,7 +106,7 @@ pub const SessionCacheStore = struct {
     ) !bool {
         const path = try cachePathFor(self.allocator, self.root_dir, domain, profile_key);
         defer self.allocator.free(path);
-        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+        compat.cwd().deleteFile(path) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => return err,
         };
@@ -113,7 +114,7 @@ pub const SessionCacheStore = struct {
     }
 
     pub fn cleanupExpired(self: *SessionCacheStore) !u32 {
-        var dir = try std.fs.cwd().openDir(self.root_dir, .{ .iterate = true });
+        var dir = try compat.cwd().openDir(self.root_dir, .{ .iterate = true });
         defer dir.close();
 
         var removed: u32 = 0;
@@ -129,13 +130,13 @@ pub const SessionCacheStore = struct {
             defer self.allocator.free(payload);
 
             const expires = parseExpiresFromPayload(self.allocator, payload) catch {
-                std.fs.cwd().deleteFile(file_path) catch {};
+                compat.cwd().deleteFile(file_path) catch {};
                 removed += 1;
                 continue;
             };
             if (expires) |expires_at| {
                 if (expires_at <= nowMs()) {
-                    std.fs.cwd().deleteFile(file_path) catch continue;
+                    compat.cwd().deleteFile(file_path) catch continue;
                     removed += 1;
                 }
             }
@@ -312,20 +313,20 @@ fn cachePathFor(
 
 fn atomicWriteFile(path: []const u8, data: []const u8) !void {
     const dir_name = std.fs.path.dirname(path) orelse ".";
-    try std.fs.cwd().makePath(dir_name);
+    try compat.cwd().makePath(dir_name);
 
-    const tmp_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}.tmp.{d}", .{ path, std.time.nanoTimestamp() });
+    const tmp_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}.tmp.{d}", .{ path, compat.nanoTimestamp() });
     defer std.heap.page_allocator.free(tmp_path);
 
-    try std.fs.cwd().writeFile(.{
+    try compat.cwd().writeFile(.{
         .sub_path = tmp_path,
         .data = data,
     });
-    try std.fs.cwd().rename(tmp_path, path);
+    try compat.cwd().rename(tmp_path, path);
 }
 
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, path, max_size);
+    return compat.cwd().readFileAlloc(allocator, path, max_size);
 }
 
 fn parseExpiresFromPayload(allocator: std.mem.Allocator, payload: []const u8) !?u64 {
@@ -336,7 +337,7 @@ fn parseExpiresFromPayload(allocator: std.mem.Allocator, payload: []const u8) !?
 }
 
 fn nowMs() u64 {
-    const ts = std.time.milliTimestamp();
+    const ts = compat.milliTimestamp();
     if (ts <= 0) return 0;
     return @intCast(ts);
 }
@@ -674,7 +675,7 @@ test "session cache ttl expiry invalidates on load" {
         .schema_version = schema_version,
     };
     try store.save(entry, 1, true);
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    compat.sleepMs(5);
 
     const loaded = try store.load(allocator, "expired.example", "p");
     try std.testing.expect(loaded == null);

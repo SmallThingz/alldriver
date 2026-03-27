@@ -2,9 +2,7 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+    const allocator = std.heap.page_allocator;
 
     var store = try driver.SessionCacheStore.open(allocator, "/tmp/alldriver-session-cache-demo");
     defer store.deinit();
@@ -23,7 +21,7 @@ pub fn main() !void {
         .profile_key = "scraper-default",
         .user_agent = "Mozilla/5.0 demo",
         .cookies = http_cookies[0..],
-        .captured_at_ms = @intCast(std.time.milliTimestamp()),
+        .captured_at_ms = @intCast(driver.compat.milliTimestamp()),
         .expires_at_ms = null,
         .schema_version = 1,
     }, 86_400_000, true, .{
@@ -57,7 +55,7 @@ pub fn main() !void {
         .session_storage = rich_session[0..],
         .current_url = "https://example.com/app",
         .extra_headers = rich_headers[0..],
-        .captured_at_ms = @intCast(std.time.milliTimestamp()),
+        .captured_at_ms = @intCast(driver.compat.milliTimestamp()),
         .expires_at_ms = null,
         .schema_version = 1,
     }, 86_400_000, true, .{

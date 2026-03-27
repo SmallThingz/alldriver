@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cache_manager = @import("cache_manager.zig");
 const util_strings = @import("../util/strings.zig");
+const compat = @import("../util/compat.zig");
 
 pub const DownloadOptions = struct {
     cache_dir: ?[]const u8 = null,
@@ -58,7 +59,7 @@ pub fn downloadLatest(allocator: std.mem.Allocator, opts: DownloadOptions) ![]u8
 }
 
 fn fetchJson(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
+    var client: std.http.Client = .{ .allocator = allocator, .io = compat.io() };
     defer client.deinit();
 
     var collecting_writer: std.Io.Writer.Allocating = .init(allocator);

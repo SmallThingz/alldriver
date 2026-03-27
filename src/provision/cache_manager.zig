@@ -4,6 +4,10 @@ const catalog = @import("../catalog/browser_kind.zig");
 const path_table = @import("../catalog/path_table.zig");
 const types = @import("../types.zig");
 const util = @import("../discovery/util.zig");
+const compat = @import("../util/compat.zig");
+const io_util = @import("../util/io.zig");
+
+const max_archive_file_bytes = 256 * 1024 * 1024;
 
 pub const ManagedHit = struct {
     kind: types.BrowserKind,
@@ -22,29 +26,29 @@ pub const InstallOptions = struct {
 pub fn defaultCacheDir(allocator: std.mem.Allocator) ![]u8 {
     switch (builtin.os.tag) {
         .windows => {
-            if (std.process.getEnvVarOwned(allocator, "LOCALAPPDATA")) |base| {
+            if (compat.getEnvVarOwned(allocator, "LOCALAPPDATA")) |base| {
                 defer allocator.free(base);
                 return std.fs.path.join(allocator, &.{ base, "alldriver", "browsers" });
             } else |_| {}
-            if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |base| {
+            if (compat.getEnvVarOwned(allocator, "USERPROFILE")) |base| {
                 defer allocator.free(base);
                 return std.fs.path.join(allocator, &.{ base, "AppData", "Local", "alldriver", "browsers" });
             } else |_| {}
             return allocator.dupe(u8, ".\\alldriver\\browsers");
         },
         .macos => {
-            if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+            if (compat.getEnvVarOwned(allocator, "HOME")) |home| {
                 defer allocator.free(home);
                 return std.fs.path.join(allocator, &.{ home, "Library", "Caches", "alldriver", "browsers" });
             } else |_| {}
             return allocator.dupe(u8, "/tmp/alldriver/browsers");
         },
         else => {
-            if (std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |base| {
+            if (compat.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |base| {
                 defer allocator.free(base);
                 return std.fs.path.join(allocator, &.{ base, "alldriver", "browsers" });
             } else |_| {}
-            if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+            if (compat.getEnvVarOwned(allocator, "HOME")) |home| {
                 defer allocator.free(home);
                 return std.fs.path.join(allocator, &.{ home, ".cache", "alldriver", "browsers" });
             } else |_| {}
@@ -128,23 +132,25 @@ pub fn installManagedBrowserWithOptions(
     const kind_root = try std.fs.path.join(allocator, &.{ cache_dir, kind_name });
     defer allocator.free(kind_root);
 
-    try std.fs.cwd().makePath(kind_root);
+    try compat.cwd().makePath(kind_root);
 
     const lock_path = try std.fs.path.join(allocator, &.{ kind_root, ".install.lock" });
     defer allocator.free(lock_path);
     const lock_file = try acquireInstallLock(lock_path);
     defer {
-        lock_file.close();
-        std.fs.cwd().deleteFile(lock_path) catch {};
+        lock_file.close(compat.io());
+        compat.cwd().deleteFile(lock_path) catch {};
     }
 
     var nonce_bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&nonce_bytes);
+    compat.io().random(&nonce_bytes);
     const nonce = std.mem.readInt(u64, &nonce_bytes, .little);
-    const stamp = std.time.nanoTimestamp();
-    const version_dir = try std.fmt.allocPrint(allocator, "{s}/{d}-{x}", .{ kind_root, stamp, nonce });
+    const stamp = compat.nanoTimestamp();
+    const version_leaf = try std.fmt.allocPrint(allocator, "{d}-{x}", .{ stamp, nonce });
+    defer allocator.free(version_leaf);
+    const version_dir = try std.fs.path.join(allocator, &.{ kind_root, version_leaf });
     defer allocator.free(version_dir);
-    try std.fs.cwd().makePath(version_dir);
+    try compat.cwd().makePath(version_dir);
 
     const staged_filename = inferFileName(download_url);
     const staged_path = try std.fs.path.join(allocator, &.{ version_dir, staged_filename });
@@ -157,7 +163,7 @@ pub fn installManagedBrowserWithOptions(
         try verifySha256(payload, expected);
     }
 
-    try std.fs.cwd().writeFile(.{ .sub_path = staged_path, .data = payload });
+    try compat.cwd().writeFile(.{ .sub_path = staged_path, .data = payload });
 
     const selected: SelectedExecutable = if (isArchiveFileName(staged_filename))
         try extractAndSelectExecutable(
@@ -186,40 +192,40 @@ pub fn installManagedBrowserWithOptions(
     const current_prev_dir = try std.fs.path.join(allocator, &.{ kind_root, ".current.prev" });
     defer allocator.free(current_prev_dir);
 
-    std.fs.cwd().deleteTree(current_stage_dir) catch {};
-    std.fs.cwd().deleteTree(current_prev_dir) catch {};
-    try std.fs.cwd().makePath(current_stage_dir);
+    compat.cwd().deleteTree(current_stage_dir) catch {};
+    compat.cwd().deleteTree(current_prev_dir) catch {};
+    try compat.cwd().makePath(current_stage_dir);
 
     const staged_current_file = try std.fs.path.join(allocator, &.{ current_stage_dir, selected.basename });
     defer allocator.free(staged_current_file);
-    try std.fs.cwd().copyFile(selected.path, std.fs.cwd(), staged_current_file, .{});
+    try compat.cwd().copyFile(selected.path, compat.cwd(), staged_current_file, .{});
     ensureExecutablePermissions(staged_current_file);
 
     if (util.exists(current_dir)) {
-        std.fs.cwd().rename(current_dir, current_prev_dir) catch |err| switch (err) {
+        compat.cwd().rename(current_dir, current_prev_dir) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
     }
 
-    std.fs.cwd().rename(current_stage_dir, current_dir) catch |err| {
+    compat.cwd().rename(current_stage_dir, current_dir) catch |err| {
         if (util.exists(current_prev_dir) and !util.exists(current_dir)) {
-            std.fs.cwd().rename(current_prev_dir, current_dir) catch {};
+            compat.cwd().rename(current_prev_dir, current_dir) catch {};
         }
         return err;
     };
 
-    std.fs.cwd().deleteTree(current_prev_dir) catch {};
+    compat.cwd().deleteTree(current_prev_dir) catch {};
 }
 
 fn downloadToMemory(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, url, "file://")) {
         const local = try localPathFromFileUrl(allocator, url);
         defer allocator.free(local);
-        return std.fs.cwd().readFileAlloc(allocator, local, 1024 * 1024 * 256);
+        return compat.cwd().readFileAlloc(allocator, local, 1024 * 1024 * 256);
     }
 
-    var client: std.http.Client = .{ .allocator = allocator };
+    var client: std.http.Client = .{ .allocator = allocator, .io = compat.io() };
     defer client.deinit();
 
     var collecting_writer: std.Io.Writer.Allocating = .init(allocator);
@@ -256,22 +262,22 @@ fn inferFileName(url: []const u8) []const u8 {
     return "browser.bin";
 }
 
-fn acquireInstallLock(lock_path: []const u8) !std.fs.File {
-    const deadline_ms = std.time.milliTimestamp() + 10_000;
+fn acquireInstallLock(lock_path: []const u8) !std.Io.File {
+    const deadline_ms = compat.milliTimestamp() + 10_000;
     while (true) {
-        return std.fs.cwd().createFile(lock_path, .{ .exclusive = true, .truncate = true }) catch |err| switch (err) {
+        return compat.cwd().createFile(lock_path, .{ .exclusive = true, .truncate = true }) catch |err| switch (err) {
             error.PathAlreadyExists => {
-                const stat = std.fs.cwd().statFile(lock_path) catch |stat_err| switch (stat_err) {
+                const stat = compat.cwd().statFile(lock_path) catch |stat_err| switch (stat_err) {
                     error.FileNotFound => continue,
                     else => return stat_err,
                 };
-                const age_ms = std.time.milliTimestamp() - @as(i64, @intCast(@divTrunc(stat.mtime, std.time.ns_per_ms)));
+                const age_ms = compat.milliTimestamp() - @as(i64, @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms)));
                 if (age_ms > 300_000) {
-                    std.fs.cwd().deleteFile(lock_path) catch {};
+                    compat.cwd().deleteFile(lock_path) catch {};
                     continue;
                 }
-                if (std.time.milliTimestamp() >= deadline_ms) return err;
-                std.Thread.sleep(50 * std.time.ns_per_ms);
+                if (compat.milliTimestamp() >= deadline_ms) return err;
+                compat.sleepMs(50);
                 continue;
             },
             else => return err,
@@ -324,7 +330,7 @@ fn extractAndSelectExecutable(
 ) !SelectedExecutable {
     const extract_root = try std.fs.path.join(allocator, &.{ version_dir, "extract" });
     defer allocator.free(extract_root);
-    try std.fs.cwd().makePath(extract_root);
+    try compat.cwd().makePath(extract_root);
 
     try extractArchive(allocator, staged_archive_path, extract_root);
 
@@ -355,13 +361,13 @@ fn findPathByBasename(
     root: []const u8,
     want_basename: []const u8,
 ) ![]u8 {
-    var dir = try std.fs.cwd().openDir(root, .{ .iterate = true });
-    defer dir.close();
+    var dir = try compat.cwd().openDir(root, .{ .iterate = true });
+    defer dir.close(compat.io());
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(compat.io())) |entry| {
         switch (entry.kind) {
             .file => {},
             else => continue,
@@ -382,62 +388,61 @@ fn isArchiveFileName(name: []const u8) bool {
 }
 
 fn extractArchive(allocator: std.mem.Allocator, archive_path: []const u8, dest_dir: []const u8) !void {
-    var dest = try std.fs.cwd().openDir(dest_dir, .{});
-    defer dest.close();
+    var dest = try compat.cwd().openDir(dest_dir, .{});
+    defer dest.close(compat.io());
 
     if (std.mem.endsWith(u8, archive_path, ".zip")) {
-        var file = try std.fs.cwd().openFile(archive_path, .{});
-        defer file.close();
+        var file = try compat.cwd().openFile(archive_path, .{});
+        defer file.close(compat.io());
 
         var file_reader_buffer: [8192]u8 = undefined;
-        var file_reader = file.reader(&file_reader_buffer);
+        var file_reader = file.reader(compat.io(), &file_reader_buffer);
         try std.zip.extract(dest, &file_reader, .{});
         return;
     }
 
     if (std.mem.endsWith(u8, archive_path, ".tar")) {
-        var file = try std.fs.cwd().openFile(archive_path, .{});
-        defer file.close();
+        var file = try compat.cwd().openFile(archive_path, .{});
+        defer file.close(compat.io());
 
         var file_reader_buffer: [8192]u8 = undefined;
-        var file_reader = file.reader(&file_reader_buffer);
-        try std.tar.pipeToFileSystem(dest, &file_reader.interface, .{});
+        var file_reader = file.reader(compat.io(), &file_reader_buffer);
+        try std.tar.pipeToFileSystem(compat.io(), dest, &file_reader.interface, .{});
         return;
     }
 
     if (std.mem.endsWith(u8, archive_path, ".tar.gz") or std.mem.endsWith(u8, archive_path, ".tgz")) {
-        var file = try std.fs.cwd().openFile(archive_path, .{});
-        defer file.close();
+        var file = try compat.cwd().openFile(archive_path, .{});
+        defer file.close(compat.io());
 
         var file_reader_buffer: [8192]u8 = undefined;
-        var file_reader = file.reader(&file_reader_buffer);
+        var file_reader = file.reader(compat.io(), &file_reader_buffer);
         var inflate_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var gzip_reader = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &inflate_buffer);
-        try std.tar.pipeToFileSystem(dest, &gzip_reader.reader, .{});
+        try std.tar.pipeToFileSystem(compat.io(), dest, &gzip_reader.reader, .{});
         return;
     }
 
     if (std.mem.endsWith(u8, archive_path, ".tar.xz") or std.mem.endsWith(u8, archive_path, ".txz")) {
-        const compressed = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
+        const compressed = try compat.cwd().readFileAlloc(allocator, archive_path, max_archive_file_bytes);
         defer allocator.free(compressed);
 
-        var in_stream = std.io.fixedBufferStream(compressed);
-        var xz = try std.compress.xz.decompress(allocator, in_stream.reader());
+        var in_reader: std.Io.Reader = .fixed(compressed);
+        var xz = try std.compress.xz.Decompress.init(&in_reader, allocator, try allocator.alloc(u8, 8192));
         defer xz.deinit();
 
         var tar_bytes: std.ArrayList(u8) = .empty;
         defer tar_bytes.deinit(allocator);
 
-        var xz_reader = xz.reader();
         var decode_buffer: [8192]u8 = undefined;
         while (true) {
-            const n = try xz_reader.read(&decode_buffer);
+            const n = try xz.reader.readSliceShort(&decode_buffer);
             if (n == 0) break;
             try tar_bytes.appendSlice(allocator, decode_buffer[0..n]);
         }
 
         var tar_reader: std.Io.Reader = .fixed(tar_bytes.items);
-        try std.tar.pipeToFileSystem(dest, &tar_reader, .{});
+        try std.tar.pipeToFileSystem(compat.io(), dest, &tar_reader, .{});
         return;
     }
 
@@ -446,9 +451,9 @@ fn extractArchive(allocator: std.mem.Allocator, archive_path: []const u8, dest_d
 
 fn ensureExecutablePermissions(path: []const u8) void {
     if (@import("builtin").os.tag == .windows) return;
-    const file = std.fs.cwd().openFile(path, .{}) catch return;
-    defer file.close();
-    file.chmod(0o755) catch {};
+    const file = compat.cwd().openFile(path, .{}) catch return;
+    defer file.close(compat.io());
+    file.setPermissions(compat.io(), .executable_file) catch {};
 }
 
 fn verifySha256(data: []const u8, expected_hex: []const u8) !void {
@@ -486,26 +491,25 @@ const zip_fixture_hex =
     "504b0304140000000000079f615c56abff5e09000000090000000b00000062696e2f62726f7773657268656c6c6f2d7a6970504b01021403140000000000079f615c56abff5e09000000090000000b000000000000000000000080010000000062696e2f62726f77736572504b0506000000000100010039000000320000000000";
 
 const OneShotHttpServer = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     body: []const u8,
     failed: bool = false,
 
     fn port(self: *const OneShotHttpServer) u16 {
-        const real = self.server.listen_address.in.sa;
-        return std.mem.bigToNative(u16, real.port);
+        return self.server.socket.address.getPort();
     }
 };
 
 fn runOneShotHttpServer(ctx: *OneShotHttpServer) void {
-    defer ctx.server.deinit();
-    const conn = ctx.server.accept() catch {
+    defer ctx.server.deinit(compat.io());
+    var stream = ctx.server.accept(compat.io()) catch {
         ctx.failed = true;
         return;
     };
-    defer conn.stream.close();
+    defer stream.close(compat.io());
 
     var req_buf: [2048]u8 = undefined;
-    _ = conn.stream.read(&req_buf) catch {
+    _ = io_util.read(&stream, &req_buf) catch {
         ctx.failed = true;
         return;
     };
@@ -520,28 +524,54 @@ fn runOneShotHttpServer(ctx: *OneShotHttpServer) void {
         return;
     };
 
-    conn.stream.writeAll(head) catch {
+    io_util.writeAll(&stream, head) catch {
         ctx.failed = true;
         return;
     };
-    conn.stream.writeAll(ctx.body) catch {
+    io_util.writeAll(&stream, ctx.body) catch {
         ctx.failed = true;
     };
 }
 
+fn canCreateIpv4TcpSocket() bool {
+    if (builtin.os.tag != .linux) return true;
+    const linux = std.os.linux;
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {
+            _ = linux.close(@intCast(rc));
+            return true;
+        },
+        .PERM, .ACCES => return false,
+        else => return true,
+    }
+}
+
 test "managed install downloads over HTTP and extracts zip without external tools" {
     const allocator = std.testing.allocator;
+    if (!canCreateIpv4TcpSocket()) return error.SkipZigTest;
 
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
-    const cache_dir = try temp.dir.realpathAlloc(allocator, ".");
+    const cache_dir = try compat.dirRealpathAlloc(temp.dir, allocator, ".");
     defer allocator.free(cache_dir);
 
     const zip_bytes = try decodeHexAlloc(allocator, zip_fixture_hex);
     defer allocator.free(zip_bytes);
 
-    var addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    const server = try addr.listen(.{});
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    const server = addr.listen(compat.io(), .{ .reuse_address = true }) catch |err| switch (err) {
+        error.Unexpected,
+        error.NetworkDown,
+        error.SystemResources,
+        error.AddressFamilyUnsupported,
+        error.ProtocolUnsupportedBySystem,
+        error.ProtocolUnsupportedByAddressFamily,
+        error.SocketModeUnsupported,
+        error.OptionUnsupported,
+        => return error.SkipZigTest,
+        else => return err,
+    };
 
     var ctx = OneShotHttpServer{
         .server = server,
@@ -563,7 +593,7 @@ test "managed install downloads over HTTP and extracts zip without external tool
 
     const installed = try std.fs.path.join(allocator, &.{ cache_dir, "chrome", "current", "browser" });
     defer allocator.free(installed);
-    const installed_bytes = try std.fs.cwd().readFileAlloc(allocator, installed, 1024);
+    const installed_bytes = try compat.cwd().readFileAlloc(allocator, installed, 1024);
     defer allocator.free(installed_bytes);
     try std.testing.expectEqualStrings("hello-zip", installed_bytes);
 }

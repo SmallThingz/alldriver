@@ -2,11 +2,10 @@ const std = @import("std");
 const driver = @import("alldriver");
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+    const allocator = std.heap.page_allocator;
 
-    const explicit = std.posix.getenv("ALLDRIVER_EXPLICIT_PATH");
+    const explicit = driver.compat.getEnvVarOwned(allocator, "ALLDRIVER_EXPLICIT_PATH") catch null;
+    defer if (explicit) |path| allocator.free(path);
 
     var installs = try driver.discover(allocator, .{
         .kinds = &.{ .chrome, .edge, .firefox },

@@ -4,6 +4,7 @@ const types = @import("../types.zig");
 const executor = @import("../protocol/executor.zig");
 const json_util = @import("../util/json.zig");
 const events = @import("events.zig");
+const compat = @import("../util/compat.zig");
 
 pub const NetworkRule = types.NetworkRule;
 pub const InterceptAction = types.InterceptAction;
@@ -901,7 +902,7 @@ fn parseSameSite(raw: ?[]const u8) types.CookieSameSite {
 }
 
 fn nowMs() u64 {
-    const ts = std.time.milliTimestamp();
+    const ts = compat.milliTimestamp();
     if (ts <= 0) return 0;
     return @intCast(ts);
 }

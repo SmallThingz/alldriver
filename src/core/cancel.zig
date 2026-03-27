@@ -1,7 +1,8 @@
 const std = @import("std");
+const compat = @import("../util/compat.zig");
 
 pub const CancelToken = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: compat.Mutex = .{},
     canceled: bool = false,
 
     pub fn init() CancelToken {

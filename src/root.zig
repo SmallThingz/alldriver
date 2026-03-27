@@ -95,6 +95,7 @@ pub const strings = @import("util/strings.zig");
 pub const path = @import("util/path.zig");
 pub const json = @import("util/json.zig");
 pub const io = @import("util/io.zig");
+pub const compat = @import("util/compat.zig");
 
 pub const extension_hooks = extensions;
 pub const async_api = @import("core/async.zig");

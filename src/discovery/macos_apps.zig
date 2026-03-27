@@ -4,6 +4,7 @@ const catalog = @import("../catalog/browser_kind.zig");
 const path_table = @import("../catalog/path_table.zig");
 const types = @import("../types.zig");
 const util = @import("util.zig");
+const compat = @import("../util/compat.zig");
 
 pub const MacHit = struct {
     kind: types.BrowserKind,
@@ -63,7 +64,7 @@ fn scanApplicationDirs(allocator: std.mem.Allocator, kind: types.BrowserKind, hi
         out.deinit(allocator);
     }
 
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+    const home = compat.getEnvVarOwned(allocator, "HOME") catch null;
     defer if (home) |h| allocator.free(h);
 
     var roots: std.ArrayList([]const u8) = .empty;

@@ -7,18 +7,19 @@ const ws = @import("../transport/ws_client.zig");
 const http = @import("../transport/http_client.zig");
 const json_rpc = @import("../transport/json_rpc.zig");
 const json_util = @import("../util/json.zig");
+const compat = @import("../util/compat.zig");
 
 const Session = @import("../core/session.zig").Session;
 
 pub fn waitUntilReady(session: *Session, timeout_ms: u32) !void {
-    const started = std.time.milliTimestamp();
+    const started = compat.milliTimestamp();
     const deadline = started + @as(i64, @intCast(timeout_ms));
     var last_error: ?anyerror = null;
 
-    while (std.time.milliTimestamp() < deadline) {
+    while (compat.milliTimestamp() < deadline) {
         initializeSession(session) catch |err| {
             last_error = err;
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            compat.sleepMs(50);
             continue;
         };
         return;
@@ -288,13 +289,13 @@ pub fn removeInitScript(session: *Session, script_id: []const u8) !void {
 }
 
 pub fn waitForDomReady(session: *Session, timeout_ms: u32) !void {
-    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    const deadline = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     while (true) {
         const res = try evaluate(session, "document.readyState");
         defer session.allocator.free(res);
         if (std.mem.indexOf(u8, res, "complete") != null) return;
-        if (std.time.milliTimestamp() >= deadline) return error.Timeout;
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        if (compat.milliTimestamp() >= deadline) return error.Timeout;
+        compat.sleepMs(50);
     }
 }
 
@@ -308,13 +309,13 @@ pub fn waitForSelector(session: *Session, selector: []const u8, timeout_ms: u32)
     );
     defer session.allocator.free(expr);
 
-    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    const deadline = compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     while (true) {
         const res = try evaluate(session, expr);
         defer session.allocator.free(res);
         if (std.mem.indexOf(u8, res, "true") != null) return;
-        if (std.time.milliTimestamp() >= deadline) return error.Timeout;
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        if (compat.milliTimestamp() >= deadline) return error.Timeout;
+        compat.sleepMs(50);
     }
 }
 
@@ -1180,7 +1181,7 @@ fn timestampFromEvent(params: std.json.ObjectMap, field: []const u8) u64 {
 }
 
 fn nowMs() u64 {
-    const ts = std.time.milliTimestamp();
+    const ts = compat.milliTimestamp();
     if (ts <= 0) return 0;
     return @intCast(ts);
 }
@@ -1399,7 +1400,9 @@ fn cdpWebSocketEndpoint(
     parsed: common.EndpointParts,
 ) ![]u8 {
     if (!shouldResolveCdpEndpointPath(parsed.path)) {
-        return std.fmt.allocPrint(allocator, "ws://{s}:{d}{s}", .{ parsed.host, parsed.port, parsed.path });
+        const authority = try common.formatHostPortAuthority(allocator, parsed.host, parsed.port);
+        defer allocator.free(authority);
+        return std.fmt.allocPrint(allocator, "ws://{s}{s}", .{ authority, parsed.path });
     }
     return resolveCdpWebSocketEndpoint(allocator, parsed.host, parsed.port);
 }
@@ -1431,17 +1434,12 @@ fn httpStatusIsSuccess(code: u16) bool {
 }
 
 fn parseWsUrl(allocator: std.mem.Allocator, endpoint: []const u8) !struct { host: []const u8, port: u16, path: []u8 } {
-    var input = endpoint;
-    if (std.mem.startsWith(u8, input, "ws://")) input = input[5..];
-    if (std.mem.startsWith(u8, input, "wss://")) return error.UnsupportedProtocol;
-    const slash = std.mem.indexOfScalar(u8, input, '/') orelse return error.InvalidEndpoint;
-    const host_port = input[0..slash];
-    const path = try allocator.dupe(u8, input[slash..]);
-
-    const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.InvalidEndpoint;
-    const host = host_port[0..colon];
-    const port = try std.fmt.parseInt(u16, host_port[colon + 1 ..], 10);
-    return .{ .host = host, .port = port, .path = path };
+    const parsed = try common.parseEndpoint(endpoint, .cdp);
+    return .{
+        .host = parsed.host,
+        .port = parsed.port,
+        .path = try allocator.dupe(u8, parsed.path),
+    };
 }
 
 fn firstJsonListWsEndpoint(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
@@ -1613,6 +1611,14 @@ test "parseWsUrl supports ws endpoint" {
     try std.testing.expect(std.mem.eql(u8, parsed.host, "127.0.0.1"));
 }
 
+test "parseWsUrl supports bracketed IPv6 endpoint" {
+    const allocator = std.testing.allocator;
+    const parsed = try parseWsUrl(allocator, "ws://[::1]:9222/devtools/browser/abc");
+    defer allocator.free(parsed.path);
+    try std.testing.expectEqualStrings("::1", parsed.host);
+    try std.testing.expectEqual(@as(u16, 9222), parsed.port);
+}
+
 test "cdp endpoint path resolution rules keep page targets direct" {
     try std.testing.expect(shouldResolveCdpEndpointPath("/"));
     try std.testing.expect(shouldResolveCdpEndpointPath("/devtools/browser/abc"));
@@ -1625,6 +1631,14 @@ test "cdp endpoint selection keeps explicit page endpoint" {
     const ws_url = try cdpWebSocketEndpoint(allocator, parsed);
     defer allocator.free(ws_url);
     try std.testing.expectEqualStrings("ws://127.0.0.1:9222/devtools/page/123", ws_url);
+}
+
+test "cdp endpoint selection brackets ipv6 page endpoint" {
+    const allocator = std.testing.allocator;
+    const parsed = try common.parseEndpoint("cdp://[::1]:9222/devtools/page/123", .cdp);
+    const ws_url = try cdpWebSocketEndpoint(allocator, parsed);
+    defer allocator.free(ws_url);
+    try std.testing.expectEqualStrings("ws://[::1]:9222/devtools/page/123", ws_url);
 }
 
 test "first json list endpoint prefers page targets" {
