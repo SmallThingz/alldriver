@@ -190,7 +190,9 @@ fn appendUniqueBidiEndpoint(
     port: u16,
     path: []const u8,
 ) !void {
-    const endpoint = try std.fmt.allocPrint(allocator, "bidi://{s}:{d}{s}", .{ host, port, path });
+    const authority = try common.formatHostPortAuthority(allocator, host, port);
+    defer allocator.free(authority);
+    const endpoint = try std.fmt.allocPrint(allocator, "bidi://{s}{s}", .{ authority, path });
     defer allocator.free(endpoint);
     for (candidates.items) |existing| {
         if (std.mem.eql(u8, existing, endpoint)) return;

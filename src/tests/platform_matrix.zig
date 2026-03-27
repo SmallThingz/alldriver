@@ -45,6 +45,43 @@ test "protocol endpoint parsing supports cdp and bidi only" {
     try std.testing.expectError(error.InvalidEndpoint, common.parseEndpoint("not-an-endpoint", .cdp));
 }
 
+test "supported protocol matrix stays aligned across engine, adapter, transport, and endpoint scheme" {
+    const cases = [_]struct {
+        engine: types.EngineKind,
+        adapter: common.AdapterKind,
+        transport: common.TransportKind,
+        endpoint: []const u8,
+        host: []const u8,
+        port: u16,
+    }{
+        .{
+            .engine = .chromium,
+            .adapter = .cdp,
+            .transport = .cdp_ws,
+            .endpoint = "cdp://127.0.0.1:9222/devtools/page/abc",
+            .host = "127.0.0.1",
+            .port = 9222,
+        },
+        .{
+            .engine = .gecko,
+            .adapter = .bidi,
+            .transport = .bidi_ws,
+            .endpoint = "bidi://[::1]:9223/session/1",
+            .host = "::1",
+            .port = 9223,
+        },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.adapter, common.preferredAdapterForEngine(case.engine));
+        try std.testing.expectEqual(case.transport, common.transportForAdapter(case.adapter));
+        const parsed = try common.parseEndpoint(case.endpoint, case.adapter);
+        try std.testing.expectEqual(case.adapter, parsed.adapter);
+        try std.testing.expectEqual(case.port, parsed.port);
+        try std.testing.expectEqualStrings(case.host, parsed.host);
+    }
+}
+
 test "os specific collectors are host-gated" {
     const allocator = std.testing.allocator;
     const win = try windows_registry.collect(allocator, &.{ .chrome, .edge });

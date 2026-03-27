@@ -553,6 +553,7 @@ pub fn enableNetworkInterception(session: *Session) !void {
 }
 
 pub fn disableNetworkInterception(session: *Session) !void {
+    if (session.endpoint == null) return;
     switch (session.transport) {
         .cdp_ws => {
             try callCdpBestEffort(session, "Fetch.disable", "{}");
@@ -1733,6 +1734,36 @@ fn makeNotificationTestSession(
     };
 }
 
+fn makeProtocolComplianceSession(
+    allocator: std.mem.Allocator,
+    transport: common.TransportKind,
+    engine: types.EngineKind,
+) !Session {
+    var session = try makeNotificationTestSession(allocator, transport, engine);
+    switch (transport) {
+        .cdp_ws => {
+            session.endpoint = try allocator.dupe(u8, "cdp://127.0.0.1:9222/devtools/page/contract");
+        },
+        .bidi_ws => {
+            session.endpoint = try allocator.dupe(u8, "bidi://127.0.0.1:9222/session/contract");
+            session.browsing_context_id = try allocator.dupe(u8, "ctx-contract");
+        },
+    }
+    return session;
+}
+
+fn sampleCookieHeader() types.Header {
+    return .{ .name = "session", .value = "abc" };
+}
+
+fn sampleNetworkRule() types.NetworkRule {
+    return .{
+        .id = "rule-1",
+        .url_pattern = "*://example.test/*",
+        .action = .{ .block = {} },
+    };
+}
+
 var notification_callback_saw_unlocked_protocol: bool = false;
 var notification_callback_session: ?*Session = null;
 
@@ -1853,4 +1884,71 @@ test "queued notification processing happens outside protocol lock" {
     processQueuedCdpNotifications(&session, queued_notifications.items);
 
     try std.testing.expect(notification_callback_saw_unlocked_protocol);
+}
+
+test "cdp-only executor commands reject bidi and stay wired on cdp" {
+    const allocator = std.testing.allocator;
+    var bidi_session = try makeProtocolComplianceSession(allocator, .bidi_ws, .gecko);
+    defer bidi_session.deinit();
+
+    const cookie = sampleCookieHeader();
+    try std.testing.expectError(error.UnsupportedProtocol, setCookie(&bidi_session, cookie, "example.test", "/"));
+    try std.testing.expectError(error.UnsupportedProtocol, getCookies(&bidi_session));
+    try std.testing.expectError(error.UnsupportedProtocol, getResponseBody(&bidi_session, "req-1"));
+    try std.testing.expectError(error.UnsupportedProtocol, screenshot(&bidi_session));
+    try std.testing.expectError(error.UnsupportedProtocol, startTracing(&bidi_session));
+    try std.testing.expectError(error.UnsupportedProtocol, stopTracing(&bidi_session));
+    try std.testing.expectError(error.UnsupportedProtocol, cdpGetTargets(&bidi_session));
+    try std.testing.expectError(error.UnsupportedProtocol, cdpCreateTarget(&bidi_session, "about:blank"));
+    try std.testing.expectError(error.UnsupportedProtocol, cdpAttachToTarget(&bidi_session, "target-1", true));
+    try std.testing.expectError(error.UnsupportedProtocol, cdpDetachFromTarget(&bidi_session, "session-1"));
+    try std.testing.expectError(error.UnsupportedProtocol, cdpCloseTarget(&bidi_session, "target-1"));
+
+    var cdp_session = try makeProtocolComplianceSession(allocator, .cdp_ws, .chromium);
+    defer cdp_session.deinit();
+    cdp_session.allocator.free(cdp_session.endpoint.?);
+    cdp_session.endpoint = null;
+
+    try std.testing.expectError(error.MissingEndpoint, setCookie(&cdp_session, cookie, "example.test", "/"));
+    try std.testing.expectError(error.MissingEndpoint, getCookies(&cdp_session));
+    try std.testing.expectError(error.MissingEndpoint, getResponseBody(&cdp_session, "req-1"));
+    try std.testing.expectError(error.MissingEndpoint, screenshot(&cdp_session));
+    try std.testing.expectError(error.MissingEndpoint, startTracing(&cdp_session));
+    try std.testing.expectError(error.MissingEndpoint, stopTracing(&cdp_session));
+    try std.testing.expectError(error.MissingEndpoint, cdpGetTargets(&cdp_session));
+    try std.testing.expectError(error.MissingEndpoint, cdpCreateTarget(&cdp_session, "about:blank"));
+    try std.testing.expectError(error.MissingEndpoint, cdpAttachToTarget(&cdp_session, "target-1", true));
+    try std.testing.expectError(error.MissingEndpoint, cdpDetachFromTarget(&cdp_session, "session-1"));
+    try std.testing.expectError(error.MissingEndpoint, cdpCloseTarget(&cdp_session, "target-1"));
+}
+
+test "shared executor commands keep setup failures distinct from teardown on both transports" {
+    const allocator = std.testing.allocator;
+    const rule = sampleNetworkRule();
+
+    var cdp_session = try makeProtocolComplianceSession(allocator, .cdp_ws, .chromium);
+    defer cdp_session.deinit();
+    cdp_session.allocator.free(cdp_session.endpoint.?);
+    cdp_session.endpoint = null;
+
+    try std.testing.expectError(error.MissingEndpoint, evaluate(&cdp_session, "1 + 1"));
+    try std.testing.expectError(error.MissingEndpoint, addInitScript(&cdp_session, "window.__driver = true;"));
+    try std.testing.expectError(error.MissingEndpoint, removeInitScript(&cdp_session, "script-1"));
+    try std.testing.expectError(error.MissingEndpoint, releaseHandle(&cdp_session, "handle-1"));
+    try std.testing.expectError(error.MissingEndpoint, enableNetworkInterception(&cdp_session));
+    try disableNetworkInterception(&cdp_session);
+    try std.testing.expectError(error.MissingEndpoint, addNetworkRule(&cdp_session, rule));
+
+    var bidi_session = try makeProtocolComplianceSession(allocator, .bidi_ws, .gecko);
+    defer bidi_session.deinit();
+    bidi_session.allocator.free(bidi_session.endpoint.?);
+    bidi_session.endpoint = null;
+
+    try std.testing.expectError(error.MissingEndpoint, evaluate(&bidi_session, "1 + 1"));
+    try std.testing.expectError(error.MissingEndpoint, addInitScript(&bidi_session, "window.__driver = true;"));
+    try std.testing.expectError(error.MissingEndpoint, removeInitScript(&bidi_session, "script-1"));
+    try std.testing.expectError(error.MissingEndpoint, releaseHandle(&bidi_session, "handle-1"));
+    try std.testing.expectError(error.MissingEndpoint, enableNetworkInterception(&bidi_session));
+    try disableNetworkInterception(&bidi_session);
+    try std.testing.expectError(error.MissingEndpoint, addNetworkRule(&bidi_session, rule));
 }

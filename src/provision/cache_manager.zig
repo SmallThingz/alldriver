@@ -508,12 +508,6 @@ fn runOneShotHttpServer(ctx: *OneShotHttpServer) void {
     };
     defer stream.close(compat.io());
 
-    var req_buf: [2048]u8 = undefined;
-    _ = io_util.read(&stream, &req_buf) catch {
-        ctx.failed = true;
-        return;
-    };
-
     var head_buf: [256]u8 = undefined;
     const head = std.fmt.bufPrint(
         &head_buf,
