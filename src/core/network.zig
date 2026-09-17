@@ -144,6 +144,8 @@ pub fn emitDebugEvent(session: *Session, event_json: []const u8) void {
     });
 }
 
+/// Lifecycle hooks here are dispatched as command RPCs drain CDP notifications.
+/// Use onRequest/onResponse or subscribe with enable for idle push delivery.
 pub fn emitRequestObserved(session: *Session, event: RequestEvent) void {
     upsertNetworkRecordFromRequest(session, event) catch {};
     session.network_observer_lock.lock();
@@ -176,27 +178,20 @@ pub fn emitResponseObserved(session: *Session, event: ResponseEvent) void {
     });
 }
 
-pub fn recordRedirect(
-    session: *Session,
-    request_id: []const u8,
-    from_url: []const u8,
-    to_url: []const u8,
-    status: u16,
-    at_ms: u64,
-) !void {
+pub fn recordRedirect(session: *Session, request_id: []const u8, from_url: []const u8, to_url: []const u8, status: u16, at_ms: u64) !void {
+    const redirect = try cloneOwned(types.RedirectHop, session.allocator, .{ .from_url = from_url, .to_url = to_url, .status = status, .at_ms = at_ms });
+    errdefer freeOwned(types.RedirectHop, session.allocator, redirect);
     session.network_lock.lock();
     defer session.network_lock.unlock();
     const index = try ensureNetworkRecordLocked(session, request_id);
-    var record = &session.network_records.items[index];
-
-    const redirect = types.RedirectHop{
-        .from_url = try session.allocator.dupe(u8, from_url),
-        .to_url = try session.allocator.dupe(u8, to_url),
-        .status = status,
-        .at_ms = at_ms,
-    };
-    try appendRedirectLocked(session, record, redirect);
+    const record = &session.network_records.items[index];
+    const grown = try session.allocator.alloc(types.RedirectHop, record.redirects.len + 1);
+    errdefer session.allocator.free(grown);
+    @memcpy(grown[0..record.redirects.len], record.redirects);
+    grown[record.redirects.len] = redirect;
     try appendStatusPointLocked(session, record, status, at_ms);
+    session.allocator.free(record.redirects);
+    record.redirects = grown;
     record.final_status = status;
 }
 
@@ -237,24 +232,17 @@ pub fn lastResponseStatusForUrl(session: *Session, url: []const u8) ?u16 {
 }
 
 pub fn upsertFrameInfo(session: *Session, frame: types.FrameInfo) !void {
+    var owned = try cloneOwned(types.FrameInfo, session.allocator, frame);
+    errdefer freeFrameInfo(session.allocator, &owned);
     session.frames_lock.lock();
     defer session.frames_lock.unlock();
     for (session.frames.items) |*existing| {
         if (!std.mem.eql(u8, existing.frame_id, frame.frame_id)) continue;
-        replaceOwnedString(session.allocator, &existing.url, frame.url);
-        if (existing.parent_frame_id) |parent_id| session.allocator.free(parent_id);
-        existing.parent_frame_id = if (frame.parent_frame_id) |parent_id|
-            try session.allocator.dupe(u8, parent_id)
-        else
-            null;
+        freeFrameInfo(session.allocator, existing);
+        existing.* = owned;
         return;
     }
-
-    try session.frames.append(session.allocator, .{
-        .frame_id = try session.allocator.dupe(u8, frame.frame_id),
-        .parent_frame_id = if (frame.parent_frame_id) |parent_id| try session.allocator.dupe(u8, parent_id) else null,
-        .url = try session.allocator.dupe(u8, frame.url),
-    });
+    try session.frames.append(session.allocator, owned);
 }
 
 pub fn removeFrameInfo(session: *Session, frame_id: []const u8) void {
@@ -270,21 +258,17 @@ pub fn removeFrameInfo(session: *Session, frame_id: []const u8) void {
 }
 
 pub fn upsertServiceWorkerInfo(session: *Session, worker: types.ServiceWorkerInfo) !void {
+    var owned = try cloneOwned(types.ServiceWorkerInfo, session.allocator, worker);
+    errdefer freeServiceWorkerInfo(session.allocator, &owned);
     session.service_workers_lock.lock();
     defer session.service_workers_lock.unlock();
     for (session.service_workers.items) |*existing| {
         if (!std.mem.eql(u8, existing.worker_id, worker.worker_id)) continue;
-        replaceOptionalOwnedString(session.allocator, &existing.scope_url, worker.scope_url);
-        replaceOptionalOwnedString(session.allocator, &existing.script_url, worker.script_url);
-        replaceOptionalOwnedString(session.allocator, &existing.state, worker.state);
+        freeServiceWorkerInfo(session.allocator, existing);
+        existing.* = owned;
         return;
     }
-    try session.service_workers.append(session.allocator, .{
-        .worker_id = try session.allocator.dupe(u8, worker.worker_id),
-        .scope_url = if (worker.scope_url) |scope| try session.allocator.dupe(u8, scope) else null,
-        .script_url = if (worker.script_url) |script| try session.allocator.dupe(u8, script) else null,
-        .state = if (worker.state) |state| try session.allocator.dupe(u8, state) else null,
-    });
+    try session.service_workers.append(session.allocator, owned);
 }
 
 pub fn removeServiceWorkerInfo(session: *Session, worker_id: []const u8) void {
@@ -321,11 +305,15 @@ pub fn listNetworkRecords(
         break :blk copied_out;
     };
 
+    errdefer freeNetworkRecords(allocator, out);
     if (!include_bodies or session.transport != .cdp_ws) return out;
 
     for (out) |*record| {
         if (record.response_body != null) continue;
-        const fetched_opt = executor.getResponseBody(session, record.request_id) catch null;
+        const fetched_opt = executor.getResponseBody(session, record.request_id) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        };
         if (fetched_opt) |fetched| {
             defer session.allocator.free(fetched);
             record.response_body = try allocator.dupe(u8, fetched);
@@ -352,21 +340,7 @@ pub fn clearNetworkRecords(session: *Session) void {
 pub fn listFrames(session: *Session, allocator: std.mem.Allocator) ![]types.FrameInfo {
     session.frames_lock.lock();
     defer session.frames_lock.unlock();
-    var out = try allocator.alloc(types.FrameInfo, session.frames.items.len);
-    var copied: usize = 0;
-    errdefer {
-        for (out[0..copied]) |*frame| freeFrameInfo(allocator, frame);
-        allocator.free(out);
-    }
-    for (session.frames.items, 0..) |frame, idx| {
-        out[idx] = .{
-            .frame_id = try allocator.dupe(u8, frame.frame_id),
-            .parent_frame_id = if (frame.parent_frame_id) |parent_id| try allocator.dupe(u8, parent_id) else null,
-            .url = try allocator.dupe(u8, frame.url),
-        };
-        copied = idx + 1;
-    }
-    return out;
+    return cloneOwned([]types.FrameInfo, allocator, session.frames.items);
 }
 
 pub fn freeFrames(allocator: std.mem.Allocator, frames: []types.FrameInfo) void {
@@ -377,22 +351,7 @@ pub fn freeFrames(allocator: std.mem.Allocator, frames: []types.FrameInfo) void 
 pub fn listServiceWorkers(session: *Session, allocator: std.mem.Allocator) ![]types.ServiceWorkerInfo {
     session.service_workers_lock.lock();
     defer session.service_workers_lock.unlock();
-    var out = try allocator.alloc(types.ServiceWorkerInfo, session.service_workers.items.len);
-    var copied: usize = 0;
-    errdefer {
-        for (out[0..copied]) |*worker| freeServiceWorkerInfo(allocator, worker);
-        allocator.free(out);
-    }
-    for (session.service_workers.items, 0..) |worker, idx| {
-        out[idx] = .{
-            .worker_id = try allocator.dupe(u8, worker.worker_id),
-            .scope_url = if (worker.scope_url) |scope| try allocator.dupe(u8, scope) else null,
-            .script_url = if (worker.script_url) |script| try allocator.dupe(u8, script) else null,
-            .state = if (worker.state) |state| try allocator.dupe(u8, state) else null,
-        };
-        copied = idx + 1;
-    }
-    return out;
+    return cloneOwned([]types.ServiceWorkerInfo, allocator, session.service_workers.items);
 }
 
 pub fn freeServiceWorkers(allocator: std.mem.Allocator, workers: []types.ServiceWorkerInfo) void {
@@ -412,19 +371,31 @@ pub fn captureSnapshot(
         try snapshotCurrentUrl(session, allocator);
     errdefer allocator.free(url);
 
-    const dom_html = captureDomHtml(session, allocator) catch try allocator.dupe(u8, "");
+    const dom_html = captureDomHtml(session, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => try allocator.dupe(u8, ""),
+    };
     errdefer allocator.free(dom_html);
 
     const response_headers_json = try snapshotHeadersForUrl(session, allocator, url);
     errdefer allocator.free(response_headers_json);
 
-    const cookies = captureCookies(session, allocator) catch try allocator.alloc(types.Cookie, 0);
+    const cookies = captureCookies(session, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => try allocator.alloc(types.Cookie, 0),
+    };
     errdefer freeCookies(allocator, cookies);
 
-    const local_storage = captureStorageArea(session, allocator, "localStorage") catch try allocator.alloc(types.StorageValue, 0);
+    const local_storage = captureStorageArea(session, allocator, "localStorage") catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => try allocator.alloc(types.StorageValue, 0),
+    };
     errdefer freeStorageValues(allocator, local_storage);
 
-    const session_storage = captureStorageArea(session, allocator, "sessionStorage") catch try allocator.alloc(types.StorageValue, 0);
+    const session_storage = captureStorageArea(session, allocator, "sessionStorage") catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => try allocator.alloc(types.StorageValue, 0),
+    };
     errdefer freeStorageValues(allocator, session_storage);
 
     return .{
@@ -516,28 +487,48 @@ pub fn serializeBlockRule(allocator: std.mem.Allocator, glob: []const u8) ![]u8 
 }
 
 fn upsertNetworkRecordFromRequest(session: *Session, event: RequestEvent) !void {
+    const owned = try cloneOwned(RequestEvent, session.allocator, event);
+    defer session.allocator.free(owned.request_id);
+    errdefer {
+        session.allocator.free(owned.method);
+        session.allocator.free(owned.url);
+        session.allocator.free(owned.headers_json);
+        if (owned.body) |body| session.allocator.free(body);
+    }
     session.network_lock.lock();
     defer session.network_lock.unlock();
     const index = try ensureNetworkRecordLocked(session, event.request_id);
-    var record = &session.network_records.items[index];
-    replaceOwnedString(session.allocator, &record.method, event.method);
-    replaceOwnedString(session.allocator, &record.url, event.url);
-    replaceOwnedString(session.allocator, &record.request_headers_json, event.headers_json);
+    const record = &session.network_records.items[index];
+    session.allocator.free(record.method);
+    session.allocator.free(record.url);
+    session.allocator.free(record.request_headers_json);
     if (record.request_body) |body| session.allocator.free(body);
-    record.request_body = if (event.body) |body| try session.allocator.dupe(u8, body) else null;
+    record.method = owned.method;
+    record.url = owned.url;
+    record.request_headers_json = owned.headers_json;
+    record.request_body = owned.body;
 }
 
 fn upsertNetworkRecordFromResponse(session: *Session, event: ResponseEvent) !void {
+    const owned = try cloneOwned(ResponseEvent, session.allocator, event);
+    defer session.allocator.free(owned.request_id);
+    errdefer {
+        session.allocator.free(owned.url);
+        session.allocator.free(owned.headers_json);
+        if (owned.body) |body| session.allocator.free(body);
+    }
     session.network_lock.lock();
     defer session.network_lock.unlock();
     const index = try ensureNetworkRecordLocked(session, event.request_id);
-    var record = &session.network_records.items[index];
-    replaceOwnedString(session.allocator, &record.url, event.url);
-    replaceOwnedString(session.allocator, &record.response_headers_json, event.headers_json);
-    record.final_status = event.status;
+    const record = &session.network_records.items[index];
     try appendStatusPointLocked(session, record, event.status, nowMs());
+    session.allocator.free(record.url);
+    session.allocator.free(record.response_headers_json);
     if (record.response_body) |body| session.allocator.free(body);
-    record.response_body = if (event.body) |body| try session.allocator.dupe(u8, body) else null;
+    record.url = owned.url;
+    record.response_headers_json = owned.headers_json;
+    record.response_body = owned.body;
+    record.final_status = owned.status;
 }
 
 fn cacheResponseBody(session: *Session, request_id: []const u8, body: []const u8) !void {
@@ -545,24 +536,20 @@ fn cacheResponseBody(session: *Session, request_id: []const u8, body: []const u8
     defer session.network_lock.unlock();
     const index = findNetworkRecordIndex(session.network_records.items, request_id) orelse return;
     var record = &session.network_records.items[index];
+    const owned = try session.allocator.dupe(u8, body);
     if (record.response_body) |existing| session.allocator.free(existing);
-    record.response_body = try session.allocator.dupe(u8, body);
+    record.response_body = owned;
 }
 
 fn ensureNetworkRecordLocked(session: *Session, request_id: []const u8) !usize {
     if (findNetworkRecordIndex(session.network_records.items, request_id)) |index| return index;
-    try session.network_records.append(session.allocator, .{
-        .request_id = try session.allocator.dupe(u8, request_id),
-        .method = try session.allocator.dupe(u8, ""),
-        .url = try session.allocator.dupe(u8, ""),
-        .request_headers_json = try session.allocator.dupe(u8, "{}"),
-        .response_headers_json = try session.allocator.dupe(u8, "{}"),
-        .request_body = null,
-        .response_body = null,
-        .final_status = null,
-        .redirects = &.{},
-        .status_timeline = &.{},
+    var record = try cloneOwned(types.NetworkRecord, session.allocator, .{
+        .request_id = request_id,
+        .method = "",
+        .url = "",
     });
+    errdefer freeNetworkRecord(session.allocator, &record);
+    try session.network_records.append(session.allocator, record);
     return session.network_records.items.len - 1;
 }
 
@@ -571,19 +558,6 @@ fn findNetworkRecordIndex(records: []const types.NetworkRecord, request_id: []co
         if (std.mem.eql(u8, record.request_id, request_id)) return idx;
     }
     return null;
-}
-
-fn appendRedirectLocked(
-    session: *Session,
-    record: *types.NetworkRecord,
-    redirect: types.RedirectHop,
-) !void {
-    const old = record.redirects;
-    const grown = try session.allocator.alloc(types.RedirectHop, old.len + 1);
-    @memcpy(grown[0..old.len], old);
-    grown[old.len] = redirect;
-    if (old.len > 0) session.allocator.free(old);
-    record.redirects = grown;
 }
 
 fn appendStatusPointLocked(
@@ -600,63 +574,13 @@ fn appendStatusPointLocked(
     record.status_timeline = grown;
 }
 
-fn replaceOwnedString(allocator: std.mem.Allocator, field: *[]const u8, value: []const u8) void {
-    if (std.mem.eql(u8, field.*, value)) return;
-    const dupe = allocator.dupe(u8, value) catch return;
-    allocator.free(field.*);
-    field.* = dupe;
-}
-
-fn replaceOptionalOwnedString(
-    allocator: std.mem.Allocator,
-    field: *?[]const u8,
-    value: ?[]const u8,
-) void {
-    if (field.*) |existing| allocator.free(existing);
-    field.* = if (value) |new_value| allocator.dupe(u8, new_value) catch null else null;
-}
-
-fn cloneNetworkRecord(
-    allocator: std.mem.Allocator,
-    src: types.NetworkRecord,
-    include_bodies: bool,
-) !types.NetworkRecord {
-    var redirects = try allocator.alloc(types.RedirectHop, src.redirects.len);
-    var redirect_copied: usize = 0;
-    errdefer {
-        var i: usize = 0;
-        while (i < redirect_copied) : (i += 1) {
-            allocator.free(redirects[i].from_url);
-            allocator.free(redirects[i].to_url);
-        }
-        allocator.free(redirects);
+fn cloneNetworkRecord(allocator: std.mem.Allocator, src: types.NetworkRecord, include_bodies: bool) !types.NetworkRecord {
+    var selected = src;
+    if (!include_bodies) {
+        selected.request_body = null;
+        selected.response_body = null;
     }
-    for (src.redirects, 0..) |hop, idx| {
-        redirects[idx] = .{
-            .from_url = try allocator.dupe(u8, hop.from_url),
-            .to_url = try allocator.dupe(u8, hop.to_url),
-            .status = hop.status,
-            .at_ms = hop.at_ms,
-        };
-        redirect_copied = idx + 1;
-    }
-
-    const timeline = try allocator.alloc(types.NetworkStatusTimelinePoint, src.status_timeline.len);
-    errdefer allocator.free(timeline);
-    @memcpy(timeline, src.status_timeline);
-
-    return .{
-        .request_id = try allocator.dupe(u8, src.request_id),
-        .method = try allocator.dupe(u8, src.method),
-        .url = try allocator.dupe(u8, src.url),
-        .request_headers_json = try allocator.dupe(u8, src.request_headers_json),
-        .response_headers_json = try allocator.dupe(u8, src.response_headers_json),
-        .request_body = if (include_bodies and src.request_body != null) try allocator.dupe(u8, src.request_body.?) else null,
-        .response_body = if (include_bodies and src.response_body != null) try allocator.dupe(u8, src.response_body.?) else null,
-        .final_status = src.final_status,
-        .redirects = redirects,
-        .status_timeline = timeline,
-    };
+    return cloneOwned(types.NetworkRecord, allocator, selected);
 }
 
 fn freeNetworkRecord(allocator: std.mem.Allocator, record: *types.NetworkRecord) void {
@@ -692,51 +616,7 @@ fn freeServiceWorkerInfo(allocator: std.mem.Allocator, worker: *types.ServiceWor
 }
 
 fn cloneSnapshotBundle(allocator: std.mem.Allocator, src: types.SnapshotBundle) !types.SnapshotBundle {
-    const cookies = try cloneCookies(allocator, src.cookies);
-    errdefer freeCookies(allocator, cookies);
-    const local_storage = try cloneStorageValues(allocator, src.local_storage);
-    errdefer freeStorageValues(allocator, local_storage);
-    const session_storage = try cloneStorageValues(allocator, src.session_storage);
-    errdefer freeStorageValues(allocator, session_storage);
-
-    return .{
-        .phase = src.phase,
-        .url = try allocator.dupe(u8, src.url),
-        .captured_at_ms = src.captured_at_ms,
-        .dom_html = try allocator.dupe(u8, src.dom_html),
-        .response_headers_json = try allocator.dupe(u8, src.response_headers_json),
-        .cookies = cookies,
-        .local_storage = local_storage,
-        .session_storage = session_storage,
-    };
-}
-
-fn cloneCookies(allocator: std.mem.Allocator, cookies: []const types.Cookie) ![]types.Cookie {
-    var out = try allocator.alloc(types.Cookie, cookies.len);
-    var copied: usize = 0;
-    errdefer {
-        for (out[0..copied]) |cookie| {
-            allocator.free(cookie.name);
-            allocator.free(cookie.value);
-            allocator.free(cookie.domain);
-            allocator.free(cookie.path);
-        }
-        allocator.free(out);
-    }
-    for (cookies, 0..) |cookie, idx| {
-        out[idx] = .{
-            .name = try allocator.dupe(u8, cookie.name),
-            .value = try allocator.dupe(u8, cookie.value),
-            .domain = try allocator.dupe(u8, cookie.domain),
-            .path = try allocator.dupe(u8, cookie.path),
-            .secure = cookie.secure,
-            .http_only = cookie.http_only,
-            .expires_unix_seconds = cookie.expires_unix_seconds,
-            .same_site = cookie.same_site,
-        };
-        copied = idx + 1;
-    }
-    return out;
+    return cloneOwned(types.SnapshotBundle, allocator, src);
 }
 
 fn freeCookies(allocator: std.mem.Allocator, cookies: []types.Cookie) void {
@@ -747,26 +627,6 @@ fn freeCookies(allocator: std.mem.Allocator, cookies: []types.Cookie) void {
         allocator.free(cookie.path);
     }
     allocator.free(cookies);
-}
-
-fn cloneStorageValues(allocator: std.mem.Allocator, values: []const types.StorageValue) ![]types.StorageValue {
-    var out = try allocator.alloc(types.StorageValue, values.len);
-    var copied: usize = 0;
-    errdefer {
-        for (out[0..copied]) |entry| {
-            allocator.free(entry.key);
-            allocator.free(entry.value);
-        }
-        allocator.free(out);
-    }
-    for (values, 0..) |value, idx| {
-        out[idx] = .{
-            .key = try allocator.dupe(u8, value.key),
-            .value = try allocator.dupe(u8, value.value),
-        };
-        copied = idx + 1;
-    }
-    return out;
 }
 
 fn freeStorageValues(allocator: std.mem.Allocator, values: []types.StorageValue) void {
@@ -795,7 +655,10 @@ fn snapshotCurrentUrl(session: *Session, allocator: std.mem.Allocator) ![]u8 {
     }
     session.state_lock.unlock();
     if (!session.supports(.js_eval)) return allocator.dupe(u8, "");
-    const payload = executor.evaluate(session, "location.href") catch return allocator.dupe(u8, "");
+    const payload = executor.evaluate(session, "location.href") catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return allocator.dupe(u8, ""),
+    };
     defer session.allocator.free(payload);
     return extractEvaluationString(allocator, payload);
 }
@@ -869,16 +732,18 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
         const http_only = json_util.getBoolField(item.object, "httpOnly") orelse true;
         const expires = json_util.getI64Field(item.object, "expires");
         const same_site = json_util.parseCookieSameSite(json_util.getStringField(item.object, "sameSite"));
-        try out.append(allocator, .{
-            .name = try allocator.dupe(u8, name),
-            .value = try allocator.dupe(u8, value),
-            .domain = try allocator.dupe(u8, domain),
-            .path = try allocator.dupe(u8, path),
+        const owned = try cloneOwned(types.Cookie, allocator, .{
+            .name = name,
+            .value = value,
+            .domain = domain,
+            .path = path,
             .secure = secure,
             .http_only = http_only,
             .expires_unix_seconds = expires,
             .same_site = same_site,
         });
+        errdefer freeOwned(types.Cookie, allocator, owned);
+        try out.append(allocator, owned);
     }
     return out.toOwnedSlice(allocator);
 }
@@ -902,10 +767,9 @@ fn parseStorageValuesFromJson(allocator: std.mem.Allocator, payload: []const u8)
         const key_val = item.array.items[0];
         const value_val = item.array.items[1];
         if (key_val != .string or value_val != .string) continue;
-        try out.append(allocator, .{
-            .key = try allocator.dupe(u8, key_val.string),
-            .value = try allocator.dupe(u8, value_val.string),
-        });
+        const owned = try cloneOwned(types.StorageValue, allocator, .{ .key = key_val.string, .value = value_val.string });
+        errdefer freeOwned(types.StorageValue, allocator, owned);
+        try out.append(allocator, owned);
     }
     return out.toOwnedSlice(allocator);
 }
@@ -948,85 +812,7 @@ fn nowMs() u64 {
 }
 
 fn cloneRule(allocator: std.mem.Allocator, rule: NetworkRule) !NetworkRule {
-    return .{
-        .id = try allocator.dupe(u8, rule.id),
-        .url_pattern = try allocator.dupe(u8, rule.url_pattern),
-        .action = try cloneAction(allocator, rule.action),
-    };
-}
-
-fn cloneAction(allocator: std.mem.Allocator, action: InterceptAction) !InterceptAction {
-    return switch (action) {
-        .block => .{ .block = {} },
-        .continue_request => .{ .continue_request = {} },
-        .fulfill => |f| blk: {
-            const headers = try allocator.alloc(types.Header, f.headers.len);
-            errdefer allocator.free(headers);
-
-            var i: usize = 0;
-            errdefer {
-                var j: usize = 0;
-                while (j < i) : (j += 1) {
-                    allocator.free(headers[j].name);
-                    allocator.free(headers[j].value);
-                }
-            }
-
-            for (f.headers, 0..) |h, idx| {
-                headers[idx] = .{
-                    .name = try allocator.dupe(u8, h.name),
-                    .value = try allocator.dupe(u8, h.value),
-                };
-                i = idx + 1;
-            }
-
-            break :blk .{ .fulfill = .{
-                .status = f.status,
-                .body = try allocator.dupe(u8, f.body),
-                .headers = headers,
-            } };
-        },
-        .modify => |m| blk: {
-            const add_headers = try allocator.alloc(types.Header, m.add_headers.len);
-            errdefer allocator.free(add_headers);
-
-            var i: usize = 0;
-            errdefer {
-                var j: usize = 0;
-                while (j < i) : (j += 1) {
-                    allocator.free(add_headers[j].name);
-                    allocator.free(add_headers[j].value);
-                }
-            }
-
-            for (m.add_headers, 0..) |h, idx| {
-                add_headers[idx] = .{
-                    .name = try allocator.dupe(u8, h.name),
-                    .value = try allocator.dupe(u8, h.value),
-                };
-                i = idx + 1;
-            }
-
-            const remove_names = try allocator.alloc([]const u8, m.remove_header_names.len);
-            errdefer allocator.free(remove_names);
-
-            var k: usize = 0;
-            errdefer {
-                var j: usize = 0;
-                while (j < k) : (j += 1) allocator.free(remove_names[j]);
-            }
-
-            for (m.remove_header_names, 0..) |n, idx| {
-                remove_names[idx] = try allocator.dupe(u8, n);
-                k = idx + 1;
-            }
-
-            break :blk .{ .modify = .{
-                .add_headers = add_headers,
-                .remove_header_names = remove_names,
-            } };
-        },
-    };
+    return cloneOwned(NetworkRule, allocator, rule);
 }
 
 fn freeRule(allocator: std.mem.Allocator, rule: NetworkRule) void {
@@ -1242,4 +1028,180 @@ test "frame and service worker telemetry upsert and remove work" {
     const workers = try listServiceWorkers(&session, allocator);
     defer freeServiceWorkers(allocator, workers);
     try std.testing.expectEqual(@as(usize, 0), workers.len);
+}
+
+// Data-only telemetry types contain owned slices, optionals, structs, and tagged
+// unions. Clone every aggregate transactionally, including its partial child.
+fn cloneOwned(comptime T: type, allocator: std.mem.Allocator, source: T) !T {
+    switch (@typeInfo(T)) {
+        .pointer => |ptr| {
+            const out = try allocator.alloc(ptr.child, source.len);
+            var initialized: usize = 0;
+            errdefer {
+                for (out[0..initialized]) |value| freeOwned(ptr.child, allocator, value);
+                allocator.free(out);
+            }
+            for (source, 0..) |value, i| {
+                out[i] = try cloneOwned(ptr.child, allocator, value);
+                initialized += 1;
+            }
+            return out;
+        },
+        .@"struct" => |info| {
+            var out: T = undefined;
+            var initialized: usize = 0;
+            errdefer inline for (info.fields, 0..) |field, i| {
+                if (i < initialized) freeOwned(field.type, allocator, @field(out, field.name));
+            };
+            inline for (info.fields) |field| {
+                @field(out, field.name) = try cloneOwned(field.type, allocator, @field(source, field.name));
+                initialized += 1;
+            }
+            return out;
+        },
+        .@"union" => return switch (source) {
+            inline else => |value, tag| @unionInit(T, @tagName(tag), try cloneOwned(@TypeOf(value), allocator, value)),
+        },
+        .optional => |info| return if (source) |value| try cloneOwned(info.child, allocator, value) else null,
+        else => return source,
+    }
+}
+
+fn freeOwned(comptime T: type, allocator: std.mem.Allocator, value: T) void {
+    switch (@typeInfo(T)) {
+        .pointer => |ptr| {
+            for (value) |item| freeOwned(ptr.child, allocator, item);
+            allocator.free(value);
+        },
+        .@"struct" => |info| inline for (info.fields) |field| {
+            freeOwned(field.type, allocator, @field(value, field.name));
+        },
+        .@"union" => switch (value) {
+            inline else => |payload| freeOwned(@TypeOf(payload), allocator, payload),
+        },
+        .optional => |info| if (value) |item| {
+            freeOwned(info.child, allocator, item);
+        },
+        else => {},
+    }
+}
+
+fn ruleAllocationCase(allocator: std.mem.Allocator) !void {
+    const rules = [_]NetworkRule{
+        .{ .id = "block", .url_pattern = "*/blocked*", .action = .{ .block = {} } },
+        .{ .id = "continue", .url_pattern = "*/continue*", .action = .{ .continue_request = {} } },
+        .{ .id = "fulfill", .url_pattern = "*/fulfilled*", .action = .{ .fulfill = .{
+            .status = 201,
+            .body = "body λ",
+            .headers = &.{ .{ .name = "First", .value = "1" }, .{ .name = "Second", .value = "2" } },
+        } } },
+        .{ .id = "modify", .url_pattern = "*/modified*", .action = .{ .modify = .{
+            .add_headers = &.{ .{ .name = "First", .value = "1" }, .{ .name = "Second", .value = "2" } },
+            .remove_header_names = &.{ "Remove-One", "Remove-Two" },
+        } } },
+    };
+    for (rules) |rule| {
+        const owned = try cloneRule(allocator, rule);
+        defer freeRule(allocator, owned);
+        try std.testing.expectEqualDeep(rule, owned);
+        try std.testing.expect(rule.id.ptr != owned.id.ptr);
+    }
+}
+
+fn telemetryAllocationCase(allocator: std.mem.Allocator) !void {
+    var session = try makeNetworkTestSession(allocator);
+    defer session.deinit();
+    try upsertNetworkRecordFromRequest(&session, .{ .request_id = "one", .method = "POST", .url = "https://example.test/start", .headers_json = "{\"x\":\"request\"}", .body = "request body" });
+    try recordRedirect(&session, "one", "https://example.test/start", "https://example.test/final", 302, 1000);
+    try upsertNetworkRecordFromResponse(&session, .{ .request_id = "one", .status = 200, .url = "https://example.test/final", .headers_json = "{\"x\":\"response\"}", .body = "response body" });
+    try cacheResponseBody(&session, "one", "replaced response");
+    const full = try listNetworkRecords(&session, allocator, true);
+    defer freeNetworkRecords(allocator, full);
+    try std.testing.expectEqualStrings("replaced response", full[0].response_body.?);
+    try std.testing.expectEqual(@as(usize, 1), full[0].redirects.len);
+    try std.testing.expectEqual(@as(usize, 2), full[0].status_timeline.len);
+    const slim = try listNetworkRecords(&session, allocator, false);
+    defer freeNetworkRecords(allocator, slim);
+    try std.testing.expect(slim[0].request_body == null and slim[0].response_body == null);
+
+    try upsertFrameInfo(&session, .{ .frame_id = "frame", .parent_frame_id = "parent", .url = "before" });
+    try upsertFrameInfo(&session, .{ .frame_id = "frame", .parent_frame_id = "new parent", .url = "after" });
+    const frames = try listFrames(&session, allocator);
+    defer freeFrames(allocator, frames);
+    try std.testing.expectEqualStrings("after", frames[0].url);
+    try std.testing.expectEqualStrings("new parent", frames[0].parent_frame_id.?);
+
+    try upsertServiceWorkerInfo(&session, .{ .worker_id = "worker", .scope_url = "scope", .script_url = "script", .state = "installing" });
+    try upsertServiceWorkerInfo(&session, .{ .worker_id = "worker", .scope_url = "new scope", .script_url = "new script", .state = "activated" });
+    const workers = try listServiceWorkers(&session, allocator);
+    defer freeServiceWorkers(allocator, workers);
+    try std.testing.expectEqualStrings("activated", workers[0].state.?);
+}
+
+fn snapshotAllocationCase(allocator: std.mem.Allocator) !void {
+    const cookies = try parseCookiesFromPayload(allocator,
+        \\{"result":{"cookies":[{"name":"one","value":"1","domain":"example.test","path":"/"},{"name":"two","value":"2","domain":".example.test","path":"/app"}]}}
+    );
+    defer freeCookies(allocator, cookies);
+    const local = try parseStorageValuesFromJson(allocator, "[[\"a\",\"one\"],[\"b\",\"two\"]]");
+    defer freeStorageValues(allocator, local);
+    const tab = try parseStorageValuesFromJson(allocator, "[[\"c\",\"three\"]]");
+    defer freeStorageValues(allocator, tab);
+    const source: types.SnapshotBundle = .{
+        .phase = .manual,
+        .url = "https://example.test/",
+        .captured_at_ms = 123,
+        .dom_html = "<html>actual</html>",
+        .response_headers_json = "{\"header\":\"value\"}",
+        .cookies = cookies,
+        .local_storage = local,
+        .session_storage = tab,
+    };
+    var owned = try cloneSnapshotBundle(allocator, source);
+    defer freeSnapshot(allocator, &owned);
+    try std.testing.expectEqualDeep(source, owned);
+    var session = try makeNetworkTestSession(allocator);
+    defer session.deinit();
+    var stored = try cloneSnapshotBundle(allocator, source);
+    var transferred = false;
+    defer if (!transferred) freeSnapshot(allocator, &stored);
+    try appendNavigationSnapshot(&session, stored);
+    transferred = true;
+    const listed = try listNavigationSnapshots(&session, allocator);
+    defer freeSnapshots(allocator, listed);
+    try std.testing.expectEqualDeep(source, listed[0]);
+}
+
+test "network rule variants free every partially initialized allocation" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, ruleAllocationCase, .{});
+}
+
+test "network telemetry insertion update and copying survive every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, telemetryAllocationCase, .{});
+}
+
+test "network snapshot parsing and cloning survive every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, snapshotAllocationCase, .{});
+}
+
+test "network failed replacements retain existing owned telemetry" {
+    const allocator = std.testing.allocator;
+    var session = try makeNetworkTestSession(allocator);
+    defer session.deinit();
+    try upsertFrameInfo(&session, .{ .frame_id = "frame", .parent_frame_id = "parent", .url = "original" });
+    try upsertServiceWorkerInfo(&session, .{ .worker_id = "worker", .state = "active", .scope_url = "scope", .script_url = "script" });
+    try upsertNetworkRecordFromRequest(&session, .{ .request_id = "request", .method = "GET", .url = "original", .headers_json = "{}" });
+    try upsertNetworkRecordFromResponse(&session, .{ .request_id = "request", .status = 200, .url = "original", .headers_json = "{}", .body = "owned" });
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    session.allocator = failing.allocator();
+    defer session.allocator = allocator;
+    try std.testing.expectError(error.OutOfMemory, upsertFrameInfo(&session, .{ .frame_id = "frame", .parent_frame_id = "new-parent", .url = "changed" }));
+    try std.testing.expectError(error.OutOfMemory, upsertServiceWorkerInfo(&session, .{ .worker_id = "worker", .state = "changed" }));
+    try std.testing.expectError(error.OutOfMemory, cacheResponseBody(&session, "request", "changed"));
+    try std.testing.expectError(error.OutOfMemory, upsertNetworkRecordFromResponse(&session, .{ .request_id = "request", .status = 404, .url = "changed", .headers_json = "{}", .body = "changed" }));
+    try std.testing.expectEqualStrings("original", session.frames.items[0].url);
+    try std.testing.expectEqualStrings("parent", session.frames.items[0].parent_frame_id.?);
+    try std.testing.expectEqualStrings("active", session.service_workers.items[0].state.?);
+    try std.testing.expectEqualStrings("owned", session.network_records.items[0].response_body.?);
+    try std.testing.expectEqual(@as(?u16, 200), session.network_records.items[0].final_status);
 }
