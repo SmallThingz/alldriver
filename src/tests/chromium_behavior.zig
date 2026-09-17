@@ -15,11 +15,11 @@ const fixture =
     \\</script>
 ;
 
-const Browser = struct {
+pub const Browser = struct {
     session: driver.modern.ModernSession,
     profile: []u8,
 
-    fn launch() !Browser {
+    pub fn launch() !Browser {
         var installs = try driver.discover(allocator, .{
             .kinds = &.{ .brave, .chrome, .edge },
             .allow_managed_download = false,
@@ -48,13 +48,13 @@ const Browser = struct {
         return .{ .session = session, .profile = profile };
     }
 
-    fn deinit(self: *Browser) void {
+    pub fn deinit(self: *Browser) void {
         self.session.deinit();
         compat.cwd().deleteTree(self.profile) catch {};
         allocator.free(self.profile);
     }
 
-    fn navigateHtml(self: *Browser, html: []const u8) !void {
+    pub fn navigateHtml(self: *Browser, html: []const u8) !void {
         const prefix = "data:text/html;charset=utf-8;base64,";
         const url = try allocator.alloc(u8, prefix.len + std.base64.standard.Encoder.calcSize(html.len));
         defer allocator.free(url);
@@ -64,7 +64,7 @@ const Browser = struct {
         try page.navigate(url);
     }
 
-    fn evaluateTrue(self: *Browser, expression: []const u8) !void {
+    pub fn evaluateTrue(self: *Browser, expression: []const u8) !void {
         var runtime = self.session.runtime();
         const payload = try runtime.evaluate(expression);
         defer allocator.free(payload);
@@ -78,7 +78,7 @@ const Browser = struct {
         }
     }
 
-    fn waitTrue(self: *Browser, expression: []const u8) !void {
+    pub fn waitTrue(self: *Browser, expression: []const u8) !void {
         const start = compat.milliTimestamp();
         while (true) {
             self.evaluateTrue(expression) catch |err| {
