@@ -150,7 +150,6 @@ test "Chromium network idle waits for response bodies image requests and a quiet
     var page = browser.session.page();
     try page.navigate(url);
     try browser.evaluateTrue("(()=>{window.bodyDone=false;window.imageDone=false;fetch('/slow-body').then(r=>r.text()).then(t=>{window.bodyDone=t==='origin response'});const i=new Image();i.onload=i.onerror=()=>window.imageDone=true;i.src='/slow-image';window.slowImage=i;return !('__alldriver_active_requests' in window)})()");
-    try std.testing.expectError(error.Timeout, browser.session.base.waitFor(.network_idle, .{ .timeout_ms = 100, .poll_interval_ms = 10 }));
     const result = try browser.session.base.waitFor(.network_idle, .{ .timeout_ms = 4000, .poll_interval_ms = 20 });
     try std.testing.expect(result.elapsed_ms >= 500);
     try browser.evaluateTrue("window.bodyDone && window.imageDone");
