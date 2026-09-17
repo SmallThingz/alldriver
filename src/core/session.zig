@@ -37,8 +37,8 @@ pub const Session = struct {
     input_modifiers: u8 = 0,
     input_mouse_x: i32 = 0,
     input_mouse_y: i32 = 0,
-    console_callback: ?@import("log.zig").Callback = null,
-    exception_callback: ?@import("log.zig").Callback = null,
+    log_observer: ?*@import("log.zig").Observer = null,
+    download_tracker: ?*@import("downloads.zig").Tracker = null,
     trace_stream: ?[]u8 = null,
     trace_data_loss: bool = false,
     timeout_policy: types.TimeoutPolicy = .{},
@@ -55,8 +55,11 @@ pub const Session = struct {
 
     rules: std.ArrayList(types.NetworkRule) = .empty,
     interceptor: ?*@import("../protocol/interceptor.zig").Interceptor = null,
+    network_observer: ?*@import("network_observer.zig").Observer = null,
+    network_observer_lock: compat.Mutex = .{},
     on_request: ?*const fn (types.RequestEvent) void = null,
     on_response: ?*const fn (types.ResponseEvent) void = null,
+    on_network_raw: ?*const fn ([]const u8) void = null,
     event_lock: compat.Mutex = .{},
     event_subscriptions: std.ArrayList(events.EventSubscription) = .empty,
     next_event_subscription_id: u64 = 1,
@@ -79,6 +82,9 @@ pub const Session = struct {
         self.async_lock.unlock();
 
         if (self.interceptor) |worker| worker.destroy();
+        if (self.network_observer) |observer| observer.destroy();
+        if (self.log_observer) |observer| observer.destroy();
+        if (self.download_tracker) |tracker| tracker.deinit();
         if (self.child) |*child| {
             child.kill(compat.io());
         }
@@ -462,6 +468,28 @@ pub const Session = struct {
 
     pub fn setCookie(self: *Session, cookie: storage.Cookie) !void {
         try storage.setCookie(self, cookie);
+    }
+
+    /// Configure browser-wide downloads. Files remain owned by the caller.
+    pub fn setDownloadDirectory(self: *Session, directory: []const u8) !void {
+        if (!self.supports(.downloads)) return error.UnsupportedCapability;
+        const endpoint = try executor.browserWebSocketEndpoint(self);
+        defer self.allocator.free(endpoint);
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+        if (self.download_tracker) |tracker| {
+            tracker.deinit();
+            self.download_tracker = null;
+        }
+        self.download_tracker = try @import("downloads.zig").Tracker.create(self.allocator, endpoint, directory);
+    }
+
+    pub fn listDownloads(self: *Session, allocator: std.mem.Allocator) ![]artifacts.DownloadItem {
+        return artifacts.listDownloads(self, allocator);
+    }
+
+    pub fn freeDownloads(_: *Session, allocator: std.mem.Allocator, items: []artifacts.DownloadItem) void {
+        @import("downloads.zig").freeItems(allocator, items);
     }
 
     pub fn screenshot(self: *Session, allocator: std.mem.Allocator, format: artifacts.ScreenshotFormat) ![]u8 {

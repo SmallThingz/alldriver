@@ -282,6 +282,7 @@ fn runCdpFullConformance(
         .value = "api_cookie_value",
         .domain = "127.0.0.1",
         .path = "/",
+        .secure = false,
     });
     _ = try session.waitFor(.{ .cookie_present = .{
         .name = "brave_api_cookie",
@@ -591,7 +592,11 @@ test "brave cdp full endpoints conformance (opt-in)" {
     const server_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{server_port});
     defer allocator.free(server_url);
 
-    try runCdpFullConformance(&session, allocator, server_url);
+    runCdpFullConformance(&session, allocator, server_url) catch |err| {
+        std.debug.print("Chromium conformance failed: {s}\n", .{@errorName(err)});
+        if (session.lastDiagnostic()) |diagnostic| std.debug.print("{s}: {s}\n", .{ diagnostic.code, diagnostic.message });
+        return err;
+    };
 
     thread.join();
     joined = true;

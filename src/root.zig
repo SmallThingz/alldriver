@@ -167,4 +167,6 @@ test "surface coverage contracts" {
     _ = @import("protocol/tracing.zig");
     _ = @import("protocol/interceptor.zig");
     _ = @import("core/log.zig");
+    _ = @import("core/downloads.zig");
+    _ = @import("modern/api.zig");
 }

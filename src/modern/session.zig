@@ -122,6 +122,18 @@ pub const ModernSession = struct {
         return client.screenshot(allocator, format);
     }
 
+    pub fn setDownloadDirectory(self: *ModernSession, directory: []const u8) !void {
+        try self.base.setDownloadDirectory(directory);
+    }
+
+    pub fn listDownloads(self: *ModernSession, allocator: std.mem.Allocator) ![]artifacts.DownloadItem {
+        return self.base.listDownloads(allocator);
+    }
+
+    pub fn freeDownloads(self: *ModernSession, allocator: std.mem.Allocator, items: []artifacts.DownloadItem) void {
+        self.base.freeDownloads(allocator, items);
+    }
+
     pub fn navigateAsync(self: *ModernSession, url: []const u8) !*async_mod.AsyncResult(void) {
         return self.base.navigateAsync(url);
     }

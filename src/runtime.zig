@@ -38,11 +38,12 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     };
     const transport = common.transportForAdapter(adapter_kind);
     const capability_set = capabilitiesFor(opts.install.engine, adapter_kind);
+    var session_owns_resources = false;
     const effective_profile_dir = try resolveEffectiveProfileDir(allocator, opts.profile_mode, opts.profile_dir);
     const should_cleanup_ephemeral_profile = opts.profile_mode == .ephemeral and opts.profile_dir == null;
     var profile_dir_owned = true;
     defer if (profile_dir_owned) allocator.free(effective_profile_dir);
-    errdefer if (should_cleanup_ephemeral_profile) {
+    errdefer if (should_cleanup_ephemeral_profile and !session_owns_resources) {
         compat.cwd().deleteTree(effective_profile_dir) catch {};
     };
 
@@ -90,10 +91,10 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
     try appendUserArgs(allocator, &raw_args, opts.args);
 
     const final_args = try extensions.applyLaunchArgs(allocator, opts, raw_args.items);
-    errdefer {
+    errdefer if (!session_owns_resources) {
         for (final_args) |arg| allocator.free(arg);
         allocator.free(final_args);
-    }
+    };
 
     var child = std.process.spawn(compat.io(), .{
         .argv = final_args,
@@ -104,9 +105,9 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         logHardLaunchError(transport, @errorName(err), "failed to spawn browser process");
         return error.SpawnFailed;
     };
-    errdefer {
+    errdefer if (!session_owns_resources) {
         child.kill(compat.io());
-    }
+    };
 
     const launch_timeout_ms = (opts.timeout_policy orelse types.TimeoutPolicy{}).launch_ms;
     waitForDebugEndpointReady(adapter_kind, &child, debug_port, launch_timeout_ms) catch |err| return switch (err) {
@@ -120,11 +121,17 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         },
     };
 
+    const install_path = try allocator.dupe(u8, opts.install.path);
+    errdefer if (!session_owns_resources) allocator.free(install_path);
+    const install_version = if (opts.install.version) |v| try allocator.dupe(u8, v) else null;
+    errdefer if (!session_owns_resources) {
+        if (install_version) |version| allocator.free(version);
+    };
     const install_copy: types.BrowserInstall = .{
         .kind = opts.install.kind,
         .engine = opts.install.engine,
-        .path = try allocator.dupe(u8, opts.install.path),
-        .version = if (opts.install.version) |v| try allocator.dupe(u8, v) else null,
+        .path = install_path,
+        .version = install_version,
         .source = opts.install.source,
     };
 
@@ -152,6 +159,7 @@ pub fn launch(allocator: std.mem.Allocator, opts: types.LaunchOptions) !Session 
         .owned_argv = final_args,
         .ephemeral_profile_dir = ephemeral_profile_dir,
     };
+    session_owns_resources = true;
     errdefer session.deinit();
     const attach_timeout_ms = (opts.timeout_policy orelse types.TimeoutPolicy{}).attach_ms;
     try executor.waitUntilReady(&session, attach_timeout_ms);
@@ -191,6 +199,10 @@ fn attachWithAdapter(
     kind: types.BrowserKind,
 ) !Session {
     const capability_set = capabilitiesFor(engine, adapter_kind);
+    const install_path = try allocator.dupe(u8, "attached");
+    var transferred = false;
+    errdefer if (!transferred) allocator.free(install_path);
+    const owned_endpoint = try allocator.dupe(u8, endpoint);
     var session = Session{
         .allocator = allocator,
         .id = session_mod.nextSessionId(),
@@ -199,19 +211,20 @@ fn attachWithAdapter(
         .install = .{
             .kind = kind,
             .engine = engine,
-            .path = try allocator.dupe(u8, "attached"),
+            .path = install_path,
             .version = null,
             .source = .explicit,
         },
         .capability_set = capability_set,
         .adapter_kind = adapter_kind,
-        .endpoint = try allocator.dupe(u8, endpoint),
+        .endpoint = owned_endpoint,
         .current_url = null,
         .browsing_context_id = null,
         .request_id = 0,
         .child = null,
         .owned_argv = null,
     };
+    transferred = true;
     errdefer session.deinit();
     try executor.waitUntilReady(&session, (types.TimeoutPolicy{}).attach_ms);
     return session;
@@ -221,6 +234,10 @@ pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOpti
     const adapter_kind = adapterForWebViewKind(opts.kind);
     const engine = webview_discovery.engineForWebView(opts.kind);
     const capability_set = capabilitiesFor(engine, adapter_kind);
+    const install_path = try allocator.dupe(u8, "webview-attached");
+    var transferred = false;
+    errdefer if (!transferred) allocator.free(install_path);
+    const owned_endpoint = try allocator.dupe(u8, opts.endpoint);
 
     var session = Session{
         .allocator = allocator,
@@ -230,19 +247,20 @@ pub fn attachWebView(allocator: std.mem.Allocator, opts: types.WebViewAttachOpti
         .install = .{
             .kind = browserKindForWebView(opts.kind),
             .engine = engine,
-            .path = try allocator.dupe(u8, "webview-attached"),
+            .path = install_path,
             .version = null,
             .source = .explicit,
         },
         .capability_set = capability_set,
         .adapter_kind = adapter_kind,
-        .endpoint = try allocator.dupe(u8, opts.endpoint),
+        .endpoint = owned_endpoint,
         .current_url = null,
         .browsing_context_id = null,
         .request_id = 0,
         .child = null,
         .owned_argv = null,
     };
+    transferred = true;
     errdefer session.deinit();
     try executor.waitUntilReady(&session, (types.TimeoutPolicy{}).attach_ms);
     return session;
@@ -252,19 +270,21 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
     if (opts.kind == .android_webview) return error.UnsupportedWebViewKind;
 
     var argv_list: std.ArrayList([]const u8) = .empty;
+    var session_owns_resources = false;
     errdefer {
         for (argv_list.items) |arg| allocator.free(arg);
         argv_list.deinit(allocator);
     }
 
-    try argv_list.append(allocator, try allocator.dupe(u8, opts.host_executable));
-    for (opts.args) |arg| try argv_list.append(allocator, try allocator.dupe(u8, arg));
+    try argv_list.ensureTotalCapacity(allocator, opts.args.len + 1);
+    argv_list.appendAssumeCapacity(try allocator.dupe(u8, opts.host_executable));
+    for (opts.args) |arg| argv_list.appendAssumeCapacity(try allocator.dupe(u8, arg));
 
     const argv = try argv_list.toOwnedSlice(allocator);
-    errdefer {
+    errdefer if (!session_owns_resources) {
         for (argv) |arg| allocator.free(arg);
         allocator.free(argv);
-    }
+    };
 
     var child = std.process.spawn(compat.io(), .{
         .argv = argv,
@@ -275,14 +295,16 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         logHardLaunchError(.cdp_ws, @errorName(err), "failed to spawn webview host process");
         return error.SpawnFailed;
     };
-    errdefer {
+    errdefer if (!session_owns_resources) {
         child.kill(compat.io());
-    }
+    };
 
     const endpoint = if (opts.endpoint) |ep|
         try allocator.dupe(u8, ep)
     else
         try allocator.dupe(u8, "cdp://127.0.0.1:9222/");
+    errdefer if (!session_owns_resources) allocator.free(endpoint);
+    const install_path = try allocator.dupe(u8, opts.host_executable);
 
     var session = Session{
         .allocator = allocator,
@@ -292,7 +314,7 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         .install = .{
             .kind = browserKindForWebView(opts.kind),
             .engine = .chromium,
-            .path = try allocator.dupe(u8, opts.host_executable),
+            .path = install_path,
             .version = null,
             .source = .explicit,
         },
@@ -305,6 +327,7 @@ pub fn launchWebViewHost(allocator: std.mem.Allocator, opts: types.WebViewLaunch
         .child = child,
         .owned_argv = argv,
     };
+    session_owns_resources = true;
     errdefer session.deinit();
     try executor.waitUntilReady(&session, (types.TimeoutPolicy{}).attach_ms);
     return session;
