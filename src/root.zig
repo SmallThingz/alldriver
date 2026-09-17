@@ -159,4 +159,12 @@ test "discoverWebViews root API" {
 
 test "surface coverage contracts" {
     _ = @import("tests/surface_coverage.zig");
+    _ = session_cache;
+    _ = @import("core/async.zig");
+    _ = @import("modern/input.zig");
+    _ = @import("transport/ws_client.zig");
+    _ = @import("transport/http_client.zig");
+    _ = @import("protocol/tracing.zig");
+    _ = @import("protocol/interceptor.zig");
+    _ = @import("core/log.zig");
 }

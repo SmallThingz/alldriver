@@ -14,17 +14,16 @@ pub const DownloadItem = struct {
 };
 
 pub fn screenshot(session: *Session, allocator: std.mem.Allocator, format: ScreenshotFormat) ![]u8 {
-    _ = format;
     if (!session.supports(.dom)) return error.UnsupportedCapability;
 
-    const raw = try executor.screenshot(session);
+    const raw = try executor.screenshotWithFormat(session, @tagName(format));
     defer session.allocator.free(raw);
 
     if (try extractBase64Screenshot(allocator, raw)) |bytes| {
         return bytes;
     }
 
-    return allocator.dupe(u8, raw);
+    return error.InvalidResponse;
 }
 
 pub fn startTracing(session: *Session) !void {

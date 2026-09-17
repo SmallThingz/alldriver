@@ -232,6 +232,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_behavioral_tests = b.addRunArtifact(behavioral_tests);
 
+    const chromium_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/chromium_test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "alldriver_config", .module = config.createModule() }},
+        }),
+        .filters = &.{ "brave cdp full endpoints", "Chromium " },
+    });
+    const run_chromium_tests = b.addRunArtifact(chromium_tests);
+    run_chromium_tests.setEnvironmentVariable("BRAVE_ALL_ENDPOINTS", "1");
+    run_chromium_tests.setEnvironmentVariable("TMPDIR", ".tmp");
+    const chromium_step = b.step("test-chromium", "Run required real Chromium CDP integration tests (Brave)");
+    chromium_step.dependOn(&run_chromium_tests.step);
+
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.

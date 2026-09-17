@@ -335,7 +335,7 @@ fn runCdpFullConformance(
     try page.goForward();
     try page.reload();
     try page.setViewport(1024, 768);
-    const viewport_payload = try runtime_client.evaluate("JSON.stringify(window.__alldriver_viewport)");
+    const viewport_payload = try runtime_client.evaluate("JSON.stringify({width:innerWidth,height:innerHeight})");
     defer allocator.free(viewport_payload);
     try std.testing.expect(std.mem.indexOf(u8, viewport_payload, "1024") != null);
 
@@ -370,8 +370,8 @@ fn runCdpFullConformance(
     try targets.detach(created_context.id);
 
     var log_client = session.log();
-    try std.testing.expectError(error.UnsupportedProtocol, log_client.onConsole(logCallback));
-    try std.testing.expectError(error.UnsupportedProtocol, log_client.onException(logCallback));
+    try log_client.onConsole(logCallback);
+    try log_client.onException(logCallback);
 
     var nav_async = try session.navigateAsync(data_page_one);
     defer nav_async.deinit();
@@ -492,7 +492,7 @@ fn runBidiConformance(
     try page.goForward();
     try page.reload();
     try page.setViewport(1024, 768);
-    const viewport_payload = try runtime_client.evaluate("JSON.stringify(window.__alldriver_viewport)");
+    const viewport_payload = try runtime_client.evaluate("JSON.stringify({width:innerWidth,height:innerHeight})");
     defer allocator.free(viewport_payload);
     try std.testing.expect(std.mem.indexOf(u8, viewport_payload, "1024") != null);
 
@@ -572,6 +572,7 @@ test "brave cdp full endpoints conformance (opt-in)" {
 
     const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     const server = try addr.listen(compat.io(), .{ .reuse_address = true });
+    const server_port = server.socket.address.getPort();
     var server_ctx = OneShotCookieServer{
         .server = server,
         .body = brave_cookie_probe_html,
@@ -579,7 +580,7 @@ test "brave cdp full endpoints conformance (opt-in)" {
     const thread = try std.Thread.spawn(.{}, runOneShotCookieServer, .{&server_ctx});
     var joined = false;
     defer if (!joined) {
-        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
+        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_port)) |wake_addr| {
             if (wake_addr.connect(compat.io(), .{ .mode = .stream })) |stream| {
                 stream.close(compat.io());
             } else |_| {}
@@ -587,7 +588,7 @@ test "brave cdp full endpoints conformance (opt-in)" {
         thread.join();
     };
 
-    const server_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{server_ctx.port()});
+    const server_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{server_port});
     defer allocator.free(server_url);
 
     try runCdpFullConformance(&session, allocator, server_url);
@@ -616,6 +617,7 @@ test "brave bidi endpoints conformance (opt-in)" {
 
     const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     const server = try addr.listen(compat.io(), .{ .reuse_address = true });
+    const server_port = server.socket.address.getPort();
     var server_ctx = OneShotCookieServer{
         .server = server,
         .body = brave_cookie_probe_html,
@@ -623,7 +625,7 @@ test "brave bidi endpoints conformance (opt-in)" {
     const thread = try std.Thread.spawn(.{}, runOneShotCookieServer, .{&server_ctx});
     var joined = false;
     defer if (!joined) {
-        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_ctx.port())) |wake_addr| {
+        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", server_port)) |wake_addr| {
             if (wake_addr.connect(compat.io(), .{ .mode = .stream })) |stream| {
                 stream.close(compat.io());
             } else |_| {}
@@ -631,7 +633,7 @@ test "brave bidi endpoints conformance (opt-in)" {
         thread.join();
     };
 
-    const server_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{server_ctx.port()});
+    const server_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{server_port});
     defer allocator.free(server_url);
 
     try runBidiConformance(&bidi_session, allocator, server_url);

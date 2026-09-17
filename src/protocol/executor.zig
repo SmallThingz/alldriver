@@ -43,14 +43,15 @@ pub fn navigate(session: *Session, url: []const u8) !void {
             defer session.allocator.free(escaped);
             const params = try std.fmt.allocPrint(session.allocator, "{{\"url\":\"{s}\"}}", .{escaped});
             defer session.allocator.free(params);
-            const raw = callCdp(session, "Page.navigate", params) catch |err| switch (err) {
-                error.ProtocolCommandFailed => {
-                    try navigateViaRuntime(session, url);
-                    return;
-                },
-                else => return err,
-            };
+            const raw = try callCdp(session, "Page.navigate", params);
             defer session.allocator.free(raw);
+            var parsed = try std.json.parseFromSlice(std.json.Value, session.allocator, raw, .{});
+            defer parsed.deinit();
+            const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+            if (result != .object) return error.InvalidResponse;
+            if (result.object.get("errorText")) |failure| {
+                if (failure == .string and failure.string.len > 0) return error.NavigationFailed;
+            }
         },
         .bidi_ws => {
             const context_id = session.browsing_context_id orelse return error.SessionNotReady;
@@ -187,31 +188,127 @@ fn navigateViaRuntime(session: *Session, url: []const u8) !void {
 }
 
 pub fn click(session: *Session, selector: []const u8) !void {
-    const sel = try json_util.escapeJsonString(session.allocator, selector);
-    defer session.allocator.free(sel);
-    const expr = try std.fmt.allocPrint(
-        session.allocator,
-        "(function(){{const el=document.querySelector(\"{s}\"); if(!el) throw new Error('selector not found'); el.click(); return true;}})();",
-        .{sel},
-    );
-    defer session.allocator.free(expr);
-    const payload = try evaluate(session, expr);
-    defer session.allocator.free(payload);
+    if (session.transport != .cdp_ws) return error.UnsupportedCapability;
+    session.input_lock.lock();
+    defer session.input_lock.unlock();
+    const point = try prepareInputTarget(session, selector, false);
+    try dispatchPointer(session, "mouseMoved", point, false);
+    session.input_mouse_x = @intFromFloat(point.x);
+    session.input_mouse_y = @intFromFloat(point.y);
+    try dispatchPointer(session, "mousePressed", point, true);
+    // Always attempt release, including a failed first release, to avoid leaving
+    // the browser's pointer pressed when transport/protocol errors occur.
+    dispatchPointer(session, "mouseReleased", point, false) catch |err| {
+        dispatchPointer(session, "mouseReleased", point, false) catch {};
+        return err;
+    };
 }
 
 pub fn typeText(session: *Session, selector: []const u8, text: []const u8) !void {
-    const sel = try json_util.escapeJsonString(session.allocator, selector);
-    defer session.allocator.free(sel);
-    const txt = try json_util.escapeJsonString(session.allocator, text);
-    defer session.allocator.free(txt);
-    const expr = try std.fmt.allocPrint(
-        session.allocator,
-        "(function(){{const el=document.querySelector(\"{s}\"); if(!el) throw new Error('selector not found'); el.focus(); el.value=\"{s}\"; el.dispatchEvent(new Event('input',{{bubbles:true}})); return true;}})();",
-        .{ sel, txt },
-    );
-    defer session.allocator.free(expr);
-    const payload = try evaluate(session, expr);
-    defer session.allocator.free(payload);
+    if (session.transport != .cdp_ws) return error.UnsupportedCapability;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidText;
+    session.input_lock.lock();
+    defer session.input_lock.unlock();
+    _ = try prepareInputTarget(session, selector, true);
+    // Preserve typeText's replacement contract using the native editing command.
+    // Unlike setting .value, this also edits contenteditable and preserves undo.
+    try inputCommand(session, "Input.dispatchKeyEvent", "{\"type\":\"rawKeyDown\",\"key\":\"a\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65,\"modifiers\":2,\"commands\":[\"selectAll\"]}");
+    try inputCommand(session, "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"a\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65}");
+    if (text.len == 0) {
+        try inputCommand(session, "Input.dispatchKeyEvent", "{\"type\":\"rawKeyDown\",\"key\":\"Backspace\",\"code\":\"Backspace\",\"windowsVirtualKeyCode\":8}");
+        try inputCommand(session, "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"Backspace\",\"code\":\"Backspace\",\"windowsVirtualKeyCode\":8}");
+    } else {
+        const escaped = try json_util.escapeJsonString(session.allocator, text);
+        defer session.allocator.free(escaped);
+        const params = try std.fmt.allocPrint(session.allocator, "{{\"text\":\"{s}\"}}", .{escaped});
+        defer session.allocator.free(params);
+        try inputCommand(session, "Input.insertText", params);
+    }
+}
+
+const InputPoint = struct { x: f64, y: f64 };
+
+fn inputCommand(session: *Session, method: []const u8, params: []const u8) !void {
+    const response = try callCdp(session, method, params);
+    session.allocator.free(response);
+}
+
+fn dispatchPointer(session: *Session, kind: []const u8, point: InputPoint, pressed: bool) !void {
+    const moving = std.mem.eql(u8, kind, "mouseMoved");
+    const params = try std.fmt.allocPrint(session.allocator, "{{\"type\":\"{s}\",\"x\":{d},\"y\":{d},\"button\":\"{s}\",\"buttons\":{d},\"clickCount\":{d},\"modifiers\":{d}}}", .{ kind, point.x, point.y, if (moving) "none" else "left", @as(u8, if (pressed) 1 else 0), @as(u8, if (moving) 0 else 1), session.input_modifiers });
+    defer session.allocator.free(params);
+    try inputCommand(session, "Input.dispatchMouseEvent", params);
+}
+
+fn prepareInputTarget(session: *Session, selector: []const u8, editable: bool) !InputPoint {
+    const escaped = try json_util.escapeJsonString(session.allocator, selector);
+    defer session.allocator.free(escaped);
+    // Return explicit failures instead of hiding browser-side exceptions. Test
+    // several points in every visible fragment so inline and partly covered
+    // controls remain actionable when their rectangle centre is obstructed.
+    const script = try std.fmt.allocPrint(session.allocator,
+        \\(function() {{
+        \\  let el;
+        \\  try {{ el = document.querySelector("{s}"); }} catch (_) {{ return {{error:'selector'}}; }}
+        \\  if (!el) return {{error:'missing'}};
+        \\  if (el.matches(':disabled') || el.closest('[inert]')) return {{error:'disabled'}};
+        \\  if ({s} && (el.readOnly || !(el.isContentEditable || el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && ['text','search','email','url','tel','password','number'].includes(el.type))))) return {{error:'editable'}};
+        \\  el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}});
+        \\  const style = getComputedStyle(el);
+        \\  if (style.visibility !== 'visible' || style.display === 'none') return {{error:'hidden'}};
+        \\  let point = null, visible = false;
+        \\  for (const rect of el.getClientRects()) {{
+        \\    const left = Math.max(0,rect.left), right = Math.min(innerWidth,rect.right);
+        \\    const top = Math.max(0,rect.top), bottom = Math.min(innerHeight,rect.bottom);
+        \\    if (right <= left || bottom <= top) continue;
+        \\    visible = true;
+        \\    for (const [fx,fy] of [[.5,.5],[.25,.25],[.75,.25],[.25,.75],[.75,.75]]) {{
+        \\      const x = left+(right-left)*fx, y = top+(bottom-top)*fy;
+        \\      const hit = document.elementFromPoint(x,y);
+        \\      if (hit && (hit === el || el.contains(hit))) {{ point = {{x,y}}; break; }}
+        \\    }}
+        \\    if (point) break;
+        \\  }}
+        \\  if (!point) return {{error:visible?'occluded':'hidden'}};
+        \\  if ({s}) {{ el.focus({{preventScroll:true}}); if (document.activeElement !== el) return {{error:'focus'}}; }}
+        \\  return point;
+        \\}})()
+    , .{ escaped, if (editable) "true" else "false", if (editable) "true" else "false" });
+    defer session.allocator.free(script);
+    const raw = try evaluate(session, script);
+    defer session.allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(std.json.Value, session.allocator, raw, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+    if (result != .object) return error.InvalidResponse;
+    const remote = result.object.get("result") orelse return error.InvalidResponse;
+    if (remote != .object) return error.InvalidResponse;
+    const value = remote.object.get("value") orelse return error.InvalidResponse;
+    if (value != .object) return error.InvalidResponse;
+    if (value.object.get("error")) |failure| {
+        if (failure != .string) return error.InvalidResponse;
+        const reason = failure.string;
+        if (std.mem.eql(u8, reason, "selector")) return error.InvalidSelector;
+        if (std.mem.eql(u8, reason, "missing")) return error.ElementNotFound;
+        if (std.mem.eql(u8, reason, "disabled")) return error.ElementDisabled;
+        if (std.mem.eql(u8, reason, "editable")) return error.ElementNotEditable;
+        if (std.mem.eql(u8, reason, "hidden")) return error.ElementNotVisible;
+        if (std.mem.eql(u8, reason, "occluded")) return error.ElementOccluded;
+        if (std.mem.eql(u8, reason, "focus")) return error.ElementNotFocusable;
+        return error.InvalidResponse;
+    }
+    return .{
+        .x = try inputCoordinate(value.object.get("x") orelse return error.InvalidResponse),
+        .y = try inputCoordinate(value.object.get("y") orelse return error.InvalidResponse),
+    };
+}
+
+fn inputCoordinate(value: std.json.Value) !f64 {
+    return switch (value) {
+        .integer => @floatFromInt(value.integer),
+        .float => value.float,
+        else => error.InvalidResponse,
+    };
 }
 
 pub fn evaluate(session: *Session, script: []const u8) ![]u8 {
@@ -413,62 +510,15 @@ fn parseResponseBodyPayload(allocator: std.mem.Allocator, payload: []const u8) !
 }
 
 pub fn screenshot(session: *Session) ![]u8 {
+    return screenshotWithFormat(session, "png");
+}
+
+pub fn screenshotWithFormat(session: *Session, format: []const u8) ![]u8 {
     if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    return callCdp(session, "Page.captureScreenshot", "{}") catch |err| switch (err) {
-        error.ProtocolCommandFailed => {
-            try prepareCdpScreenshotRetry(session);
-            return callCdp(session, "Page.captureScreenshot", "{}") catch |retry_err| switch (retry_err) {
-                error.ProtocolCommandFailed => screenshotViaRuntimeCanvas(session) catch fallbackStaticScreenshotPayload(session),
-                else => return retry_err,
-            };
-        },
-        else => return err,
-    };
-}
-
-fn prepareCdpScreenshotRetry(session: *Session) !void {
-    const warmups = [_]struct { method: []const u8, params: []const u8 }{
-        .{ .method = "Page.bringToFront", .params = "{}" },
-        .{ .method = "Page.enable", .params = "{}" },
-        .{ .method = "Runtime.enable", .params = "{}" },
-        .{
-            .method = "Emulation.setDeviceMetricsOverride",
-            .params = "{\"width\":1280,\"height\":720,\"deviceScaleFactor\":1,\"mobile\":false}",
-        },
-    };
-    for (warmups) |warmup| {
-        const payload = callCdp(session, warmup.method, warmup.params) catch |err| switch (err) {
-            error.ProtocolCommandFailed => continue,
-            else => return err,
-        };
-        session.allocator.free(payload);
-    }
-}
-
-fn screenshotViaRuntimeCanvas(session: *Session) ![]u8 {
-    const expression =
-        "(function(){" ++ "const w=Math.max(window.innerWidth||0,document.documentElement.clientWidth||0,1);" ++ "const h=Math.max(window.innerHeight||0,document.documentElement.clientHeight||0,1);" ++ "const c=document.createElement('canvas'); c.width=w; c.height=h;" ++ "const ctx=c.getContext('2d'); if(!ctx) return '';" ++ "ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,w,h);" ++ "ctx.fillStyle='#111111'; ctx.font='16px sans-serif';" ++ "ctx.fillText(document.title||location.href||'about:blank',12,28);" ++ "return c.toDataURL('image/png').split(',')[1] || '';" ++ "})()";
-    const escaped = try json_util.escapeJsonString(session.allocator, expression);
-    defer session.allocator.free(escaped);
-    const params = try std.fmt.allocPrint(
-        session.allocator,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}",
-        .{escaped},
-    );
+    if (!std.mem.eql(u8, format, "png") and !std.mem.eql(u8, format, "jpeg")) return error.InvalidScreenshotFormat;
+    const params = try std.fmt.allocPrint(session.allocator, "{{\"format\":\"{s}\"}}", .{format});
     defer session.allocator.free(params);
-    const payload = try callCdp(session, "Runtime.evaluate", params);
-    defer session.allocator.free(payload);
-    const b64 = try extractRuntimeEvaluateStringValue(session.allocator, payload);
-    defer session.allocator.free(b64);
-    if (b64.len == 0) return error.ProtocolCommandFailed;
-    return std.fmt.allocPrint(session.allocator, "{{\"result\":{{\"data\":\"{s}\"}}}}", .{b64});
-}
-
-fn fallbackStaticScreenshotPayload(session: *Session) ![]u8 {
-    return session.allocator.dupe(
-        u8,
-        "{\"result\":{\"data\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5M2S8AAAAASUVORK5CYII=\"}}",
-    );
+    return callCdp(session, "Page.captureScreenshot", params);
 }
 
 fn extractRuntimeEvaluateStringValue(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
@@ -493,20 +543,11 @@ fn extractRuntimeEvaluateStringValue(allocator: std.mem.Allocator, payload: []co
 }
 
 pub fn startTracing(session: *Session) !void {
-    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    const raw = callCdp(session, "Tracing.start", "{}") catch |err| switch (err) {
-        error.ProtocolCommandFailed => return,
-        else => return err,
-    };
-    defer session.allocator.free(raw);
+    return @import("tracing.zig").start(session);
 }
 
 pub fn stopTracing(session: *Session) ![]u8 {
-    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
-    return callCdp(session, "Tracing.end", "{}") catch |err| switch (err) {
-        error.ProtocolCommandFailed => session.allocator.dupe(u8, "{}"),
-        else => return err,
-    };
+    return @import("tracing.zig").stop(session);
 }
 
 pub fn releaseHandle(session: *Session, handle_id: []const u8) !void {
@@ -540,70 +581,47 @@ pub fn releaseHandle(session: *Session, handle_id: []const u8) !void {
 }
 
 pub fn enableNetworkInterception(session: *Session) !void {
-    switch (session.transport) {
-        .cdp_ws => {
-            try callCdpBestEffort(session, "Network.enable", "{}");
-            try callCdpBestEffort(session, "Fetch.enable", "{}");
-        },
-        .bidi_ws => {
-            const raw = try callBidi(session, "session.subscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}");
-            defer session.allocator.free(raw);
-        },
-    }
+    try syncNetworkRules(session);
 }
 
 pub fn disableNetworkInterception(session: *Session) !void {
-    if (session.endpoint == null) return;
-    switch (session.transport) {
-        .cdp_ws => {
-            try callCdpBestEffort(session, "Fetch.disable", "{}");
-            try callCdpBestEffort(session, "Network.setBlockedURLs", "{\"urls\":[]}");
-        },
-        .bidi_ws => {
-            const raw = callBidi(session, "session.unsubscribe", "{\"events\":[\"network.beforeRequestSent\",\"network.responseCompleted\"]}") catch null;
-            if (raw) |payload| session.allocator.free(payload);
-        },
+    if (session.interceptor) |worker| {
+        worker.destroy();
+        session.interceptor = null;
     }
 }
 
 pub fn addNetworkRule(session: *Session, rule: types.NetworkRule) !void {
-    const url_pattern = try json_util.escapeJsonString(session.allocator, rule.url_pattern);
-    defer session.allocator.free(url_pattern);
+    const combined = try session.allocator.alloc(types.NetworkRule, session.rules.items.len + 1);
+    defer session.allocator.free(combined);
+    @memcpy(combined[0..session.rules.items.len], session.rules.items);
+    combined[combined.len - 1] = rule;
+    try installNetworkRules(session, combined);
+}
 
-    switch (session.transport) {
-        .cdp_ws => {
-            switch (rule.action) {
-                .block => {
-                    const params = try std.fmt.allocPrint(
-                        session.allocator,
-                        "{{\"urls\":[\"{s}\"]}}",
-                        .{url_pattern},
-                    );
-                    defer session.allocator.free(params);
-                    try callCdpBestEffort(session, "Network.setBlockedURLs", params);
-                },
-                .continue_request, .modify, .fulfill => {
-                    const params = try std.fmt.allocPrint(
-                        session.allocator,
-                        "{{\"patterns\":[{{\"urlPattern\":\"{s}\",\"requestStage\":\"Request\"}}]}}",
-                        .{url_pattern},
-                    );
-                    defer session.allocator.free(params);
-                    try callCdpBestEffort(session, "Fetch.enable", params);
-                },
-            }
-        },
-        .bidi_ws => {
-            const params = try std.fmt.allocPrint(
-                session.allocator,
-                "{{\"phases\":[\"beforeRequestSent\"],\"urlPatterns\":[{{\"type\":\"string\",\"pattern\":\"{s}\"}}]}}",
-                .{url_pattern},
-            );
-            defer session.allocator.free(params);
-            const raw = try callBidi(session, "network.addIntercept", params);
-            defer session.allocator.free(raw);
-        },
-    }
+pub fn syncNetworkRules(session: *Session) !void {
+    try installNetworkRules(session, session.rules.items);
+}
+
+fn installNetworkRules(session: *Session, rules: []const types.NetworkRule) !void {
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    if (session.interceptor) |worker| return worker.syncRules(rules);
+    // Establish the primary target first, then use its own independent Fetch
+    // connection so requests keep progressing while the API caller is idle.
+    const ping = try callCdp(session, "Page.getFrameTree", "{}");
+    session.allocator.free(ping);
+    const endpoint = session.cdp_ws_endpoint orelse return error.MissingEndpoint;
+    const parsed = try common.parseEndpoint(endpoint, .cdp);
+    var owned: ?[]u8 = null;
+    defer if (owned) |value| session.allocator.free(value);
+    const page_endpoint = if (cdpPathNeedsTargetSession(parsed.path)) blk: {
+        const target = session.cdp_target_id orelse return error.MissingTarget;
+        const authority = try common.formatHostPortAuthority(session.allocator, parsed.host, parsed.port);
+        defer session.allocator.free(authority);
+        owned = try std.fmt.allocPrint(session.allocator, "ws://{s}/devtools/page/{s}", .{ authority, target });
+        break :blk owned.?;
+    } else endpoint;
+    session.interceptor = try @import("interceptor.zig").Interceptor.create(session.allocator, page_endpoint, rules);
 }
 
 fn callCdpBestEffort(session: *Session, method: []const u8, params_json: []const u8) !void {
@@ -659,7 +677,7 @@ pub fn cdpCloseTarget(session: *Session, target_id: []const u8) ![]u8 {
     return callCdp(session, "Target.closeTarget", params);
 }
 
-fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u8 {
+pub fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u8 {
     var queued_notifications: std.ArrayList([]u8) = .empty;
     defer freeQueuedNotifications(session.allocator, &queued_notifications);
 
@@ -671,9 +689,10 @@ fn callCdp(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u
     if (parsed.adapter != .cdp) return error.UnsupportedProtocol;
 
     const payload = callCdpOnce(session, parsed, method, params_json, false, &queued_notifications) catch |err| {
-        if (!isRetriableCdpTransportError(err)) return err;
-        clearCdpEndpointCache(session);
-        return callCdpOnce(session, parsed, method, params_json, true, &queued_notifications);
+        // A lost response does not prove that the browser did not execute the
+        // command. Replaying a click, navigation or script can duplicate effects.
+        if (isRetriableCdpTransportError(err)) clearCdpEndpointCache(session);
+        return err;
     };
     session.protocol_lock.unlock();
     lock_held = false;
@@ -692,16 +711,9 @@ fn callCdpOnce(
     const ws_endpoint = try ensureCdpEndpoint(session, parsed, force_refresh_endpoint);
     const ws_parts = try parseWsUrl(session.allocator, ws_endpoint);
     defer session.allocator.free(ws_parts.path);
-    if (cdpPathNeedsTargetSession(ws_parts.path)) {
-        const client = try ensurePersistentCdpClient(session, ws_parts.host, ws_parts.port, ws_parts.path);
-        const routed_session_id = try prepareCdpRoutingSessionId(session, client, ws_parts.path, method, queued_notifications);
-        return sendCdpRpc(session, client, method, params_json, routed_session_id, true, queued_notifications);
-    }
-
-    var client = try ws.Client.connect(session.allocator, ws_parts.host, ws_parts.port, ws_parts.path);
-    defer client.deinit();
-    const routed_session_id = try prepareCdpRoutingSessionId(session, &client, ws_parts.path, method, queued_notifications);
-    return sendCdpRpc(session, &client, method, params_json, routed_session_id, true, queued_notifications);
+    const client = try ensurePersistentCdpClient(session, ws_parts.host, ws_parts.port, ws_parts.path);
+    const routed_session_id = try prepareCdpRoutingSessionId(session, client, ws_parts.path, method, queued_notifications);
+    return sendCdpRpc(session, client, method, params_json, routed_session_id, true, queued_notifications);
 }
 
 fn callBidi(session: *Session, method: []const u8, params_json: ?[]const u8) ![]u8 {
@@ -821,6 +833,9 @@ fn sendCdpRpc(
                 recordProtocolErrorDiagnostic(session, .cdp_ws, method, env, payload);
             }
             session.allocator.free(payload);
+            if (env.error_message) |message| {
+                if (std.mem.eql(u8, message, "Not attached to an active page")) return error.PageNotActive;
+            }
             return error.ProtocolCommandFailed;
         }
         return payload;
@@ -837,6 +852,28 @@ fn processCdpNotification(session: *Session, payload: []const u8) void {
     const params_value = parsed.value.object.get("params") orelse return;
     if (params_value != .object) return;
     const params = params_value.object;
+
+    if (std.mem.eql(u8, method, "Tracing.tracingComplete")) {
+        session.state_lock.lock();
+        defer session.state_lock.unlock();
+        if (jsonObjectString(params, "stream")) |handle| {
+            if (session.trace_stream) |old| session.allocator.free(old);
+            session.trace_stream = session.allocator.dupe(u8, handle) catch null;
+        }
+        if (params.get("dataLossOccurred")) |loss| {
+            session.trace_data_loss = loss == .bool and loss.bool;
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, method, "Runtime.consoleAPICalled") or std.mem.eql(u8, method, "Runtime.exceptionThrown")) {
+        session.state_lock.lock();
+        const console = session.console_callback;
+        const exception = session.exception_callback;
+        session.state_lock.unlock();
+        @import("../core/log.zig").handleNotification(session.allocator, method, params, console, exception) catch {};
+        return;
+    }
 
     if (std.mem.eql(u8, method, "Network.requestWillBeSent")) {
         handleCdpRequestWillBeSent(session, params);
@@ -1410,12 +1447,16 @@ fn cdpWebSocketEndpoint(
 
 fn shouldResolveCdpEndpointPath(path: []const u8) bool {
     if (path.len == 0 or std.mem.eql(u8, path, "/")) return true;
-    if (std.mem.startsWith(u8, path, "/devtools/browser/")) return true;
     if (std.mem.startsWith(u8, path, "/json")) return true;
     return false;
 }
 
 fn resolveCdpWebSocketEndpoint(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
+    const version = try http.getJson(allocator, host, port, "/json/version");
+    defer allocator.free(version.body);
+    if (httpStatusIsSuccess(version.status_code)) {
+        if (extractJsonStringValue(allocator, version.body, "webSocketDebuggerUrl")) |endpoint| return endpoint else |_| {}
+    }
     const list_paths = [_][]const u8{ "/json/list", "/json" };
     for (list_paths) |path| {
         const list = http.getJson(allocator, host, port, path) catch continue;
@@ -1424,10 +1465,7 @@ fn resolveCdpWebSocketEndpoint(allocator: std.mem.Allocator, host: []const u8, p
         if (firstJsonListWsEndpoint(allocator, list.body)) |ws_url| return ws_url else |_| {}
     }
 
-    const version = http.getJson(allocator, host, port, "/json/version") catch return error.MissingEndpoint;
-    defer allocator.free(version.body);
-    if (!httpStatusIsSuccess(version.status_code)) return error.MissingEndpoint;
-    return extractJsonStringValue(allocator, version.body, "webSocketDebuggerUrl");
+    return error.MissingEndpoint;
 }
 
 fn httpStatusIsSuccess(code: u16) bool {
@@ -1477,11 +1515,19 @@ fn evalViaCdp(session: *Session, script: []const u8) ![]u8 {
     defer session.allocator.free(expression);
     const params = try std.fmt.allocPrint(
         session.allocator,
-        "{{\"expression\":\"{s}\",\"returnByValue\":true}}",
+        "{{\"expression\":\"{s}\",\"returnByValue\":true,\"awaitPromise\":true}}",
         .{expression},
     );
     defer session.allocator.free(params);
-    return callCdp(session, "Runtime.evaluate", params);
+    const raw = try callCdp(session, "Runtime.evaluate", params);
+    errdefer session.allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(std.json.Value, session.allocator, raw, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+    if (result != .object) return error.InvalidResponse;
+    if (result.object.contains("exceptionDetails")) return error.JavaScriptException;
+    return raw;
 }
 
 fn evalViaBidi(session: *Session, script: []const u8) ![]u8 {
@@ -1622,7 +1668,7 @@ test "parseWsUrl supports bracketed IPv6 endpoint" {
 
 test "cdp endpoint path resolution rules keep page targets direct" {
     try std.testing.expect(shouldResolveCdpEndpointPath("/"));
-    try std.testing.expect(shouldResolveCdpEndpointPath("/devtools/browser/abc"));
+    try std.testing.expect(!shouldResolveCdpEndpointPath("/devtools/browser/abc"));
     try std.testing.expect(!shouldResolveCdpEndpointPath("/devtools/page/abc"));
 }
 
@@ -1948,7 +1994,7 @@ test "shared executor commands keep setup failures distinct from teardown on bot
     try std.testing.expectError(error.MissingEndpoint, addInitScript(&bidi_session, "window.__driver = true;"));
     try std.testing.expectError(error.MissingEndpoint, removeInitScript(&bidi_session, "script-1"));
     try std.testing.expectError(error.MissingEndpoint, releaseHandle(&bidi_session, "handle-1"));
-    try std.testing.expectError(error.MissingEndpoint, enableNetworkInterception(&bidi_session));
+    try std.testing.expectError(error.UnsupportedProtocol, enableNetworkInterception(&bidi_session));
     try disableNetworkInterception(&bidi_session);
-    try std.testing.expectError(error.MissingEndpoint, addNetworkRule(&bidi_session, rule));
+    try std.testing.expectError(error.UnsupportedProtocol, addNetworkRule(&bidi_session, rule));
 }

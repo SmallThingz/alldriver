@@ -33,6 +33,14 @@ pub const Session = struct {
     request_id: u64 = 0,
     request_id_lock: compat.Mutex = .{},
     protocol_lock: compat.Mutex = .{},
+    input_lock: compat.Mutex = .{},
+    input_modifiers: u8 = 0,
+    input_mouse_x: i32 = 0,
+    input_mouse_y: i32 = 0,
+    console_callback: ?@import("log.zig").Callback = null,
+    exception_callback: ?@import("log.zig").Callback = null,
+    trace_stream: ?[]u8 = null,
+    trace_data_loss: bool = false,
     timeout_policy: types.TimeoutPolicy = .{},
     diagnostic_lock: compat.Mutex = .{},
     last_diagnostic_value: ?types.Diagnostic = null,
@@ -46,6 +54,7 @@ pub const Session = struct {
     active_async_ops: usize = 0,
 
     rules: std.ArrayList(types.NetworkRule) = .empty,
+    interceptor: ?*@import("../protocol/interceptor.zig").Interceptor = null,
     on_request: ?*const fn (types.RequestEvent) void = null,
     on_response: ?*const fn (types.ResponseEvent) void = null,
     event_lock: compat.Mutex = .{},
@@ -69,11 +78,13 @@ pub const Session = struct {
         }
         self.async_lock.unlock();
 
+        if (self.interceptor) |worker| worker.destroy();
         if (self.child) |*child| {
             child.kill(compat.io());
         }
 
         if (self.current_url) |url| self.allocator.free(url);
+        if (self.trace_stream) |stream| self.allocator.free(stream);
         if (self.endpoint) |ep| self.allocator.free(ep);
         if (self.cdp_ws_endpoint) |ep| self.allocator.free(ep);
         if (self.cdp_target_id) |target_id| self.allocator.free(target_id);

@@ -49,7 +49,14 @@ pub const PageClient = struct {
         const timeout = self.session.base.timeoutPolicy().navigate_ms;
         const deadline = compat.milliTimestamp() + @as(i64, timeout);
         while (true) {
-            const current = try executor.callCdp(&self.session.base, "Page.getNavigationHistory", "{}");
+            const current = executor.callCdp(&self.session.base, "Page.getNavigationHistory", "{}") catch |err| {
+                // Cross-document history traversal can temporarily detach the
+                // renderer. Only retry this read, never the navigation itself.
+                if (err != error.PageNotActive) return err;
+                if (compat.milliTimestamp() >= deadline) return error.Timeout;
+                compat.sleepMs(10);
+                continue;
+            };
             defer allocator.free(current);
             if (try historyTarget(allocator, current, 0) == target) break;
             if (compat.milliTimestamp() >= deadline) return error.Timeout;

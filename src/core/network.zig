@@ -27,17 +27,19 @@ pub fn addInterceptRule(session: *Session, rule: NetworkRule) !void {
     const owned = try cloneRule(session.allocator, rule);
     errdefer freeRule(session.allocator, owned);
 
+    try session.rules.ensureUnusedCapacity(session.allocator, 1);
     try executor.addNetworkRule(session, owned);
-    try session.rules.append(session.allocator, owned);
+    session.rules.appendAssumeCapacity(owned);
 }
 
 pub fn removeInterceptRule(session: *Session, rule_id: []const u8) !bool {
     var i: usize = 0;
     while (i < session.rules.items.len) : (i += 1) {
         if (std.mem.eql(u8, session.rules.items[i].id, rule_id)) {
-            const removed = session.rules.swapRemove(i);
-            defer freeRule(session.allocator, removed);
+            const removed = session.rules.orderedRemove(i);
+            errdefer session.rules.insertAssumeCapacity(i, removed);
             try syncRemoteRules(session);
+            freeRule(session.allocator, removed);
             return true;
         }
     }
@@ -988,15 +990,7 @@ fn freeRule(allocator: std.mem.Allocator, rule: NetworkRule) void {
 
 fn syncRemoteRules(session: *Session) !void {
     if (!session.supports(.network_intercept)) return;
-    executor.disableNetworkInterception(session) catch |err| switch (err) {
-        error.UnsupportedProtocol => return,
-        else => return err,
-    };
-    if (session.rules.items.len == 0) return;
-    try executor.enableNetworkInterception(session);
-    for (session.rules.items) |rule| {
-        try executor.addNetworkRule(session, rule);
-    }
+    try executor.syncNetworkRules(session);
 }
 
 const TestCapture = struct {

@@ -341,8 +341,8 @@ test "surface coverage for core and modern wrapper modules" {
 
     var log = modern.log();
     try std.testing.expectEqual(@TypeOf(log), modern_log.LogClient);
-    try std.testing.expectError(error.UnsupportedProtocol, log.onConsole(dummyLogCallback));
-    try std.testing.expectError(error.UnsupportedProtocol, log.onException(dummyLogCallback));
+    try std.testing.expectError(error.MissingEndpoint, log.onConsole(dummyLogCallback));
+    try std.testing.expectError(error.MissingEndpoint, log.onException(dummyLogCallback));
 
     try std.testing.expectError(error.MissingEndpoint, modern.addInitScript("window.__driver = true;"));
     try std.testing.expectError(error.MissingEndpoint, modern.removeInitScript("script-1"));

@@ -10,18 +10,19 @@ pub fn readExact(stream: *std.Io.net.Stream, buf: []u8) !void {
 }
 
 pub fn read(stream: *std.Io.net.Stream, buf: []u8) !usize {
+    if (buf.len == 0) return 0;
     var reader = stream.reader(compat.io(), &.{});
-    return reader.interface.readSliceShort(buf) catch {
-        return reader.err.?;
+    var buffers = [_][]u8{buf};
+    return reader.interface.readVec(&buffers) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.EndOfStream => return 0,
     };
 }
 
 pub fn readByte(stream: *std.Io.net.Stream) !u8 {
-    var reader = stream.reader(compat.io(), &.{});
-    return reader.interface.takeByte() catch |err| switch (err) {
-        error.ReadFailed => return reader.err.?,
-        error.EndOfStream => return error.ConnectionClosed,
-    };
+    var byte: [1]u8 = undefined;
+    try readExact(stream, &byte);
+    return byte[0];
 }
 
 pub fn writeAll(stream: *std.Io.net.Stream, bytes: []const u8) !void {
