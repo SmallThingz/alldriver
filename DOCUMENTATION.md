@@ -40,6 +40,12 @@ Wait operations support cooperative cancellation. Navigation, evaluation, input,
 
 For tracing, call `session.base.startTracing()`, perform the work, and call `session.base.stopTracing(allocator)`. Async equivalents are also available. Stop waits for Chromium's completion event, reads the entire trace stream, closes it, and returns JSON containing `traceEvents`. It does not return the `Tracing.end` acknowledgement. Malformed data, protocol errors, data loss, timeouts, and the 256 MiB collection limit are reported as errors.
 
+## Network callbacks
+
+Register `network.onRequest` and `network.onResponse`, then call `try network.enable()` to start delivery. `try network.subscribe(callback)` registers raw CDP network events and starts observation directly. Events arrive on a dedicated worker even while the caller is idle. `clearRequest`, `clearResponse`, and `unsubscribe` remove the corresponding callback; `disable` stops observation and interception.
+
+Callback strings are borrowed until the callback returns. Synchronize application state shared with callbacks. A callback may unregister itself, but session destruction, target switching, and observer shutdown must run on the owning thread after callbacks return.
+
 ## Console and exception callbacks
 
 ```zig
