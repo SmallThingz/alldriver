@@ -13,40 +13,15 @@ pub const CookieHeaderOptions = types.CookieHeaderOptions;
 pub fn setCookie(session: *Session, cookie: Cookie) !void {
     if (!session.supports(.dom)) return error.UnsupportedCapability;
     const change_kind = detectCookieChangeKind(session, cookie) catch .unknown;
-    var source: types.CookieChangeSource = .api;
-    executor.setCookie(session, .{ .name = cookie.name, .value = cookie.value }, cookie.domain, cookie.path) catch |err| switch (err) {
-        error.ProtocolCommandFailed, error.UnsupportedProtocol => {
-            source = .document;
-            try setCookieViaDocument(session, cookie);
-        },
-        else => return err,
-    };
+    try executor.setCookieFull(session, cookie);
     events.emit(session, .{
         .cookie_updated = .{
             .domain = cookie.domain,
             .name = cookie.name,
             .change = change_kind,
-            .source = source,
+            .source = .api,
         },
     });
-}
-
-fn setCookieViaDocument(session: *Session, cookie: Cookie) !void {
-    const name = try json_util.escapeJsonString(session.allocator, cookie.name);
-    defer session.allocator.free(name);
-    const value = try json_util.escapeJsonString(session.allocator, cookie.value);
-    defer session.allocator.free(value);
-    const path = try json_util.escapeJsonString(session.allocator, cookie.path);
-    defer session.allocator.free(path);
-
-    const script = try std.fmt.allocPrint(
-        session.allocator,
-        "(function(){{document.cookie=\"{s}={s}; path={s}\"; return true;}})();",
-        .{ name, value, path },
-    );
-    defer session.allocator.free(script);
-    const result = try executor.evaluate(session, script);
-    defer session.allocator.free(result);
 }
 
 fn detectCookieChangeKind(session: *Session, cookie: Cookie) !types.CookieChangeKind {
@@ -62,8 +37,7 @@ fn detectCookieChangeKind(session: *Session, cookie: Cookie) !types.CookieChange
 
 fn cookieIdentityMatches(existing: Cookie, target: Cookie) bool {
     if (!std.mem.eql(u8, existing.name, target.name)) return false;
-    if (!domainMatches(existing.domain, target.domain) and !domainMatches(target.domain, existing.domain)) return false;
-    return pathMatches(existing.path, target.path) and pathMatches(target.path, existing.path);
+    return std.ascii.eqlIgnoreCase(existing.domain, target.domain) and std.mem.eql(u8, existing.path, target.path);
 }
 
 pub fn getCookies(session: *Session, allocator: std.mem.Allocator) ![]Cookie {
@@ -198,7 +172,7 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
     defer parsed.deinit();
 
     const root = parsed.value;
-    if (root != .object) return allocator.alloc(Cookie, 0);
+    if (root != .object) return error.InvalidResponse;
 
     var cookies_value: ?std.json.Value = null;
 
@@ -213,7 +187,7 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
     }
 
     if (cookies_value == null or cookies_value.? != .array) {
-        return allocator.alloc(Cookie, 0);
+        return error.InvalidResponse;
     }
 
     var out: std.ArrayList(Cookie) = .empty;
@@ -228,9 +202,9 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
     }
 
     for (cookies_value.?.array.items) |item| {
-        if (item != .object) continue;
+        if (item != .object) return error.InvalidResponse;
 
-        const name = json_util.getStringField(item.object, "name") orelse continue;
+        const name = json_util.getStringField(item.object, "name") orelse return error.InvalidResponse;
         const value = json_util.getStringField(item.object, "value") orelse "";
         const domain = json_util.getStringField(item.object, "domain") orelse "";
         const path = json_util.getStringField(item.object, "path") orelse "/";
@@ -239,11 +213,19 @@ fn parseCookiesFromPayload(allocator: std.mem.Allocator, payload: []const u8) ![
         const expires_unix_seconds = json_util.getI64Field(item.object, "expires");
         const same_site = json_util.parseCookieSameSite(json_util.getStringField(item.object, "sameSite"));
 
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+        const owned_value = try allocator.dupe(u8, value);
+        errdefer allocator.free(owned_value);
+        const owned_domain = try allocator.dupe(u8, domain);
+        errdefer allocator.free(owned_domain);
+        const owned_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned_path);
         try out.append(allocator, .{
-            .name = try allocator.dupe(u8, name),
-            .value = try allocator.dupe(u8, value),
-            .domain = try allocator.dupe(u8, domain),
-            .path = try allocator.dupe(u8, path),
+            .name = owned_name,
+            .value = owned_value,
+            .domain = owned_domain,
+            .path = owned_path,
             .secure = secure,
             .http_only = http_only,
             .expires_unix_seconds = expires_unix_seconds,
@@ -310,18 +292,18 @@ const ParsedUrl = struct {
 };
 
 fn parseUrl(url: []const u8) ?ParsedUrl {
-    const scheme_idx = std.mem.indexOf(u8, url, "://") orelse return null;
-    const scheme = url[0..scheme_idx];
-    const secure = std.ascii.eqlIgnoreCase(scheme, "https");
-    const rest = url[scheme_idx + 3 ..];
-    if (rest.len == 0) return null;
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
-    const host_port = rest[0..slash];
-    if (host_port.len == 0) return null;
-    const host = normalizeDomainToken(host_port);
+    const uri = std.Uri.parse(url) catch return null;
+    const secure = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+    if (!secure and !std.ascii.eqlIgnoreCase(uri.scheme, "http")) return null;
+    const host_component = uri.host orelse return null;
+    const host = switch (host_component) {
+        .raw, .percent_encoded => |value| value,
+    };
     if (host.len == 0) return null;
-    const path = if (slash < rest.len) rest[slash..] else "/";
-    return .{ .secure = secure, .host = host, .path = path };
+    const path = switch (uri.path) {
+        .raw, .percent_encoded => |value| value,
+    };
+    return .{ .secure = secure, .host = host, .path = if (path.len == 0) "/" else path };
 }
 
 fn domainMatches(cookie_domain_raw: []const u8, host: []const u8) bool {
@@ -330,6 +312,9 @@ fn domainMatches(cookie_domain_raw: []const u8, host: []const u8) bool {
     const host_domain = normalizeDomainToken(host);
     if (cookie_domain.len == 0 or host_domain.len == 0) return false;
     if (std.ascii.eqlIgnoreCase(cookie_domain, host_domain)) return true;
+    // Chromium prefixes domain cookies with a dot; host-only cookies must not
+    // leak into a header exported for a subdomain.
+    if (!std.mem.startsWith(u8, cookie_domain_raw, ".")) return false;
     if (host_domain.len <= cookie_domain.len) return false;
     if (!std.ascii.eqlIgnoreCase(host_domain[host_domain.len - cookie_domain.len ..], cookie_domain)) return false;
     return host_domain[host_domain.len - cookie_domain.len - 1] == '.';
@@ -462,4 +447,27 @@ test "cookie query filters secure and expired" {
         .domain = "example.com",
         .include_expired = false,
     }));
+}
+
+fn parseCookieAllocationCase(allocator: std.mem.Allocator) !void {
+    const cookies = try parseCookiesFromPayload(allocator,
+        \\{"result":{"cookies":[{"name":"one","value":"a","domain":"example.com","path":"/"},{"name":"two","value":"b","domain":".example.com","path":"/private","secure":true,"httpOnly":false,"sameSite":"Strict","expires":1234567}]}}
+    );
+    defer freeCookies(allocator, cookies);
+    try std.testing.expectEqual(@as(usize, 2), cookies.len);
+    try std.testing.expectEqual(types.CookieSameSite.strict, cookies[1].same_site);
+}
+
+test "cookie parser cleans every partial allocation" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseCookieAllocationCase, .{});
+}
+
+test "cookie URL matching excludes query and userinfo and honors host-only scope" {
+    const parsed = parseUrl("https://user:pass@example.com/private?query=1#fragment").?;
+    try std.testing.expectEqualStrings("example.com", parsed.host);
+    try std.testing.expectEqualStrings("/private", parsed.path);
+    try std.testing.expect(pathMatches("/private", parsed.path));
+    try std.testing.expect(!domainMatches("example.com", "sub.example.com"));
+    try std.testing.expect(domainMatches(".example.com", "sub.example.com"));
+    try std.testing.expect(parseUrl("ftp://example.com/path") == null);
 }

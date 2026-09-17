@@ -6,7 +6,7 @@ const allocator = std.testing.allocator;
 
 /// Every blocking accept/read/write belongs to this cancelable task group.
 /// Teardown cancels and joins tasks before closing the listener or freeing state.
-const LocalServer = struct {
+pub const LocalServer = struct {
     listener: std.Io.net.Server,
     tasks: std.Io.Group = .init,
     failed: std.atomic.Value(bool) = .init(false),
@@ -14,7 +14,7 @@ const LocalServer = struct {
     fulfilled_hits: std.atomic.Value(u32) = .init(0),
     accepted: std.atomic.Value(u32) = .init(0),
 
-    fn start() !*LocalServer {
+    pub fn start() !*LocalServer {
         const self = try allocator.create(LocalServer);
         errdefer allocator.destroy(self);
         const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -24,7 +24,7 @@ const LocalServer = struct {
         return self;
     }
 
-    fn deinit(self: *LocalServer) void {
+    pub fn deinit(self: *LocalServer) void {
         self.tasks.cancel(compat.io());
         self.listener.deinit(compat.io());
         allocator.destroy(self);
