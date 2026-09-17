@@ -1,8 +1,42 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+var runtime_io: ?std.Io.Threaded = null;
+var runtime_io_lock: std.Io.Mutex = .init;
+
 pub fn io() std.Io {
-    return std.Options.debug_io;
+    // Debug I/O uses a failing allocator and cannot spawn processes. Keep a
+    // process-lifetime, thread-safe backend for browser and transport work.
+    runtime_io_lock.lockUncancelable(std.Options.debug_io);
+    defer runtime_io_lock.unlock(std.Options.debug_io);
+    if (runtime_io == null) {
+        runtime_io = std.Io.Threaded.init(std.heap.page_allocator, .{
+            .environ = if (std.Options.debug_threaded_io) |debug|
+                debug.environ.process_environ
+            else
+                .empty,
+        });
+    }
+    return runtime_io.?.io();
+}
+
+test "runtime I/O can spawn and collect a child process" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+    const result = try std.process.run(std.testing.allocator, io(), .{
+        .argv = &.{ "sh", "-c", "printf alldriver-child; printf child-stderr >&2; exit 7" },
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expectEqualStrings("alldriver-child", result.stdout);
+    try std.testing.expectEqualStrings("child-stderr", result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, result.term);
+}
+
+test "owned real path can be freed through a plain slice" {
+    const path: []u8 = try cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(path);
+    var dir = try cwd().openDir(path, .{});
+    dir.close(io());
 }
 
 pub fn milliTimestamp() i64 {
@@ -141,8 +175,10 @@ pub const CwdDir = struct {
         self: CwdDir,
         allocator: std.mem.Allocator,
         sub_path: []const u8,
-    ) std.Io.Dir.RealPathFileAllocError![:0]u8 {
-        return self.inner.realPathFileAlloc(io(), sub_path, allocator);
+    ) std.Io.Dir.RealPathFileAllocError![]u8 {
+        const terminated = try self.inner.realPathFileAlloc(io(), sub_path, allocator);
+        defer allocator.free(terminated);
+        return allocator.dupe(u8, terminated);
     }
 };
 

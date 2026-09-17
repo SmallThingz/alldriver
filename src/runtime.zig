@@ -667,8 +667,10 @@ fn childExitedPosixNoHang(child: *std.process.Child) bool {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return false;
     const pid = child.id orelse return true;
     var status: if (@import("builtin").link_libc) c_int else u32 = undefined;
-    switch (std.posix.errno(std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG))) {
+    const result = std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG);
+    switch (std.posix.errno(result)) {
         .SUCCESS => {
+            if (result == 0) return false;
             child.id = null;
             return true;
         },
@@ -704,6 +706,20 @@ fn logHardLaunchError(
 test "attach rejects unsupported protocol schemes" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.UnsupportedProtocol, attach(allocator, "http://127.0.0.1:4444/session/1"));
+}
+
+test "live child remains owned after nonblocking exit check" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+    var child = try std.process.spawn(compat.io(), .{
+        .argv = &.{ "sh", "-c", "read line" },
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(compat.io());
+    const id = child.id;
+    try std.testing.expect(!childExitedPosixNoHang(&child));
+    try std.testing.expectEqual(id, child.id);
 }
 
 test "webview adapter mapping is cdp-only for modern kinds" {
