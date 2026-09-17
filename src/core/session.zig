@@ -69,6 +69,7 @@ pub const Session = struct {
     network_records: std.ArrayList(types.NetworkRecord) = .empty,
     network_inflight: std.StringHashMapUnmanaged(void) = .{},
     network_last_activity_ms: i64 = 0,
+    network_tracking_valid: bool = true,
     frames_lock: compat.Mutex = .{},
     frames: std.ArrayList(types.FrameInfo) = .empty,
     service_workers_lock: compat.Mutex = .{},
@@ -1309,7 +1310,14 @@ test "click failure emits action_started and action_failed hooks" {
 test "diagnostic allocation failures retain ownership and release partial strings" {
     for (1..7) |failure_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = failure_index });
-        var session = try makeTestSession(failing.allocator(), .{});
+        var session = try makeTestSession(failing.allocator(), .{
+            .dom = false,
+            .js_eval = false,
+            .network_intercept = false,
+            .tracing = false,
+            .downloads = false,
+            .bidi_events = false,
+        });
         defer session.deinit();
         session.recordDiagnostic(.{ .phase = .overall, .code = "example", .message = "diagnostic", .transport = "cdp" });
         if (session.lastDiagnostic()) |diagnostic| {

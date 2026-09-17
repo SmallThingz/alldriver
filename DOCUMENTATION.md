@@ -97,6 +97,8 @@ The network client supports request/response callbacks, interception rules, `rec
 
 `onEvent(filter, callback)` returns a subscription ID removed by `offEvent(id)`. Event kinds cover navigation/reload, waits, actions, network observations, challenge heuristics, and cookie changes. Empty `filter.kinds` selects all kinds. Domain filters match exact hosts or subdomains case-insensitively; events without a domain are not domain-filtered. Failure and cancellation are separate from successful completion.
 
+Lifecycle subscriptions and telemetry consume protocol notifications during session commands. For network delivery while the caller is idle, use the dedicated request/response or raw network callbacks described above.
+
 Use `setTimeoutPolicy`, `timeoutPolicy`, and `lastDiagnostic` for operation policy and failures. `driver.modern.setHardErrorLogger` replaces the default diagnostic sink. The library does not provide detection-bypass or challenge-solving primitives.
 
 ## Discovery and deferred surfaces
