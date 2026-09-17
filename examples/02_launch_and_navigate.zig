@@ -5,7 +5,7 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     var launch_op = try driver.modern.launchAutoAsync(allocator, .{
-        .kinds = &.{ .chrome, .edge, .firefox, .lightpanda },
+        .kinds = &.{ .chrome, .edge, .brave },
         .allow_managed_download = false,
         .profile_mode = .ephemeral,
         .headless = true,

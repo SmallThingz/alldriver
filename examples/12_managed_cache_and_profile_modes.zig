@@ -8,7 +8,7 @@ pub fn main() !void {
     defer if (explicit) |path| allocator.free(path);
 
     var installs = try driver.discover(allocator, .{
-        .kinds = &.{ .chrome, .edge, .firefox },
+        .kinds = &.{ .chrome, .edge, .brave },
         .explicit_path = explicit,
         // Discovery always checks managed cache. This flag controls whether
         // managed provisioning/download workflows are allowed.

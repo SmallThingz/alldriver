@@ -1,290 +1,111 @@
-# DOCUMENTATION
+# alldriver API
 
-This file is the canonical project documentation for `alldriver`.
+`alldriver` requires Zig 0.16.0. The supported browser scope is Chromium over CDP. The required real-browser suite targets Brave; Chrome and Edge use the same Chromium protocol surface, but a Brave run does not independently certify every browser/version/OS combination.
 
-## Overview
+Firefox and other Gecko browsers, BiDi, Safari/WebKit, Lightpanda, and platform-specific webviews are outside the currently validated scope. Their discovery entries or existing APIs are not support guarantees.
 
-`alldriver` is a Zig browser automation library with a modern protocol contract:
+## Sessions and ownership
 
-- Browser protocols: CDP and BiDi only
-- Public session namespace: `driver.modern.*`
-- Supported webview targets: `webview2`, `electron`, `android_webview`
+Use `driver.modern.launch`, `launchAuto`, or `attach`. Launch and attach return after protocol readiness. `launchAuto` discovers installed browsers; explicitly choose Chromium kinds such as `.brave`, `.chrome`, and `.edge`.
 
-The project is standards-compliant automation only and does not implement detection-evasion primitives.
+Call `session.deinit()` once. Ephemeral profiles are removed on teardown; persistent profiles require `profile_dir` and retain their data. Discovery returns an owned list with its own `deinit()`.
 
-## Quick Start
+Domain clients (`page`, `runtime`, `network`, `input`, `log`, `storage`, `contexts`, `targets`) borrow their session. Keep the session alive while using them. Buffers returned by evaluation, screenshots, and tracing are owned by the allocator supplied to that API and must be freed. Evaluation returns the protocol response payload, including the remote result, rather than a decoded application value.
+
+## Navigation and input
+
+`page.navigate`, `reload`, `goBack`, and `goForward` use Chromium navigation. `setViewport(width, height)` configures device metrics; zero dimensions are invalid.
+
+`input.click(selector)` scrolls the target into view, checks hit-testing, and dispatches native mouse input. Missing, disabled, hidden, or occluded targets fail explicitly. `input.typeText(selector, text)` replaces existing editable content using native selection and text insertion, including contenteditable elements. Empty text clears the selection. Read-only and noneditable targets are rejected.
+
+`keyDown` and `keyUp` send trusted Chromium keyboard events. Supported mappings include ordinary text, Unicode scalars, editing/navigation keys, modifiers, and F1–F12. Modifier state survives repeated `session.input()` calls. Pair modifier presses with releases. `mouseMove(x, y)` uses viewport coordinates; `wheel(dx, dy)` scrolls at the last pointer position. These operations use browser input, so normal default actions and page handlers apply.
+
+## Waits, async work, and cancellation
+
+`waitFor(target, options)` supports `dom_ready`, `network_idle`, `selector_visible`, `url_contains`, `cookie_present`, `storage_key_present`, and `js_truthy`. `waitForCookie` is a convenience wrapper. Set `timeout_ms`, `poll_interval_ms`, and an optional `CancelToken` in wait options.
+
+Async operations return an owned handle. Call `await(timeout_ms)` to obtain the result, then `deinit()` to join and release the handle. A successful result can be consumed only once; a second successful-result await returns `AlreadyConsumed`. An await timeout does not cancel the work.
+
+- `isCancelable()` reports whether pending work supports cooperative cancellation.
+- `requestCancel()` returns whether its cancellation request was accepted.
+- `cancel()` retains its void API; for work without a cancellation callback it does nothing.
+- Acceptance does not mean the worker has exited. `deinit()` still joins it.
+- Unconsumed owned results are released by the handle. A successful await transfers result ownership to the caller, who must free a byte buffer or deinitialize a returned session.
+
+Wait operations support cooperative cancellation. Navigation, evaluation, input, and artifact operations must finish or fail normally; requesting cancellation does not falsely report that their browser-side effects stopped.
+
+## Screenshots and tracing
+
+`session.screenshot(allocator, .png)` and `.jpeg` return the requested image bytes from Chromium. Capture errors propagate; no placeholder image or alternate-format fallback is returned.
+
+For tracing, call `session.base.startTracing()`, perform the work, and call `session.base.stopTracing(allocator)`. Async equivalents are also available. Stop waits for Chromium's completion event, reads the entire trace stream, closes it, and returns JSON containing `traceEvents`. It does not return the `Tracing.end` acknowledgement. Malformed data, protocol errors, data loss, timeouts, and the 256 MiB collection limit are reported as errors.
+
+## Console and exception callbacks
 
 ```zig
-const std = @import("std");
-const driver = @import("alldriver");
+var logs = session.log();
+try logs.onConsole(onConsole);
+try logs.onException(onException);
+// Later:
+logs.clearConsole();
+logs.clearException();
+```
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var session = try driver.modern.launchAuto(allocator, .{
-        .kinds = &.{ .chrome, .firefox, .lightpanda },
-        .allow_managed_download = false,
-        .profile_mode = .ephemeral,
-        .headless = true,
-    });
-    defer session.deinit();
+Callbacks receive `LogEntry { level, text, source }` from a dedicated observer, including events that arrive while no session command is running. They execute on the observer worker. Strings are borrowed only for the duration of the callback; copy any retained text and synchronize shared application state.
 
-    var page = session.page();
-    try page.navigate("https://example.com");
-    _ = try session.waitFor(.{ .dom_ready = {} }, .{ .timeout_ms = 30_000 });
+A callback may unsubscribe itself. Clearing a subscription does not revoke a callback already selected for delivery. **Do not destroy the session from one of its own callbacks**: teardown joins the observer. Arrange teardown on the owning thread after the callback returns.
+
+## Downloads
+
+Configure a caller-owned directory before starting downloads:
+
+```zig
+try session.setDownloadDirectory("downloads");
+var input = session.input();
+try input.click("a.download");
+
+const items = try session.listDownloads(allocator);
+defer session.freeDownloads(allocator, items);
+for (items) |item| {
+    // suggested_filename: the server/browser suggestion
+    // save_path: actual GUID-named destination
+    // completed: Chromium reported completion
+    // canceled: Chromium reported cancellation
+    _ = item;
 }
 ```
 
-## API Model
+The browser uses GUID filenames to avoid collisions. `suggested_filename` is metadata, not the saved basename. Poll fresh snapshots until the desired item is completed or canceled. Download events are consumed by a dedicated worker even while the session is idle. Each snapshot owns its array and strings; release all of them through `freeDownloads`.
 
-### Ownership
+Before configuration, listing returns `DownloadDirectoryNotConfigured`. Reader/protocol failures are returned rather than disguised as empty results. A directory change replaces the tracker and starts a new list. Teardown restores browser download defaults and leaves downloaded files in place. This configures Chromium's default browser context; use an isolated browser/profile when sharing download policy would be undesirable.
 
-- `discover(...) -> BrowserInstallList`
-- `discoverWebViews(...) -> WebViewRuntimeList`
-- Caller owns the returned lists and must call `.deinit()`.
-- `launchAuto(...)` / `launchAutoAsync(...)` run discovery with sane defaults and return a fully ready session.
+## Storage and session cache
 
-### Modern session domains
+The storage client provides cookies, local/session storage, typed cookie queries, and `buildCookieHeaderForUrl`. Cookie changes emit `cookie_updated` after successful writes.
 
-- `page()`, `runtime()`, `network()`, `input()`, `log()`, `storage()`, `contexts()`, `targets()`
-- `launch`, `launchAuto`, `attach`, and webview attach/launch all wait for protocol readiness; no manual CDP/BiDi session bootstrap is required.
+`SessionCacheStore` provides `open`, `load`, `save`, `saveWithOptions`, `invalidate`, and `cleanupExpired`. Presets are `.minimal` (cookies), `.http_session` (cookies and user agent), and `.rich_state` (cookies, user agent, storage, URL, and extra headers). `SessionCachePayloadMask` selects individual payloads. Cache persistence is not a full browser-profile snapshot.
 
-### Waits and cancellation
+## Network and lifecycle events
 
-- `waitFor(target, opts)` and `waitForAsync(target, opts)`
-- `waitForCookie(query, opts)` and `waitForCookieAsync(query, opts)`
-- Targets:
-  - `dom_ready`
-  - `network_idle`
-  - `selector_visible`
-  - `url_contains`
-  - `cookie_present`
-  - `storage_key_present`
-  - `js_truthy`
-- Use `CancelToken` for cooperative cancellation.
-- `addInitScript(script)` / `removeInitScript(id)` install/remove pre-document scripts (CDP: `Page.addScriptToEvaluateOnNewDocument`, BiDi: `script.addPreloadScript`).
+The network client supports request/response callbacks, interception rules, `records(allocator, include_bodies)`, `frames`, `serviceWorkers`, and navigation snapshots. Body inclusion attempts protocol retrieval and depends on the browser retaining the response. Snapshot capture includes DOM HTML, headers, cookies, and web storage.
 
-### Events
+`onEvent(filter, callback)` returns a subscription ID removed by `offEvent(id)`. Event kinds cover navigation/reload, waits, actions, network observations, challenge heuristics, and cookie changes. Empty `filter.kinds` selects all kinds. Domain filters match exact hosts or subdomains case-insensitively; events without a domain are not domain-filtered. Failure and cancellation are separate from successful completion.
 
-- `onEvent(filter, callback)` / `offEvent(id)`
-- Event kinds:
-  - Navigation/reload: `navigation_started`, `navigation_completed`, `navigation_failed`, `reload_started`, `reload_completed`, `reload_failed`
-  - Deterministic milestones: `response_received`, `dom_ready`, `scripts_settled`
-  - Wait lifecycle: `wait_started`, `wait_satisfied`, `wait_timeout`, `wait_canceled`, `wait_failed`
-  - Action lifecycle: `action_started`, `action_completed`, `action_failed`
-  - Network observation: `network_request_observed`, `network_response_observed`
-  - Challenge/cookie: `challenge_detected`, `challenge_solved`, `cookie_updated`
-- Emission semantics:
-  - `navigation_started` fires before each navigate attempt, including attempts that later return an error.
-  - `navigation_completed` fires only after navigate succeeds; failed attempts emit `navigation_failed`.
-  - `reload_started`/`reload_completed`/`reload_failed` mirror reload lifecycle.
-  - `reload()` also emits `navigation_started`/`navigation_completed` (or `navigation_failed`) with `cause=.reload`.
-  - `wait_*` hooks are emitted by `waitFor`/`waitForAsync` for start, success, timeout, cancellation, and failures.
-  - `action_*` hooks are emitted around `click`, `typeText`, and `evaluate`.
-  - `network_*` hooks are emitted when request/response observation callbacks receive events and include `headers_json`.
-  - Milestone hooks are emitted in deterministic order: `response_received` -> `dom_ready` -> `scripts_settled`.
-  - `challenge_detected` and `challenge_solved` are emitted from wait polling when challenge heuristics toggle state.
-  - `cookie_updated` fires after successful cookie writes and includes `change` + `source` metadata.
-- Filter semantics:
-  - `EventFilter.kinds = &.{}` subscribes to all kinds.
-  - `EventFilter.domain` is case-insensitive, matches exact host or subdomain suffix, and is applied after kind filtering.
-  - Domain source is URL host for navigation/reload/network/challenge events and cookie domain for `cookie_updated`.
-  - Domain filtering is skipped for domainless events (`wait_*`, `action_*`).
+Use `setTimeoutPolicy`, `timeoutPolicy`, and `lastDiagnostic` for operation policy and failures. `driver.modern.setHardErrorLogger` replaces the default diagnostic sink. The library does not provide detection-bypass or challenge-solving primitives.
 
-### Timeouts and diagnostics
+## Discovery and deferred surfaces
 
-- `setTimeoutPolicy`, `timeoutPolicy`, `lastDiagnostic`
-- `setHardErrorLogger` (register custom hard-error sink; default sink writes to stderr)
+Discovery searches explicit paths, managed cache, PATH, catalog paths, and host probes, then ranks and deduplicates candidates. A catalog match is discovery evidence only. Managed provisioning and the dedicated Lightpanda example remain separate from Chromium runtime qualification. WebView2, Electron, and Android bridge APIs likewise need their own runtime tests before relying on them.
 
-### Cookie helpers
+## Validation
 
-- `queryCookies`
-- `buildCookieHeaderForUrl`
-
-### Network/frame/worker telemetry
-
-- `session.network().records(allocator, include_bodies)`
-  - Includes redirect chains and status timeline points per request.
-  - `include_bodies=true` attempts full response-body capture via protocol body endpoints when available.
-- `session.network().frames(allocator)` for frame tree introspection.
-- `session.network().serviceWorkers(allocator)` for service-worker runtime introspection.
-- `session.network().captureSnapshot(allocator, phase, url_override)`
-- `session.network().navigationSnapshots(allocator)` for automatically captured bundles at navigation phases.
-  - Bundle payload: DOM HTML + response headers + cookies + localStorage + sessionStorage.
-
-### Session cache
-
-- `SessionCacheStore.open/load/save/saveWithOptions/invalidate/cleanupExpired`
-- Payload presets:
-  - `.minimal` (cookies)
-  - `.http_session` (cookies + user agent)
-  - `.rich_state` (cookies + user agent + storage + URL + extra headers)
-- Use `SessionCachePayloadMask` for explicit include combinations.
-
-## Support Matrix
-
-### Protocol contract
-
-- `modern` is the only public session namespace.
-- Supported transports: `cdp_ws`, `bidi_ws`.
-- WebDriver transport is not part of the supported contract.
-
-### Browser coverage
-
-- Chromium family (CDP): Chrome, Edge, Brave, Vivaldi, Opera GX, Arc, Sidekick, Shift, Epic, DuckDuckGo desktop variants, Lightpanda.
-- Gecko family (BiDi): Firefox, Tor, Mullvad, LibreWolf, Pale Moon.
-
-### Not in the modern contract
-
-- Safari/WebKit (requires WebDriver path, out of scope).
-- SigmaOS/unknown shells without guaranteed CDP/BiDi surfaces.
-
-### Webview coverage
-
-- WebView2 on Windows (CDP)
-- Electron on Windows/macOS/Linux (CDP)
-- Android WebView bridge from host tooling (CDP)
-
-## Path Discovery
-
-`discover()` uses deterministic precedence:
-
-1. Explicit path (`BrowserPreference.explicit_path`)
-2. Managed cache (always scanned; default fixed cache root per OS)
-3. `PATH` executable scan
-4. Known path catalog (`src/catalog/path_table.zig`)
-5. OS probes (Windows/macOS/Linux providers)
-
-Sorting:
-
-1. Descending score
-2. Descending version (if present)
-3. Ascending lexicographic path
-
-Deduplication uses normalized path keys (case-insensitive on Windows).
-
-## Managed Browser Cache
-
-Managed install supports:
-
-- Direct payloads: `file://`, `http://`, `https://`
-- Archive payloads: `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.xz`, `.txz`
-- SHA-256 verification with `expected_sha256_hex`
-- Optional `archive_executable_name` for non-canonical archive layouts
-
-Notes:
-
-- Managed downloads and extraction are implemented with Zig stdlib (`std.http`, `std.zip`, `std.tar`, `std.compress`).
-- Default managed cache root (when `BrowserPreference.managed_cache_dir` is not set):
-  - Linux: `$XDG_CACHE_HOME/alldriver/browsers` (fallback: `$HOME/.cache/alldriver/browsers`)
-  - macOS: `$HOME/Library/Caches/alldriver/browsers`
-  - Windows: `%LOCALAPPDATA%\\alldriver\\browsers`
-- Discovery always checks managed cache. `allow_managed_download` only controls whether provisioning/download workflows are permitted.
-
-### Runtime Lightpanda Provisioning
-
-- API: `driver.lightpanda.downloadLatest(allocator, opts)`
-  - `opts.cache_dir`: optional managed cache root override
-  - `opts.tag`: optional GitHub release tag; `null` means latest release
-  - `opts.expected_sha256_hex`: optional payload checksum verification
-- Tools: `zig build tools -- download-lightpanda [--cache-dir=...] [--tag=...] [--sha256=...]`
-- The downloader resolves release assets for the current runtime OS/arch and installs into managed cache so normal `discover()` picks it up.
-
-## Runtime Notes
-
-- Browser launch waits for local debug endpoint readiness before returning a session, bounded by `TimeoutPolicy.launch_ms`.
-- `driver.modern.launch*` and `driver.modern.attach*` return only after protocol readiness checks complete.
-
-## Compile-Time Extensions
-
-Hooks are defined in `src/extensions/api.zig` and are statically linked:
-
-- `score_install`: adds per-install score adjustments during discovery ranking.
-- `launch_args`: receives computed launch args and returns the final argv slice used for process spawn.
-- `session_init`: called once after protocol readiness is established for a newly launched session.
-- `event_observer`: generic extension event sink for explicit `notifyEvent(name, payload_json)` calls.
-
-Dynamic runtime plugin loading is intentionally out of scope.
-
-## Adversarial Gate Semantics
-
-- Default objective: undetected.
-- Any detected automation signal => FAIL.
-- Any discovered target that cannot launch/probe => FAIL.
-- Unsupported/not-installed targets => explicit SKIP.
-
-## VM Matrix Workflow
-
-Shared VM lab default root: `/home/a/vm_lab` (`VM_LAB_DIR` override).
-
-Prerequisites:
-
-- `qemu-system-x86_64`
-- `qemu-img`
-- `ssh`
-- `rsync`
-- `curl`
-- `ssh-keygen`
-
-Core commands:
-
-```bash
-zig build tools -- vm-check-prereqs
-zig build tools -- vm-image-sources --check
-zig build tools -- vm-init-lab --project alldriver
-zig build tools -- vm-create-linux --project alldriver --name linux-matrix
-zig build tools -- vm-start-linux --project alldriver --name linux-matrix
-zig build tools -- vm-run-linux-matrix --project alldriver --name linux-matrix
-zig build tools -- vm-register-host --name macos-host --os macos --arch arm64 --address user@mac.example
-zig build tools -- vm-register-host --name windows-host --os windows --arch x64 --address user@win.example
-zig build tools -- vm-run-remote-matrix --project alldriver --host macos-host
-zig build tools -- vm-run-remote-matrix --project alldriver --host windows-host
-zig build tools -- vm-ga-collect-and-bundle --project alldriver --release-id v1-ga --linux-host linux-matrix --macos-host macos-host --windows-host windows-host
-
-# Runtime Lightpanda provisioning
-zig build tools -- download-lightpanda
+```sh
+zig build
+zig build test
+zig build examples
+zig build test-chromium
 ```
 
-## VM Image Sources
+`test-chromium` is a required real-Brave gate, including local browser fixtures and behavior/content assertions. It fails if its required browser is missing. Ordinary `test` may skip opt-in browser suites; a unit-only pass is not an integration pass. Cross-target builds establish compilation only; they do not establish native Windows, macOS, or mobile browser behavior.
 
-Official upstream pages:
-
-- Ubuntu cloud images:
-  - <https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img>
-  - <https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img>
-  - <https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img>
-  - <https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img>
-- Windows:
-  - <https://www.microsoft.com/software-download/windows11>
-  - <https://www.microsoft.com/software-download/windows11arm64>
-  - <https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise>
-- macOS:
-  - <https://support.apple.com/en-us/102662>
-  - <https://developer.apple.com/documentation/virtualization>
-  - <https://support.apple.com/guide/deployment/dep5980c3e3d/web>
-
-## External Binary Dependencies
-
-### Core runtime
-
-- Browser binaries for targets you automate
-- Optional Lightpanda runtime provisioning via `driver.lightpanda.downloadLatest(...)`
-- Webview runtimes as needed: `msedgewebview2`, `electron`
-- Android bridge tools: `adb`, `shizuku` (or `rish`)
-
-### Tooling / matrix / release
-
-- `zig`, `git`, `bash`, `tar`, `date`, `which`/`where`, `chmod`
-- `gpg` (signing)
-- `ssh`, `scp`, `rsync` (remote matrix orchestration)
-- `qemu-system-x86_64`, `qemu-img`, `curl`, `ssh-keygen` (VM flows)
-- `sha256sum` (optional verification tooling)
-
-## Known Limitations
-
-- Feature behavior still depends on browser/runtime endpoint availability and versions.
-- No Cloudflare-specific solver API is provided in core.
-- Browser/session pooling is not part of the current architecture.
-- HAR-like full network export is deferred until persistent event-stream storage is first-class.
-- Domain profile templates are application policy and intentionally out of core.
-- Android bridge coverage is bridge-smoke scoped in release gates.
-- Session cache is optimized for HTTP session reuse; full profile filesystem snapshots are out of scope.
-- Strict GA requires signed manual matrix evidence and passing behavioral + adversarial checks.
+See [contributing](CONTRIBUTING.md) for test expectations and [examples](examples/README.md) for compiled API usage.

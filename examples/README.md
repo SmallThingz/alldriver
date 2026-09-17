@@ -1,6 +1,6 @@
 # Examples
 
-This folder contains many focused usage examples for `alldriver`.
+These examples target Zig 0.16.0. Desktop launch examples select Chromium browsers; compilation alone does not validate their runtime behavior.
 
 ## Build All Examples
 
@@ -8,13 +8,13 @@ This folder contains many focused usage examples for `alldriver`.
 zig build examples
 ```
 
-Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/examples`.
+Built executables are written to `zig-out/examples`.
 
 ## Example Index
 
 - `01_discover.zig`: discover installed browsers and print scored candidates.
 - `02_launch_and_navigate.zig`: auto-discover and launch with sane defaults, then navigate/wait/evaluate.
-- `03_attach_existing_endpoint.zig`: attach to an existing CDP/BiDi endpoint.
+- `03_attach_existing_endpoint.zig`: attach to an existing CDP endpoint.
 - `04_dom_interactions_and_waits.zig`: DOM interaction flow using target-based waits (`dom_ready`, `selector_visible`).
 - `05_network_interception.zig`: register request/response observers and interception rules.
 - `06_cookies_and_storage.zig`: cookie write plus localStorage read/write via JS.
@@ -31,16 +31,20 @@ Built executables are written to `/home/a/projects/zig/browser_driver/zig-out/ex
 - `18_cookie_header_export.zig`: query cookies with typed filters and build canonical `Cookie` headers for URLs.
 - `19_session_cache.zig`: persist/load session state with payload presets and custom payload masks.
 - `20_timeout_and_cancel.zig`: apply timeout policies and cooperative cancellation for waits.
-- `21_lightpanda_runtime_download.zig`: download/install latest Lightpanda at runtime and verify discovery.
+- `21_lightpanda_runtime_download.zig`: Lightpanda provisioning API example, outside the supported Chromium scope.
 - `22_forensic_timeline_snapshot.zig`: forensic debugging flow for request/response timelines, redirect/status chains, frame/service-worker introspection, and phase snapshots.
 
 ## Notes
 
 - Launch-based examples use `driver.modern.launchAsync(...).await(...)` so control is returned only after launch/connection completes or times out.
-- Some examples require installed browsers and local debug endpoints.
+- Run `zig build test-chromium` for the mandatory real-Brave behavior gate; it fails if the required browser is unavailable.
+- Examples require installed Chromium browsers or an explicitly configured CDP endpoint.
+- Webview/mobile and Lightpanda examples are retained API demonstrations, not validated platform-support claims. Firefox/BiDi is deferred.
 - Mobile bridge examples require host tooling (`adb` or `shizuku`/`rish`) and forwarded endpoints.
 - Launch APIs support `ignore_tls_errors = true` for environments with self-signed or invalid certificates.
 - Examples are designed as minimal building blocks and can be composed into larger automation harnesses.
 - Profile mode semantics:
   `.persistent` requires `profile_dir` and keeps data at that path.
   `.ephemeral` creates an isolated disposable profile directory that is deleted on session teardown.
+
+Async handles must be deinitialized. `requestCancel()` returns whether cooperative cancellation was accepted; `isCancelable()` reports availability. An await timeout does not stop an operation. Free returned buffers, and deinitialize sessions whose ownership you obtained through await. See [ownership and artifacts](../DOCUMENTATION.md) for input, trace, log callback, and download contracts.

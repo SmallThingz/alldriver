@@ -5,7 +5,7 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     var installs = try driver.modern.discover(allocator, .{
-        .kinds = &.{ .chrome, .edge, .firefox },
+        .kinds = &.{ .chrome, .edge, .brave },
         .allow_managed_download = false,
     }, .{
         .include_path_env = true,

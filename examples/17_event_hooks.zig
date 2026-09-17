@@ -24,7 +24,7 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     var installs = try driver.discover(allocator, .{
-        .kinds = &.{ .chrome, .edge, .firefox },
+        .kinds = &.{ .chrome, .edge, .brave },
         .allow_managed_download = false,
     }, .{});
     defer installs.deinit();

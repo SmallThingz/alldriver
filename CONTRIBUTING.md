@@ -1,70 +1,20 @@
 # Contributing
 
-## Development Setup
+Use Zig **0.16.0**, Git, and an installed Brave browser for the required Chromium integration gate.
 
-Requirements:
-
-- Zig `0.15.x`
-- Git
-- Bash (for local command examples)
-
-Clone and validate:
-
-```bash
-git clone https://github.com/SmallThingz/alldriver.git
-cd alldriver
-zig build test
-zig build examples
-zig build tools -- self-test
-```
-
-## Workflow
-
-1. Create a branch with prefix `codex/` or your project branch convention.
-2. Keep changes scoped and commit in small logical chunks.
-3. Add tests for behavioral changes.
-4. Run validation locally before opening PR.
-
-Recommended checks:
-
-```bash
+```sh
 zig build
 zig build test
 zig build examples
-zig build tools -- self-test
+zig build test-chromium
 ```
 
-For release/tooling changes:
+Keep changes scoped and commit coherent steps using conventional commit prefixes such as `fix:`, `feat:`, and `refactor:`. Preserve typed failures and allocator ownership. Never replace a failed protocol action with invented success or placeholder output.
 
-```bash
-zig build tools -- adversarial-detection-gate --allow-missing-browser=1
-zig build production-gate
-```
+Tests must establish observable behavior. Unit tests should cover parsing, ownership, malformed inputs, and allocation failures where relevant. Browser changes require real fixture assertions: default actions and trusted events for input, actual pixels/formats for screenshots, complete trace data, persistent storage, and downloaded file contents. Include lifecycle, concurrent completion, and failure cases. The Chromium gate fails on a missing browser; do not convert that failure into a skip to make a release pass.
 
-## Coding Guidelines
+Chromium/CDP is the current supported scope. Firefox/BiDi and other engines remain deferred. Compiling a target, discovering a browser, or exercising a mocked protocol is not runtime qualification. Report the actual platform/browser and distinguish unit, compile, and real-browser results.
 
-- Prefer CDP/BiDi modern API paths.
-- Preserve typed errors and capability checks (no silent no-op behavior).
-- Avoid introducing runtime plugin/dynamic loading patterns.
-- Keep docs in sync with code behavior.
-- Do not add bot-detection bypass primitives.
+Build all examples after API changes. For package changes, verify a clean exported package includes every path referenced by `build.zig` and can build independently of the checkout.
 
-## Tests
-
-- Unit tests should be deterministic and isolated.
-- Integration/behavioral tests should be opt-in and guard on host/tool availability.
-- If adding new tool commands, include parser/contract tests when possible.
-
-## Documentation
-
-- Keep `/home/a/projects/zig/browser_driver/README.md` concise.
-- Keep `/home/a/projects/zig/browser_driver/DOCUMENTATION.md` as the canonical detailed doc.
-
-## Pull Requests
-
-PRs should include:
-
-- what changed
-- why it changed
-- risk/compatibility notes
-- exact validation commands run and outcomes
+Keep [README.md](README.md) concise and [DOCUMENTATION.md](DOCUMENTATION.md) accurate. Use relative repository links. PR descriptions should briefly state what changed.
