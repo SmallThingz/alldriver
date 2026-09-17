@@ -98,7 +98,7 @@ pub const Condition = struct {
 };
 
 pub const CwdDir = struct {
-    inner: std.Io.Dir = std.Io.Dir.cwd(),
+    inner: std.Io.Dir,
 
     pub fn access(self: CwdDir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
         return self.inner.access(io(), sub_path, options);
@@ -183,7 +183,7 @@ pub const CwdDir = struct {
 };
 
 pub fn cwd() CwdDir {
-    return .{};
+    return .{ .inner = std.Io.Dir.cwd() };
 }
 
 pub fn openDirAbsolute(path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
