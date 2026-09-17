@@ -181,12 +181,7 @@ pub fn attach(allocator: std.mem.Allocator, endpoint: []const u8) !Session {
         return attachWithAdapter(allocator, endpoint, .bidi, .gecko, .firefox);
     }
     if (std.mem.startsWith(u8, endpoint, "ws://")) {
-        // Generic websocket endpoint may be CDP or BiDi. Try CDP first, then BiDi.
-        return attachWithAdapter(allocator, endpoint, .cdp, .chromium, .chrome) catch |cdp_err| {
-            return attachWithAdapter(allocator, endpoint, .bidi, .gecko, .firefox) catch {
-                return cdp_err;
-            };
-        };
+        return attachWithAdapter(allocator, endpoint, .cdp, .chromium, .chrome);
     }
     return error.UnsupportedProtocol;
 }

@@ -67,6 +67,8 @@ pub const Session = struct {
     challenge_lock: compat.Mutex = .{},
     network_lock: compat.Mutex = .{},
     network_records: std.ArrayList(types.NetworkRecord) = .empty,
+    network_inflight: std.StringHashMapUnmanaged(void) = .{},
+    network_last_activity_ms: i64 = 0,
     frames_lock: compat.Mutex = .{},
     frames: std.ArrayList(types.FrameInfo) = .empty,
     service_workers_lock: compat.Mutex = .{},
@@ -118,6 +120,9 @@ pub const Session = struct {
         events.clear(self);
         self.event_subscriptions.deinit(self.allocator);
         network.deinitTelemetry(self);
+        var inflight_keys = self.network_inflight.keyIterator();
+        while (inflight_keys.next()) |key| self.allocator.free(key.*);
+        self.network_inflight.deinit(self.allocator);
 
         self.clearDiagnostic();
         for (self.diagnostic_owned_strings.items) |value| self.allocator.free(value);
@@ -434,16 +439,22 @@ pub const Session = struct {
 
     pub fn recordDiagnostic(self: *Session, diag: types.Diagnostic) void {
         const code = self.allocator.dupe(u8, diag.code) catch return;
-        errdefer self.allocator.free(code);
+        var transferred = false;
+        defer if (!transferred) self.allocator.free(code);
         const message = self.allocator.dupe(u8, diag.message) catch return;
-        errdefer self.allocator.free(message);
+        defer if (!transferred) self.allocator.free(message);
         const transport = if (diag.transport) |t| self.allocator.dupe(u8, t) catch null else null;
+        defer if (!transferred) {
+            if (transport) |value| self.allocator.free(value);
+        };
 
         self.diagnostic_lock.lock();
         defer self.diagnostic_lock.unlock();
-        self.diagnostic_owned_strings.append(self.allocator, code) catch return;
-        self.diagnostic_owned_strings.append(self.allocator, message) catch return;
-        if (transport) |value| self.diagnostic_owned_strings.append(self.allocator, value) catch return;
+        self.diagnostic_owned_strings.ensureUnusedCapacity(self.allocator, if (transport != null) 3 else 2) catch return;
+        self.diagnostic_owned_strings.appendAssumeCapacity(code);
+        self.diagnostic_owned_strings.appendAssumeCapacity(message);
+        if (transport) |value| self.diagnostic_owned_strings.appendAssumeCapacity(value);
+        transferred = true;
         self.last_diagnostic_value = .{
             .phase = diag.phase,
             .code = code,
@@ -1293,6 +1304,19 @@ test "click failure emits action_started and action_failed hooks" {
     try std.testing.expectEqual(types.ActionKind.click, session_event_capture.last_action_started_kind.?);
     try std.testing.expectEqual(types.ActionKind.click, session_event_capture.last_action_failed_kind.?);
     try std.testing.expectEqualStrings("UnsupportedCapability", session_event_capture.last_action_failed_error.?);
+}
+
+test "diagnostic allocation failures retain ownership and release partial strings" {
+    for (1..7) |failure_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = failure_index });
+        var session = try makeTestSession(failing.allocator(), .{});
+        defer session.deinit();
+        session.recordDiagnostic(.{ .phase = .overall, .code = "example", .message = "diagnostic", .transport = "cdp" });
+        if (session.lastDiagnostic()) |diagnostic| {
+            try std.testing.expectEqualStrings("example", diagnostic.code);
+            try std.testing.expectEqualStrings("diagnostic", diagnostic.message);
+        }
+    }
 }
 
 test "evaluate failure emits action_failed and records diagnostic" {
