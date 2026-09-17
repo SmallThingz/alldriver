@@ -11,6 +11,7 @@ pub const DownloadItem = struct {
     suggested_filename: []const u8,
     save_path: []const u8,
     completed: bool,
+    canceled: bool = false,
 };
 
 pub fn screenshot(session: *Session, allocator: std.mem.Allocator, format: ScreenshotFormat) ![]u8 {
@@ -41,7 +42,10 @@ pub fn stopTracing(session: *Session, allocator: std.mem.Allocator) ![]u8 {
 
 pub fn listDownloads(session: *Session, allocator: std.mem.Allocator) ![]DownloadItem {
     if (!session.supports(.downloads)) return error.UnsupportedCapability;
-    return allocator.alloc(DownloadItem, 0);
+    session.state_lock.lock();
+    defer session.state_lock.unlock();
+    const tracker = session.download_tracker orelse return error.DownloadDirectoryNotConfigured;
+    return tracker.list(allocator);
 }
 
 fn extractBase64Screenshot(allocator: std.mem.Allocator, payload: []const u8) !?[]u8 {
