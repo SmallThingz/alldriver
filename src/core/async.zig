@@ -42,6 +42,8 @@ pub fn AsyncResult(comptime T: type) type {
             destroyer: Destroyer,
             canceler: ?Canceler,
         ) !*Self {
+            // Ownership of ctx transfers on entry, including every failure.
+            errdefer destroyer(allocator, ctx);
             const self = try allocator.create(Self);
             errdefer allocator.destroy(self);
             self.* = .{
@@ -51,7 +53,6 @@ pub fn AsyncResult(comptime T: type) type {
                 .canceler = canceler,
                 .ctx = ctx,
             };
-            errdefer destroyer(allocator, ctx);
 
             self.thread = try std.Thread.spawn(.{}, worker, .{self});
             return self;
@@ -88,40 +89,65 @@ pub fn AsyncResult(comptime T: type) type {
             }
         }
 
-        pub fn cancel(self: *Self) void {
+        /// Request cooperative cancellation. Returns false when the operation
+        /// cannot stop safely, or has already completed. A true result means
+        /// the cancellation callback ran; deinit still joins the worker.
+        pub fn requestCancel(self: *Self) bool {
             self.mutex.lock();
             defer self.mutex.unlock();
-            if (self.state == .pending) {
-                if (self.canceler) |canceler| {
-                    canceler(self.allocator, self.ctx);
-                }
-                self.state = .canceled;
-                self.cond.broadcast();
-            }
+            if (self.state != .pending) return false;
+            const canceler = self.canceler orelse return false;
+            canceler(self.allocator, self.ctx);
+            self.state = .canceled;
+            self.cond.broadcast();
+            return true;
         }
 
+        /// Non-cooperative operations continue and retain their actual result.
+        /// Use requestCancel when the caller needs to know whether cancellation
+        /// was accepted. Cancellation never implies that the worker has exited.
+        pub fn cancel(self: *Self) void {
+            _ = self.requestCancel();
+        }
+
+        pub fn isCancelable(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.state == .pending and self.canceler != null;
+        }
+
+        /// Joins the worker and releases an unconsumed owned byte-buffer result.
+        /// Successful await transfers that buffer to the caller exactly once.
         pub fn deinit(self: *Self) void {
             if (self.thread) |t| t.join();
+            switch (self.state) {
+                .completed => |value| self.discardResult(value),
+                else => {},
+            }
             self.allocator.destroy(self);
+        }
+
+        fn discardResult(self: *Self, value: T) void {
+            // Library buffer-producing runners allocate with this allocator.
+            // Other result types are values and carry no implicit ownership.
+            if (T == []u8) self.allocator.free(value);
         }
 
         fn worker(self: *Self) void {
             const result = self.runner(self.allocator, self.ctx);
-            self.destroyer(self.allocator, self.ctx);
-
             self.mutex.lock();
             defer self.mutex.unlock();
 
+            // canceler and destroyer share this lock: cancellation must never
+            // inspect a context after its destroyer has reclaimed it.
             if (self.state == .canceled) {
-                self.cond.broadcast();
-                return;
-            }
-
-            if (result) |value| {
+                if (result) |value| self.discardResult(value) else |_| {}
+            } else if (result) |value| {
                 self.state = .{ .completed = value };
             } else |err| {
                 self.state = .{ .failed = err };
             }
+            self.destroyer(self.allocator, self.ctx);
             self.cond.broadcast();
         }
     };
@@ -178,7 +204,7 @@ test "async await timeout" {
     try std.testing.expectError(error.Timeout, op.await(1));
 }
 
-test "async cancel before completion" {
+test "async operation without cooperative cancellation retains its outcome" {
     const allocator = std.testing.allocator;
 
     const Ctx = struct {};
@@ -200,8 +226,10 @@ test "async cancel before completion" {
     var op = try AsyncResult(u32).spawn(allocator, ctx, Runner.run, Runner.destroy);
     defer op.deinit();
 
+    try std.testing.expect(!op.isCancelable());
+    try std.testing.expect(!op.requestCancel());
     op.cancel();
-    try std.testing.expectError(error.Canceled, op.await(1000));
+    try std.testing.expectEqual(@as(u32, 2), try op.await(1000));
 }
 
 test "async double await" {
@@ -228,4 +256,103 @@ test "async double await" {
     const first = try op.await(1000);
     try std.testing.expectEqual(@as(u32, 42), first);
     try std.testing.expectError(error.AlreadyConsumed, op.await(1000));
+}
+
+test "cooperative cancellation disposes a late owned result and destroys context once" {
+    const allocator = std.testing.allocator;
+    const State = struct {
+        release: std.atomic.Value(bool) = .init(false),
+        canceled: std.atomic.Value(u32) = .init(0),
+        destroyed: std.atomic.Value(u32) = .init(0),
+    };
+    const Ctx = struct { state: *State };
+    const Runner = struct {
+        fn run(a: std.mem.Allocator, p: *anyopaque) anyerror![]u8 {
+            const ctx: *Ctx = @ptrCast(@alignCast(p));
+            while (!ctx.state.release.load(.acquire)) compat.sleepMs(1);
+            // A cooperative operation can finish successfully concurrently with
+            // cancellation; the unpublished result must still be reclaimed.
+            return a.dupe(u8, "late result");
+        }
+        fn cancel(_: std.mem.Allocator, p: *anyopaque) void {
+            const ctx: *Ctx = @ptrCast(@alignCast(p));
+            _ = ctx.state.canceled.fetchAdd(1, .monotonic);
+            ctx.state.release.store(true, .release);
+        }
+        fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
+            const ctx: *Ctx = @ptrCast(@alignCast(p));
+            _ = ctx.state.destroyed.fetchAdd(1, .monotonic);
+            a.destroy(ctx);
+        }
+    };
+    var state: State = .{};
+    const ctx = try allocator.create(Ctx);
+    ctx.* = .{ .state = &state };
+    const op = try AsyncResult([]u8).spawnWithCancel(allocator, ctx, Runner.run, Runner.destroy, Runner.cancel);
+    try std.testing.expect(op.isCancelable());
+    try std.testing.expect(op.requestCancel());
+    try std.testing.expect(!op.requestCancel());
+    try std.testing.expectError(error.Canceled, op.await(1000));
+    op.deinit();
+    try std.testing.expectEqual(@as(u32, 1), state.canceled.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), state.destroyed.load(.acquire));
+}
+
+test "owned results are freed when abandoned and transferred only once when awaited" {
+    const allocator = std.testing.allocator;
+    const Runner = struct {
+        fn run(a: std.mem.Allocator, _: *anyopaque) anyerror![]u8 {
+            return a.dupe(u8, "owned");
+        }
+        fn destroy(_: std.mem.Allocator, _: *anyopaque) void {}
+    };
+    var context: u8 = 0;
+    const abandoned = try AsyncResult([]u8).spawn(allocator, &context, Runner.run, Runner.destroy);
+    abandoned.deinit();
+    const consumed = try AsyncResult([]u8).spawn(allocator, &context, Runner.run, Runner.destroy);
+    const result = try consumed.await(1000);
+    try std.testing.expectError(error.AlreadyConsumed, consumed.await(1000));
+    consumed.deinit();
+    try std.testing.expectEqualStrings("owned", result);
+    allocator.free(result);
+}
+
+test "cancel cannot access context while completion destroys it" {
+    const allocator = std.testing.allocator;
+    const State = struct {
+        destroying: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        cancel_called: std.atomic.Value(bool) = .init(false),
+    };
+    const Ctx = struct { state: *State };
+    const Runner = struct {
+        fn run(_: std.mem.Allocator, _: *anyopaque) anyerror!u32 {
+            return 19;
+        }
+        fn destroy(a: std.mem.Allocator, p: *anyopaque) void {
+            const ctx: *Ctx = @ptrCast(@alignCast(p));
+            ctx.state.destroying.store(true, .release);
+            while (!ctx.state.release.load(.acquire)) compat.sleepMs(1);
+            a.destroy(ctx);
+        }
+        fn cancel(_: std.mem.Allocator, p: *anyopaque) void {
+            const ctx: *Ctx = @ptrCast(@alignCast(p));
+            ctx.state.cancel_called.store(true, .release);
+        }
+        fn release(state: *State) void {
+            compat.sleepMs(20);
+            state.release.store(true, .release);
+        }
+    };
+    var state: State = .{};
+    const ctx = try allocator.create(Ctx);
+    ctx.* = .{ .state = &state };
+    const op = try AsyncResult(u32).spawnWithCancel(allocator, ctx, Runner.run, Runner.destroy, Runner.cancel);
+    defer op.deinit();
+    while (!state.destroying.load(.acquire)) compat.sleepMs(1);
+    const releaser = try std.Thread.spawn(.{}, Runner.release, .{&state});
+    defer releaser.join();
+    try std.testing.expect(!op.requestCancel());
+    try std.testing.expect(!state.cancel_called.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 19), try op.await(1000));
 }

@@ -467,16 +467,17 @@ pub const Session = struct {
 
     pub fn navigateAsync(self: *Session, url: []const u8) !*async_mod.AsyncResult(void) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             url: []u8,
         };
         const ctx = try self.allocator.create(Ctx);
-        ctx.* = .{
-            .session = self,
-            .url = try self.allocator.dupe(u8, url),
-        };
+        errdefer if (!transferred) self.allocator.destroy(ctx);
+        const owned_url = try self.allocator.dupe(u8, url);
+        errdefer if (!transferred) self.allocator.free(owned_url);
+        ctx.* = .{ .session = self, .url = owned_url };
 
         const Runner = struct {
             fn run(_: std.mem.Allocator, p: *anyopaque) anyerror!void {
@@ -491,18 +492,23 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult(void).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 
     pub fn clickAsync(self: *Session, selector: []const u8) !*async_mod.AsyncResult(void) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             selector: []u8,
         };
         const ctx = try self.allocator.create(Ctx);
-        ctx.* = .{ .session = self, .selector = try self.allocator.dupe(u8, selector) };
+        errdefer if (!transferred) self.allocator.destroy(ctx);
+        const owned_selector = try self.allocator.dupe(u8, selector);
+        errdefer if (!transferred) self.allocator.free(owned_selector);
+        ctx.* = .{ .session = self, .selector = owned_selector };
 
         const Runner = struct {
             fn run(_: std.mem.Allocator, p: *anyopaque) anyerror!void {
@@ -517,23 +523,26 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult(void).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 
     pub fn typeTextAsync(self: *Session, selector: []const u8, text: []const u8) !*async_mod.AsyncResult(void) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             selector: []u8,
             text: []u8,
         };
         const ctx = try self.allocator.create(Ctx);
-        ctx.* = .{
-            .session = self,
-            .selector = try self.allocator.dupe(u8, selector),
-            .text = try self.allocator.dupe(u8, text),
-        };
+        errdefer if (!transferred) self.allocator.destroy(ctx);
+        const owned_selector = try self.allocator.dupe(u8, selector);
+        errdefer if (!transferred) self.allocator.free(owned_selector);
+        const owned_text = try self.allocator.dupe(u8, text);
+        errdefer if (!transferred) self.allocator.free(owned_text);
+        ctx.* = .{ .session = self, .selector = owned_selector, .text = owned_text };
 
         const Runner = struct {
             fn run(_: std.mem.Allocator, p: *anyopaque) anyerror!void {
@@ -549,18 +558,23 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult(void).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 
     pub fn evaluateAsync(self: *Session, script: []const u8) !*async_mod.AsyncResult([]u8) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             script: []u8,
         };
         const ctx = try self.allocator.create(Ctx);
-        ctx.* = .{ .session = self, .script = try self.allocator.dupe(u8, script) };
+        errdefer if (!transferred) self.allocator.destroy(ctx);
+        const owned_script = try self.allocator.dupe(u8, script);
+        errdefer if (!transferred) self.allocator.free(owned_script);
+        ctx.* = .{ .session = self, .script = owned_script };
 
         const Runner = struct {
             fn run(_: std.mem.Allocator, p: *anyopaque) anyerror![]u8 {
@@ -575,6 +589,7 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult([]u8).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 
@@ -584,7 +599,8 @@ pub const Session = struct {
         opts: types.WaitOptions,
     ) !*async_mod.AsyncResult(types.WaitResult) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             target: types.WaitTarget,
@@ -592,9 +608,12 @@ pub const Session = struct {
             owned_cancel_token: ?*cancel.CancelToken = null,
         };
         const ctx = try self.allocator.create(Ctx);
+        errdefer if (!transferred) self.allocator.destroy(ctx);
+        const owned_target = try cloneWaitTarget(self.allocator, target);
+        errdefer if (!transferred) freeWaitTarget(self.allocator, owned_target);
         ctx.* = .{
             .session = self,
-            .target = try cloneWaitTarget(self.allocator, target),
+            .target = owned_target,
             .opts = opts,
             .owned_cancel_token = null,
         };
@@ -626,6 +645,7 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult(types.WaitResult).spawnWithCancel(
             self.allocator,
             ctx,
@@ -645,12 +665,14 @@ pub const Session = struct {
 
     pub fn screenshotAsync(self: *Session, format: artifacts.ScreenshotFormat) !*async_mod.AsyncResult([]u8) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct {
             session: *Session,
             format: artifacts.ScreenshotFormat,
         };
         const ctx = try self.allocator.create(Ctx);
+        errdefer if (!transferred) self.allocator.destroy(ctx);
         ctx.* = .{ .session = self, .format = format };
 
         const Runner = struct {
@@ -665,14 +687,17 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult([]u8).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 
     pub fn startTracingAsync(self: *Session) !*async_mod.AsyncResult(void) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct { session: *Session };
         const ctx = try self.allocator.create(Ctx);
+        errdefer if (!transferred) self.allocator.destroy(ctx);
         ctx.* = .{ .session = self };
 
         const Runner = struct {
@@ -687,14 +712,17 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult(void).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 
     pub fn stopTracingAsync(self: *Session) !*async_mod.AsyncResult([]u8) {
         beginAsyncOp(self);
-        errdefer endAsyncOp(self);
+        var transferred = false;
+        errdefer if (!transferred) endAsyncOp(self);
         const Ctx = struct { session: *Session };
         const ctx = try self.allocator.create(Ctx);
+        errdefer if (!transferred) self.allocator.destroy(ctx);
         ctx.* = .{ .session = self };
 
         const Runner = struct {
@@ -709,6 +737,7 @@ pub const Session = struct {
             }
         };
 
+        transferred = true;
         return async_mod.AsyncResult([]u8).spawn(self.allocator, ctx, Runner.run, Runner.destroy);
     }
 };
@@ -756,14 +785,21 @@ fn cloneWaitTarget(allocator: std.mem.Allocator, target: types.WaitTarget) !type
         .network_idle => .{ .network_idle = {} },
         .selector_visible => |selector| .{ .selector_visible = try allocator.dupe(u8, selector) },
         .url_contains => |needle| .{ .url_contains = try allocator.dupe(u8, needle) },
-        .cookie_present => |query| .{ .cookie_present = .{
-            .name = if (query.name) |name| try allocator.dupe(u8, name) else null,
-            .domain = if (query.domain) |domain| try allocator.dupe(u8, domain) else null,
-            .path = if (query.path) |path| try allocator.dupe(u8, path) else null,
-            .secure_only = query.secure_only,
-            .include_expired = query.include_expired,
-            .include_http_only = query.include_http_only,
-        } },
+        .cookie_present => |query| blk: {
+            const name = if (query.name) |v| try allocator.dupe(u8, v) else null;
+            errdefer if (name) |v| allocator.free(v);
+            const domain = if (query.domain) |v| try allocator.dupe(u8, v) else null;
+            errdefer if (domain) |v| allocator.free(v);
+            const path = if (query.path) |v| try allocator.dupe(u8, v) else null;
+            break :blk .{ .cookie_present = .{
+                .name = name,
+                .domain = domain,
+                .path = path,
+                .secure_only = query.secure_only,
+                .include_expired = query.include_expired,
+                .include_http_only = query.include_http_only,
+            } };
+        },
         .storage_key_present => |query| .{ .storage_key_present = .{
             .key = try allocator.dupe(u8, query.key),
             .area = query.area,
@@ -1315,4 +1351,75 @@ test "setCookie failure does not emit cookie_updated hook" {
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), session_event_capture.cookie_updated);
+}
+
+test "async setup allocation failures preserve another operation count and release partial context" {
+    const Method = enum { navigate, click, type_text, evaluate, wait, screenshot, start_trace, stop_trace };
+    const methods = std.meta.tags(Method);
+    const Runner = struct {
+        fn invoke(session: *Session, method: Method) !void {
+            switch (method) {
+                .navigate => {
+                    const op = try session.navigateAsync("https://example.test");
+                    op.deinit();
+                },
+                .click => {
+                    const op = try session.clickAsync("#target");
+                    op.deinit();
+                },
+                .type_text => {
+                    const op = try session.typeTextAsync("#target", "value");
+                    op.deinit();
+                },
+                .evaluate => {
+                    const op = try session.evaluateAsync("1+1");
+                    op.deinit();
+                },
+                .wait => {
+                    const op = try session.waitForAsync(.{ .cookie_present = .{ .name = "sid", .domain = "example.test", .path = "/" } }, .{});
+                    op.deinit();
+                },
+                .screenshot => {
+                    const op = try session.screenshotAsync(.png);
+                    op.deinit();
+                },
+                .start_trace => {
+                    const op = try session.startTracingAsync();
+                    op.deinit();
+                },
+                .stop_trace => {
+                    const op = try session.stopTracingAsync();
+                    op.deinit();
+                },
+            }
+        }
+    };
+    for (methods) |method| {
+        const allocations: usize = switch (method) {
+            .navigate, .click, .evaluate => 3,
+            .type_text => 4,
+            .wait => 6,
+            .screenshot, .start_trace, .stop_trace => 2,
+        };
+        for (0..allocations) |fail_index| {
+            var session = try makeTestSession(std.testing.allocator, .{
+                .dom = false,
+                .js_eval = false,
+                .network_intercept = false,
+                .tracing = false,
+                .downloads = false,
+                .bidi_events = false,
+            });
+            defer session.deinit();
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+            session.allocator = failing.allocator();
+            defer session.allocator = std.testing.allocator;
+            // A distinct existing operation must not be decremented when this
+            // operation fails to allocate its result handle.
+            session.active_async_ops = 1;
+            defer session.active_async_ops = 0;
+            try std.testing.expectError(error.OutOfMemory, Runner.invoke(&session, method));
+            try std.testing.expectEqual(@as(usize, 1), session.active_async_ops);
+        }
+    }
 }
