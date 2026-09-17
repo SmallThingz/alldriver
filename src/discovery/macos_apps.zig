@@ -84,11 +84,11 @@ fn scanApplicationDirs(allocator: std.mem.Allocator, kind: types.BrowserKind, hi
     }
 
     for (roots.items) |root| {
-        var dir = std.fs.openDirAbsolute(root, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = compat.openDirAbsolute(root, .{ .iterate = true }) catch continue;
+        defer dir.close(compat.io());
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(compat.io())) |entry| {
             if (entry.kind != .directory) continue;
             if (!std.mem.endsWith(u8, entry.name, ".app")) continue;
 
