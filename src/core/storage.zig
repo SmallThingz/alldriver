@@ -58,13 +58,26 @@ pub fn freeCookies(allocator: std.mem.Allocator, cookies: []Cookie) void {
 
 pub fn queryCookies(session: *Session, allocator: std.mem.Allocator, q: CookieQuery) ![]Cookie {
     const all = try getCookies(session, allocator);
+    return filterCookies(session, allocator, all, q);
+}
+
+pub fn queryCookiesCancelable(session: *Session, allocator: std.mem.Allocator, q: CookieQuery, timeout_ms: u32, token: ?*const @import("cancel.zig").CancelToken) ![]Cookie {
+    if (!session.supports(.dom)) return error.UnsupportedCapability;
+    if (session.transport != .cdp_ws) return error.UnsupportedProtocol;
+    const payload = try executor.callCdpCancelable(session, "Storage.getCookies", "{}", timeout_ms, token);
+    defer session.allocator.free(payload);
+    const all = try parseCookiesFromPayload(allocator, payload);
+    return filterCookies(session, allocator, all, q);
+}
+
+// Takes ownership of all on every path.
+fn filterCookies(session: *Session, allocator: std.mem.Allocator, all: []Cookie, q: CookieQuery) ![]Cookie {
     errdefer freeCookies(allocator, all);
-    session.state_lock.lock();
-    const current_url = if (session.current_url) |url|
-        allocator.dupe(u8, url) catch null
-    else
-        null;
-    session.state_lock.unlock();
+    const current_url = blk: {
+        session.state_lock.lock();
+        defer session.state_lock.unlock();
+        break :blk if (session.current_url) |url| try allocator.dupe(u8, url) else null;
+    };
     defer if (current_url) |url| allocator.free(url);
 
     const current_host = if (current_url) |url|

@@ -7,197 +7,139 @@ const types = @import("../types.zig");
 const strings = @import("../util/strings.zig");
 const compat = @import("../util/compat.zig");
 
+const Probe = struct {
+    session: *Session,
+    started_ms: i64,
+    deadline_ms: i64,
+    cancel_token: ?*const @import("cancel.zig").CancelToken,
+};
+
 pub fn waitFor(session: *Session, target: types.WaitTarget, opts: types.WaitOptions) !types.WaitResult {
     const start_ms = compat.milliTimestamp();
     const timeout_ms = opts.timeout_ms orelse session.timeout_policy.wait_ms;
     const poll_interval_ms = if (opts.poll_interval_ms == 0) @as(u32, 25) else opts.poll_interval_ms;
     const target_tag = std.meta.activeTag(target);
     var next_challenge_probe_ms = start_ms;
-
-    events.emit(session, .{
-        .wait_started = .{
-            .target = target_tag,
-            .timeout_ms = timeout_ms,
-            .poll_interval_ms = poll_interval_ms,
-        },
-    });
-
+    const probe: Probe = .{
+        .session = session,
+        .started_ms = start_ms,
+        .deadline_ms = start_ms + @as(i64, timeout_ms),
+        .cancel_token = opts.cancel_token,
+    };
+    events.emit(session, .{ .wait_started = .{ .target = target_tag, .timeout_ms = timeout_ms, .poll_interval_ms = poll_interval_ms } });
     while (true) {
         if (opts.cancel_token) |token| {
-            if (token.isCanceled()) {
-                const elapsed = elapsedSince(start_ms);
-                session.recordDiagnostic(.{
-                    .phase = .wait,
-                    .code = "canceled",
-                    .message = "wait canceled by token",
-                    .transport = @tagName(session.transport),
-                    .elapsed_ms = elapsed,
-                });
-                events.emit(session, .{
-                    .wait_canceled = .{
-                        .target = target_tag,
-                        .elapsed_ms = elapsed,
-                    },
-                });
-                return error.Canceled;
-            }
+            if (token.isCanceled()) return failWait(session, target_tag, start_ms, timeout_ms, error.Canceled);
         }
-
+        if (compat.milliTimestamp() >= probe.deadline_ms)
+            return failWait(session, target_tag, start_ms, timeout_ms, error.Timeout);
         const now_ms = compat.milliTimestamp();
         if (now_ms >= next_challenge_probe_ms) {
-            maybeEmitChallengeSignals(session) catch |err| {
-                const elapsed = elapsedSince(start_ms);
-                session.recordDiagnostic(.{
-                    .phase = .wait,
-                    .code = @errorName(err),
-                    .message = "wait failed",
-                    .transport = @tagName(session.transport),
-                    .elapsed_ms = elapsed,
-                });
-                events.emit(session, .{
-                    .wait_failed = .{
-                        .target = target_tag,
-                        .elapsed_ms = elapsed,
-                        .error_code = @errorName(err),
-                    },
-                });
-                return err;
-            };
+            maybeEmitChallengeSignals(&probe) catch |err| return failWait(session, target_tag, start_ms, timeout_ms, err);
             next_challenge_probe_ms = now_ms + 500;
         }
-        const matched = isTargetMatched(session, target, poll_interval_ms) catch |err| {
-            const elapsed = elapsedSince(start_ms);
-            session.recordDiagnostic(.{
-                .phase = .wait,
-                .code = @errorName(err),
-                .message = "wait failed",
-                .transport = @tagName(session.transport),
-                .elapsed_ms = elapsed,
-            });
-            events.emit(session, .{
-                .wait_failed = .{
-                    .target = target_tag,
-                    .elapsed_ms = elapsed,
-                    .error_code = @errorName(err),
-                },
-            });
-            return err;
-        };
+        const matched = isTargetMatched(&probe, target) catch |err| return failWait(session, target_tag, start_ms, timeout_ms, err);
+        if (opts.cancel_token) |token| {
+            if (token.isCanceled()) return failWait(session, target_tag, start_ms, timeout_ms, error.Canceled);
+        }
+        if (compat.milliTimestamp() >= probe.deadline_ms)
+            return failWait(session, target_tag, start_ms, timeout_ms, error.Timeout);
         if (matched) {
             const elapsed = elapsedSince(start_ms);
             session.clearDiagnostic();
-            events.emit(session, .{
-                .wait_satisfied = .{
-                    .target = target_tag,
-                    .elapsed_ms = elapsed,
-                },
-            });
-            return .{
-                .matched = true,
-                .elapsed_ms = elapsed,
-                .target = target_tag,
-            };
+            events.emit(session, .{ .wait_satisfied = .{ .target = target_tag, .elapsed_ms = elapsed } });
+            return .{ .matched = true, .elapsed_ms = elapsed, .target = target_tag };
         }
-
-        const elapsed = elapsedSince(start_ms);
-        if (elapsed >= timeout_ms) {
-            session.recordDiagnostic(.{
-                .phase = .wait,
-                .code = "timeout",
-                .message = "wait timeout reached",
-                .transport = @tagName(session.transport),
-                .elapsed_ms = elapsed,
-            });
-            events.emit(session, .{
-                .wait_timeout = .{
-                    .target = target_tag,
-                    .elapsed_ms = elapsed,
-                    .timeout_ms = timeout_ms,
-                },
-            });
-            return error.Timeout;
+        const wake = @min(probe.deadline_ms, compat.milliTimestamp() + @as(i64, poll_interval_ms));
+        while (compat.milliTimestamp() < wake) {
+            if (opts.cancel_token) |token| if (token.isCanceled()) break;
+            const remaining = wake - compat.milliTimestamp();
+            if (remaining <= 0) break;
+            compat.sleepMs(@intCast(@min(remaining, 25)));
         }
-
-        compat.sleepMs(poll_interval_ms);
     }
 }
 
-fn isTargetMatched(
-    session: *Session,
-    target: types.WaitTarget,
-    poll_interval_ms: u32,
-) !bool {
+fn failWait(session: *Session, target: types.WaitTargetTag, started: i64, timeout_ms: u32, err: anyerror) anyerror {
+    const elapsed = elapsedSince(started);
+    session.recordDiagnostic(.{
+        .phase = .wait,
+        .code = if (err == error.Timeout) "timeout" else if (err == error.Canceled) "canceled" else @errorName(err),
+        .message = if (err == error.Timeout) "wait timeout reached" else if (err == error.Canceled) "wait canceled by token" else "wait failed",
+        .transport = @tagName(session.transport),
+        .elapsed_ms = elapsed,
+    });
+    if (err == error.Timeout) {
+        events.emit(session, .{ .wait_timeout = .{ .target = target, .elapsed_ms = elapsed, .timeout_ms = timeout_ms } });
+    } else if (err == error.Canceled) {
+        events.emit(session, .{ .wait_canceled = .{ .target = target, .elapsed_ms = elapsed } });
+    } else {
+        events.emit(session, .{ .wait_failed = .{ .target = target, .elapsed_ms = elapsed, .error_code = @errorName(err) } });
+    }
+    return err;
+}
+
+fn isTargetMatched(probe: *const Probe, target: types.WaitTarget) !bool {
     return switch (target) {
-        .dom_ready => waitDomReadyStep(session, poll_interval_ms),
-        .network_idle => waitNetworkIdleStep(session),
-        .selector_visible => |selector| waitSelectorStep(session, selector, poll_interval_ms),
-        .url_contains => |needle| waitUrlContainsStep(session, needle),
-        .cookie_present => |query| waitCookieStep(session, query),
-        .storage_key_present => |query| waitStorageKeyStep(session, query),
-        .js_truthy => |script| waitJsTruthyStep(session, script),
+        .dom_ready => waitDomReadyStep(probe),
+        .network_idle => waitNetworkIdleStep(probe),
+        .selector_visible => |selector| waitSelectorStep(probe, selector),
+        .url_contains => |needle| waitUrlContainsStep(probe, needle),
+        .cookie_present => |query| waitCookieStep(probe, query),
+        .storage_key_present => |query| waitStorageKeyStep(probe, query),
+        .js_truthy => |script| waitJsTruthyStep(probe, script),
     };
 }
 
-fn waitDomReadyStep(session: *Session, poll_interval_ms: u32) !bool {
-    const slice = clampTimeout(poll_interval_ms);
-    executor.waitForDomReady(session, slice) catch |err| switch (err) {
-        error.Timeout => return false,
-        else => return err,
-    };
-    return true;
-}
-
-fn waitSelectorStep(session: *Session, selector: []const u8, poll_interval_ms: u32) !bool {
-    const slice = clampTimeout(poll_interval_ms);
-    executor.waitForSelector(session, selector, slice) catch |err| switch (err) {
-        error.Timeout => return false,
-        else => return err,
-    };
-    return true;
-}
-
-fn waitNetworkIdleStep(session: *Session) !bool {
-    if (!session.supports(.js_eval)) return error.UnsupportedCapability;
-    const payload = try evaluateForWait(
-        session,
-        "(function(){return document.readyState==='complete' && (!window.__alldriver_active_requests || window.__alldriver_active_requests===0);})();",
-    );
-    defer session.allocator.free(payload);
+fn waitDomReadyStep(probe: *const Probe) !bool {
+    const payload = try evaluateForWait(probe, "document.readyState==='complete'");
+    defer probe.session.allocator.free(payload);
     return payloadContainsTruthy(payload);
 }
 
-fn waitUrlContainsStep(session: *Session, needle: []const u8) !bool {
-    const payload = try evaluateForWait(session, "location.href");
+fn waitSelectorStep(probe: *const Probe, selector: []const u8) !bool {
+    const allocator = probe.session.allocator;
+    const escaped = try escapeJsString(allocator, selector);
+    defer allocator.free(escaped);
+    const script = try std.fmt.allocPrint(allocator, "(()=>{{const el=document.querySelector(\"{s}\");if(!el)return false;const style=getComputedStyle(el);return style.visibility!=='hidden'&&style.visibility!=='collapse'&&Array.from(el.getClientRects()).some(r=>r.width>0&&r.height>0);}})()", .{escaped});
+    defer allocator.free(script);
+    const payload = try evaluateForWait(probe, script);
+    defer allocator.free(payload);
+    return payloadContainsTruthy(payload);
+}
+
+fn waitNetworkIdleStep(probe: *const Probe) !bool {
+    const session = probe.session;
+    const payload = try evaluateForWait(probe, "document.readyState==='complete'");
+    defer session.allocator.free(payload);
+    if (!payloadContainsTruthy(payload)) return false;
+    session.network_lock.lock();
+    defer session.network_lock.unlock();
+    if (!session.network_tracking_valid) return error.NetworkObservationLost;
+    const quiet_since = @max(probe.started_ms, session.network_last_activity_ms);
+    return session.network_inflight.count() == 0 and compat.milliTimestamp() - quiet_since >= 500;
+}
+
+fn waitUrlContainsStep(probe: *const Probe, needle: []const u8) !bool {
+    const session = probe.session;
+    const payload = try evaluateForWait(probe, "location.href");
     defer session.allocator.free(payload);
     const url = try extractEvaluationString(session.allocator, payload);
     defer session.allocator.free(url);
     return strings.containsIgnoreCase(url, needle);
 }
 
-fn waitCookieStep(session: *Session, query: types.CookieQuery) !bool {
-    const cookies = try storage.queryCookies(session, session.allocator, query);
+fn waitCookieStep(probe: *const Probe, query: types.CookieQuery) !bool {
+    const session = probe.session;
+    const remaining = probe.deadline_ms - compat.milliTimestamp();
+    if (remaining <= 0) return error.Timeout;
+    const cookies = try storage.queryCookiesCancelable(session, session.allocator, query, @intCast(remaining), probe.cancel_token);
     defer storage.freeCookies(session.allocator, cookies);
-    if (cookies.len > 0) return true;
-
-    if (query.name) |cookie_name| {
-        if (!session.supports(.js_eval)) return false;
-        const escaped = try escapeJsString(session.allocator, cookie_name);
-        defer session.allocator.free(escaped);
-        const script = try std.fmt.allocPrint(
-            session.allocator,
-            "(function(){{return document.cookie.indexOf(\"{s}=\") !== -1;}})();",
-            .{escaped},
-        );
-        defer session.allocator.free(script);
-        const payload = try evaluateForWait(session, script);
-        defer session.allocator.free(payload);
-        return payloadContainsTruthy(payload);
-    }
-
-    return false;
+    return cookies.len > 0;
 }
 
-fn waitStorageKeyStep(session: *Session, query: types.StorageKeyQuery) !bool {
+fn waitStorageKeyStep(probe: *const Probe, query: types.StorageKeyQuery) !bool {
+    const session = probe.session;
     if (!session.supports(.js_eval)) return error.UnsupportedCapability;
     const escaped = try escapeJsString(session.allocator, query.key);
     defer session.allocator.free(escaped);
@@ -221,14 +163,15 @@ fn waitStorageKeyStep(session: *Session, query: types.StorageKeyQuery) !bool {
     };
     defer session.allocator.free(script);
 
-    const payload = try evaluateForWait(session, script);
+    const payload = try evaluateForWait(probe, script);
     defer session.allocator.free(payload);
     return payloadContainsTruthy(payload);
 }
 
-fn waitJsTruthyStep(session: *Session, script: []const u8) !bool {
+fn waitJsTruthyStep(probe: *const Probe, script: []const u8) !bool {
+    const session = probe.session;
     if (!session.supports(.js_eval)) return error.UnsupportedCapability;
-    const payload = try evaluateForWait(session, script);
+    const payload = try evaluateForWait(probe, script);
     defer session.allocator.free(payload);
     return payloadContainsTruthy(payload);
 }
@@ -241,8 +184,37 @@ fn payloadContainsTruthy(payload: []const u8) bool {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch return false;
     defer parsed.deinit();
 
-    const value = extractEvaluationValue(parsed.value) orelse parsed.value;
-    return jsonValueTruthy(value);
+    if (parsed.value == .object) {
+        if (parsed.value.object.get("result")) |result| {
+            if (result == .object) {
+                if (result.object.get("result")) |remote| return remoteTruthy(remote);
+                return remoteTruthy(result);
+            }
+        }
+        return remoteTruthy(parsed.value);
+    }
+    return jsonValueTruthy(parsed.value);
+}
+
+fn remoteTruthy(remote: std.json.Value) bool {
+    if (remote != .object) return false;
+    if (remote.object.get("value")) |value| return jsonValueTruthy(value);
+    const kind = remote.object.get("type") orelse return false;
+    if (kind != .string) return false;
+    if (std.mem.eql(u8, kind.string, "undefined")) return false;
+    if (std.mem.eql(u8, kind.string, "object")) {
+        if (remote.object.get("subtype")) |subtype| {
+            if (subtype == .string and std.mem.eql(u8, subtype.string, "null")) return false;
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, kind.string, "function") or std.mem.eql(u8, kind.string, "symbol")) return true;
+    if (remote.object.get("unserializableValue")) |value| {
+        if (value != .string) return false;
+        if (std.mem.eql(u8, kind.string, "number")) return std.mem.eql(u8, value.string, "Infinity") or std.mem.eql(u8, value.string, "-Infinity");
+        if (std.mem.eql(u8, kind.string, "bigint")) return !std.mem.eql(u8, value.string, "0n") and !std.mem.eql(u8, value.string, "-0n");
+    }
+    return false;
 }
 
 fn extractEvaluationValue(value: std.json.Value) ?std.json.Value {
@@ -265,17 +237,18 @@ fn jsonValueTruthy(value: std.json.Value) bool {
         .null => false,
         .bool => value.bool,
         .integer => value.integer != 0,
-        .float => value.float != 0 and std.math.isFinite(value.float),
-        .number_string => std.mem.eql(u8, value.number_string, "1"),
-        .string => std.mem.eql(u8, value.string, "true") or std.mem.eql(u8, value.string, "1"),
+        .float => value.float != 0 and !std.math.isNan(value.float),
+        .number_string => (std.fmt.parseFloat(f64, value.number_string) catch 0) != 0,
+        .string => value.string.len != 0,
         // JS objects/arrays are truthy.
         .object, .array => true,
     };
 }
 
-fn maybeEmitChallengeSignals(session: *Session) !void {
+fn maybeEmitChallengeSignals(probe: *const Probe) !void {
+    const session = probe.session;
     if (!session.supports(.js_eval)) return;
-    const title_payload = try evaluateForWait(session, "document.title");
+    const title_payload = try evaluateForWait(probe, "document.title");
     defer session.allocator.free(title_payload);
     const title = try extractEvaluationString(session.allocator, title_payload);
     defer session.allocator.free(title);
@@ -286,7 +259,7 @@ fn maybeEmitChallengeSignals(session: *Session) !void {
         strings.containsIgnoreCase(title, "cf-chl") or
         strings.containsIgnoreCase(title, "cloudflare");
 
-    const current_url = try currentUrl(session);
+    const current_url = try currentUrl(probe);
     defer session.allocator.free(current_url);
 
     var should_emit_detected = false;
@@ -317,9 +290,10 @@ fn maybeEmitChallengeSignals(session: *Session) !void {
     }
 }
 
-fn currentUrl(session: *Session) ![]u8 {
+fn currentUrl(probe: *const Probe) ![]u8 {
+    const session = probe.session;
     if (session.supports(.js_eval)) {
-        const payload = try evaluateForWait(session, "location.href");
+        const payload = try evaluateForWait(probe, "location.href");
         defer session.allocator.free(payload);
         return extractEvaluationString(session.allocator, payload);
     }
@@ -341,15 +315,11 @@ fn extractEvaluationString(allocator: std.mem.Allocator, payload: []const u8) ![
     };
 }
 
-fn clampTimeout(poll_interval_ms: u32) u32 {
-    if (poll_interval_ms < 25) return 25;
-    if (poll_interval_ms > 500) return 500;
-    return poll_interval_ms;
-}
-
-fn evaluateForWait(session: *Session, script: []const u8) ![]u8 {
-    if (!session.supports(.js_eval)) return error.UnsupportedCapability;
-    return executor.evaluate(session, script);
+fn evaluateForWait(probe: *const Probe, script: []const u8) ![]u8 {
+    if (!probe.session.supports(.js_eval)) return error.UnsupportedCapability;
+    const remaining = probe.deadline_ms - compat.milliTimestamp();
+    if (remaining <= 0) return error.Timeout;
+    return executor.evaluateCancelable(probe.session, script, @intCast(remaining), probe.cancel_token);
 }
 
 fn elapsedSince(start_ms: i64) u32 {
@@ -388,4 +358,23 @@ test "escapeJsString escapes control characters" {
     const escaped = try escapeJsString(allocator, "a\\\"b\nc\t");
     defer allocator.free(escaped);
     try std.testing.expectEqualStrings("a\\\\\\\"b\\nc\\t", escaped);
+}
+
+test "wait truthiness follows JavaScript values and refuses empty protocol acknowledgements" {
+    const truthy = [_][]const u8{
+        "{\"result\":{\"result\":{\"type\":\"string\",\"value\":\"hello\"}}}",
+        "{\"result\":{\"result\":{\"type\":\"string\",\"value\":\"false\"}}}",
+        "{\"result\":{\"result\":{\"type\":\"number\",\"unserializableValue\":\"Infinity\"}}}",
+        "{\"result\":{\"result\":{\"type\":\"bigint\",\"unserializableValue\":\"2n\"}}}",
+        "{\"result\":{\"result\":{\"type\":\"function\",\"objectId\":\"x\"}}}",
+        "{\"result\":{\"result\":{\"type\":\"object\",\"value\":[]}}}",
+    };
+    const falsy = [_][]const u8{
+        "{}",                                                                             "{\"result\":{}}",
+        "{\"result\":{\"result\":{\"type\":\"undefined\"}}}",                             "{\"result\":{\"result\":{\"type\":\"number\",\"unserializableValue\":\"NaN\"}}}",
+        "{\"result\":{\"result\":{\"type\":\"number\",\"unserializableValue\":\"-0\"}}}", "{\"result\":{\"result\":{\"type\":\"bigint\",\"unserializableValue\":\"0n\"}}}",
+        "{\"result\":{\"result\":{\"type\":\"string\",\"value\":\"\"}}}",                 "{\"result\":{\"result\":{\"type\":\"object\",\"subtype\":\"null\"}}}",
+    };
+    for (truthy) |value| try std.testing.expect(payloadContainsTruthy(value));
+    for (falsy) |value| try std.testing.expect(!payloadContainsTruthy(value));
 }
