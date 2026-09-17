@@ -13,12 +13,14 @@ pub const ResponseEvent = types.ResponseEvent;
 
 pub fn enableInterception(session: *Session) !void {
     if (!session.supports(.network_intercept)) return error.UnsupportedCapability;
+    _ = try ensureObserver(session);
     try executor.enableNetworkInterception(session);
 }
 
 pub fn disableInterception(session: *Session) !void {
     if (!session.supports(.network_intercept)) return error.UnsupportedCapability;
     try clearInterceptRules(session);
+    stopObserver(session);
 }
 
 pub fn addInterceptRule(session: *Session, rule: NetworkRule) !void {
@@ -60,18 +62,77 @@ pub fn clearInterceptRules(session: *Session) !void {
     }
 }
 
+/// Registration is pending until enableInterception or subscribe succeeds.
 pub fn onRequest(session: *Session, callback: *const fn (RequestEvent) void) void {
+    session.network_observer_lock.lock();
+    defer session.network_observer_lock.unlock();
     session.on_request = callback;
+    if (session.network_observer) |observer| observer.setRequest(callback);
 }
 
 pub fn onResponse(session: *Session, callback: *const fn (ResponseEvent) void) void {
+    session.network_observer_lock.lock();
+    defer session.network_observer_lock.unlock();
     session.on_response = callback;
+    if (session.network_observer) |observer| observer.setResponse(callback);
+}
+
+pub fn clearRequest(session: *Session) void {
+    session.network_observer_lock.lock();
+    defer session.network_observer_lock.unlock();
+    session.on_request = null;
+    if (session.network_observer) |observer| observer.setRequest(null);
+}
+
+pub fn clearResponse(session: *Session) void {
+    session.network_observer_lock.lock();
+    defer session.network_observer_lock.unlock();
+    session.on_response = null;
+    if (session.network_observer) |observer| observer.setResponse(null);
 }
 
 pub fn subscribe(session: *Session, callback: *const fn (event_json: []const u8) void) !void {
     if (!session.supports(.network_intercept)) return error.UnsupportedCapability;
-    try enableInterception(session);
-    callback("{\"event\":\"network.subscription.active\"}");
+    const observer = try ensureObserver(session);
+    session.network_observer_lock.lock();
+    defer session.network_observer_lock.unlock();
+    session.on_network_raw = callback;
+    observer.setRaw(callback);
+}
+
+pub fn unsubscribe(session: *Session) void {
+    session.network_observer_lock.lock();
+    defer session.network_observer_lock.unlock();
+    session.on_network_raw = null;
+    if (session.network_observer) |observer| observer.setRaw(null);
+}
+
+pub fn ensureObserver(session: *Session) !*@import("network_observer.zig").Observer {
+    // Resolve outside the observer lock: protocol notifications may call back
+    // into this module while the page endpoint is being discovered.
+    const endpoint = try executor.pageWebSocketEndpoint(session);
+    defer session.allocator.free(endpoint);
+    session.network_observer_lock.lock();
+    defer session.network_observer_lock.unlock();
+    if (session.network_observer) |observer| {
+        try observer.check();
+        return observer;
+    }
+    const observer = try @import("network_observer.zig").Observer.create(session.allocator, endpoint, .{
+        .request = session.on_request,
+        .response = session.on_response,
+        .raw = session.on_network_raw,
+    });
+    session.network_observer = observer;
+    return observer;
+}
+
+pub fn stopObserver(session: *Session) void {
+    session.network_observer_lock.lock();
+    const observer = session.network_observer;
+    session.network_observer = null;
+    session.network_observer_lock.unlock();
+    if (observer) |worker| worker.destroy();
 }
 
 pub fn emitDebugEvent(session: *Session, event_json: []const u8) void {
@@ -85,7 +146,10 @@ pub fn emitDebugEvent(session: *Session, event_json: []const u8) void {
 
 pub fn emitRequestObserved(session: *Session, event: RequestEvent) void {
     upsertNetworkRecordFromRequest(session, event) catch {};
-    if (session.on_request) |cb| cb(event);
+    session.network_observer_lock.lock();
+    const callback = if (session.network_observer == null) session.on_request else null;
+    session.network_observer_lock.unlock();
+    if (callback) |cb| cb(event);
     events.emit(session, .{
         .network_request_observed = .{
             .request_id = event.request_id,
@@ -98,7 +162,10 @@ pub fn emitRequestObserved(session: *Session, event: RequestEvent) void {
 
 pub fn emitResponseObserved(session: *Session, event: ResponseEvent) void {
     upsertNetworkRecordFromResponse(session, event) catch {};
-    if (session.on_response) |cb| cb(event);
+    session.network_observer_lock.lock();
+    const callback = if (session.network_observer == null) session.on_response else null;
+    session.network_observer_lock.unlock();
+    if (callback) |cb| cb(event);
     events.emit(session, .{
         .network_response_observed = .{
             .request_id = event.request_id,

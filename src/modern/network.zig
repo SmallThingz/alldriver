@@ -1,6 +1,7 @@
 const session_mod = @import("session.zig");
 const std = @import("std");
 const types = @import("../types.zig");
+const core_network = @import("../core/network.zig");
 
 pub const NetworkClient = struct {
     session: *session_mod.ModernSession,
@@ -10,7 +11,7 @@ pub const NetworkClient = struct {
     }
 
     pub fn disable(self: *NetworkClient) !void {
-        try self.session.base.clearInterceptRules();
+        try core_network.disableInterception(&self.session.base);
     }
 
     pub fn addRule(self: *NetworkClient, rule: types.NetworkRule) !void {
@@ -21,12 +22,29 @@ pub const NetworkClient = struct {
         return self.session.base.removeInterceptRule(rule_id);
     }
 
+    /// Register before enable(); callbacks then arrive even while idle.
     pub fn onRequest(self: *NetworkClient, callback: *const fn (types.RequestEvent) void) void {
         self.session.base.onRequest(callback);
     }
 
     pub fn onResponse(self: *NetworkClient, callback: *const fn (types.ResponseEvent) void) void {
         self.session.base.onResponse(callback);
+    }
+
+    pub fn clearRequest(self: *NetworkClient) void {
+        core_network.clearRequest(&self.session.base);
+    }
+
+    pub fn clearResponse(self: *NetworkClient) void {
+        core_network.clearResponse(&self.session.base);
+    }
+
+    pub fn subscribe(self: *NetworkClient, callback: *const fn ([]const u8) void) !void {
+        try core_network.subscribe(&self.session.base, callback);
+    }
+
+    pub fn unsubscribe(self: *NetworkClient) void {
+        core_network.unsubscribe(&self.session.base);
     }
 
     pub fn records(self: *NetworkClient, allocator: std.mem.Allocator, include_bodies: bool) ![]types.NetworkRecord {

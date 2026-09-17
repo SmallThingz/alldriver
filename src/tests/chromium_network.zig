@@ -4,6 +4,10 @@ const compat = @import("../util/compat.zig");
 const io_util = @import("../util/io.zig");
 const allocator = std.testing.allocator;
 
+comptime {
+    _ = @import("../core/network_observer.zig");
+}
+
 /// Every blocking accept/read/write belongs to this cancelable task group.
 /// Teardown cancels and joins tasks before closing the listener or freeing state.
 pub const LocalServer = struct {
@@ -201,4 +205,108 @@ test "local Chromium fixture cancels idle and partial HTTP connections" {
     server.deinit();
     cleaned = true;
     try std.testing.expect(compat.milliTimestamp() - start < 2000);
+}
+
+var idle_requests: std.atomic.Value(u32) = .init(0);
+var idle_responses: std.atomic.Value(u32) = .init(0);
+var idle_raw: std.atomic.Value(u32) = .init(0);
+var idle_valid: std.atomic.Value(bool) = .init(true);
+
+fn idleRequest(event: driver.RequestEvent) void {
+    if (std.mem.indexOf(u8, event.url, "/idle-callback") == null) return;
+    var headers = std.json.parseFromSlice(std.json.Value, allocator, event.headers_json, .{}) catch {
+        idle_valid.store(false, .release);
+        return;
+    };
+    defer headers.deinit();
+    var found = false;
+    if (headers.value == .object) {
+        var iterator = headers.value.object.iterator();
+        while (iterator.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.key_ptr.*, "X-Callback")) {
+                found = header.value_ptr.* == .string and std.mem.eql(u8, header.value_ptr.string, "yes");
+            }
+        }
+    }
+    if (!std.mem.eql(u8, event.method, "GET") or event.request_id.len == 0 or !found)
+        idle_valid.store(false, .release);
+    _ = idle_requests.fetchAdd(1, .release);
+}
+
+fn idleResponse(event: driver.ResponseEvent) void {
+    if (std.mem.indexOf(u8, event.url, "/idle-callback") == null) return;
+    if (event.status != 200 or event.request_id.len == 0 or std.mem.indexOf(u8, event.headers_json, "local-server") == null)
+        idle_valid.store(false, .release);
+    _ = idle_responses.fetchAdd(1, .release);
+}
+
+fn idleRaw(message: []const u8) void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, message, .{}) catch {
+        idle_valid.store(false, .release);
+        return;
+    };
+    defer parsed.deinit();
+    const method = parsed.value.object.get("method") orelse {
+        idle_valid.store(false, .release);
+        return;
+    };
+    if (method != .string or !std.mem.startsWith(u8, method.string, "Network.")) {
+        idle_valid.store(false, .release);
+        return;
+    }
+    const params = parsed.value.object.get("params") orelse return;
+    if (params != .object) return;
+    const record = if (std.mem.eql(u8, method.string, "Network.requestWillBeSent"))
+        params.object.get("request")
+    else if (std.mem.eql(u8, method.string, "Network.responseReceived"))
+        params.object.get("response")
+    else
+        null;
+    if (record) |value| {
+        if (value != .object) return;
+        const url = value.object.get("url") orelse return;
+        if (url == .string and std.mem.indexOf(u8, url.string, "/idle-callback") != null)
+            _ = idle_raw.fetchAdd(1, .release);
+    }
+}
+
+test "Chromium network typed and raw callbacks observe real traffic while client is idle" {
+    const server = try LocalServer.start();
+    defer server.deinit();
+    var browser = try @import("chromium_behavior.zig").Browser.launch();
+    defer browser.deinit();
+    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
+    defer allocator.free(origin);
+    var page = browser.session.page();
+    try page.navigate(origin);
+    idle_requests.store(0, .release);
+    idle_responses.store(0, .release);
+    idle_raw.store(0, .release);
+    idle_valid.store(true, .release);
+    var network = browser.session.network();
+    network.onRequest(idleRequest);
+    network.onResponse(idleResponse);
+    try network.enable();
+    try network.subscribe(idleRaw);
+    try browser.evaluateTrue("(setTimeout(()=>fetch('/idle-callback',{headers:{'X-Callback':'yes'}}),100),true)");
+    const started = compat.milliTimestamp();
+    // Only atomic loads and sleep: no evaluation or records calls to pump CDP.
+    while (idle_requests.load(.acquire) < 1 or idle_responses.load(.acquire) < 1 or idle_raw.load(.acquire) < 2) {
+        if (compat.milliTimestamp() - started > 5000) return error.MissingIdleNetworkCallback;
+        compat.sleepMs(10);
+    }
+    try std.testing.expectEqual(@as(u32, 1), idle_requests.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), idle_responses.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), idle_raw.load(.acquire));
+    try std.testing.expect(idle_valid.load(.acquire));
+    network.clearRequest();
+    network.clearResponse();
+    network.unsubscribe();
+    try browser.evaluateTrue("(setTimeout(()=>fetch('/idle-callback?cleared',{headers:{'X-Callback':'yes'}}),20),true)");
+    compat.sleepMs(150);
+    try std.testing.expectEqual(@as(u32, 1), idle_requests.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), idle_responses.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), idle_raw.load(.acquire));
+    try network.disable();
+    try std.testing.expect(!server.failed.load(.acquire));
 }
