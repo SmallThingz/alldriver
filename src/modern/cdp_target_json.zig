@@ -15,18 +15,24 @@ pub fn parseTargetInfos(allocator: std.mem.Allocator, payload: []const u8) ![]Pa
     if (target_infos != .array) return error.InvalidResponse;
 
     var out: std.ArrayList(ParsedTargetInfo) = .empty;
-    errdefer freeTargetInfos(allocator, out.items);
-    errdefer out.deinit(allocator);
+    errdefer {
+        for (out.items) |entry| {
+            allocator.free(entry.id);
+            allocator.free(entry.kind);
+        }
+        out.deinit(allocator);
+    }
 
     for (target_infos.array.items) |item| {
         if (item != .object) continue;
         const id_value = item.object.get("targetId") orelse continue;
         const type_value = item.object.get("type") orelse continue;
         if (id_value != .string or type_value != .string) continue;
-        try out.append(allocator, .{
-            .id = try allocator.dupe(u8, id_value.string),
-            .kind = try allocator.dupe(u8, type_value.string),
-        });
+        const id = try allocator.dupe(u8, id_value.string);
+        errdefer allocator.free(id);
+        const kind = try allocator.dupe(u8, type_value.string);
+        errdefer allocator.free(kind);
+        try out.append(allocator, .{ .id = id, .kind = kind });
     }
     return out.toOwnedSlice(allocator);
 }

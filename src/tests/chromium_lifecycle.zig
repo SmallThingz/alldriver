@@ -1,4 +1,5 @@
 const std = @import("std");
+const driver = @import("../root.zig");
 const compat = @import("../util/compat.zig");
 const Browser = @import("chromium_behavior.zig").Browser;
 const LogEntry = @import("../modern/log.zig").LogEntry;
@@ -101,12 +102,15 @@ test "Chromium contexts create distinct live pages and targets switch without lo
     try std.testing.expect(saw_original and saw_second);
     try targets.attach(original);
     try browser.evaluateTrue("pageIdentity==='original' && document.title==='original context'");
+    try std.testing.expectError(error.ProtocolCommandFailed, targets.attach("nonexistent-alldriver-target"));
+    try browser.evaluateTrue("pageIdentity==='original' && document.title==='original context'");
     try targets.attach(second.id);
     try browser.evaluateTrue("pageIdentity==='second' && document.title==='second context'");
     try targets.detach(second.id);
     try targets.attach(original);
     try browser.evaluateTrue("pageIdentity==='original'");
     try contexts.close(second.id);
+    try std.testing.expectError(error.ProtocolCommandFailed, contexts.close("nonexistent-alldriver-context"));
     const remaining = try contexts.list(allocator);
     defer contexts.freeList(allocator, remaining);
     saw_original = false;
@@ -116,6 +120,91 @@ test "Chromium contexts create distinct live pages and targets switch without lo
     }
     try std.testing.expect(saw_original);
     try browser.evaluateTrue("pageIdentity==='original' && document.title==='original context'");
+}
+
+fn expectSessionTrue(session: *driver.modern.ModernSession, expression: []const u8) !void {
+    var runtime = session.runtime();
+    const payload = try runtime.evaluate(expression);
+    defer allocator.free(payload);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    const value = parsed.value.object.get("result").?.object.get("result").?.object.get("value").?;
+    try std.testing.expect(value == .bool and value.bool);
+}
+
+test "Chromium explicit page attachment switches to requested target and preserves failed selections" {
+    var browser = try Browser.launch();
+    defer browser.deinit();
+    try browser.navigateHtml("<!doctype html><title>direct original</title>");
+    const endpoint = try @import("../protocol/executor.zig").pageWebSocketEndpoint(&browser.session.base);
+    defer allocator.free(endpoint);
+    var direct = try driver.modern.attach(allocator, endpoint);
+    defer direct.deinit();
+    try expectSessionTrue(&direct, "document.title==='direct original'");
+    var contexts = browser.session.contexts();
+    const second = try contexts.create(allocator);
+    defer allocator.free(second.id);
+    try browser.navigateHtml("<!doctype html><title>direct second</title>");
+    var targets = direct.targets();
+    try targets.attach(second.id);
+    try expectSessionTrue(&direct, "document.title==='direct second'");
+    try std.testing.expectError(error.ProtocolCommandFailed, targets.attach("not-a-real-target"));
+    try expectSessionTrue(&direct, "document.title==='direct second'");
+}
+
+test "Chromium target switching rebinds idle logging and live interception rules" {
+    var browser = try Browser.launch();
+    defer browser.deinit();
+    try browser.navigateHtml("<!doctype html><title>before switch</title>");
+    console_count.store(0, .release);
+    log_values_match.store(true, .release);
+    var log = browser.session.log();
+    try log.onConsole(consoleCallback);
+    var network = browser.session.network();
+    try network.addRule(.{
+        .id = "retarget-fixture",
+        .url_pattern = "https://alldriver.invalid/retarget",
+        .action = .{ .fulfill = .{
+            .status = 200,
+            .body = "retarget-body",
+            .headers = &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }},
+        } },
+    });
+    var contexts = browser.session.contexts();
+    const second = try contexts.create(allocator);
+    defer allocator.free(second.id);
+    try browser.navigateHtml("<!doctype html><title>after switch</title>");
+    try browser.evaluateTrue("fetch('https://alldriver.invalid/retarget').then(r=>r.text()).then(t=>t==='retarget-body')");
+    try browser.evaluateTrue("(setTimeout(()=>console.log('lifecycle-console λ',42,true,null,undefined),50),true)");
+    const started = compat.milliTimestamp();
+    while (console_count.load(.acquire) == 0) {
+        if (compat.milliTimestamp() - started > 5000) return error.MissingRetargetedLogCallback;
+        compat.sleepMs(10);
+    }
+    try std.testing.expectEqual(@as(u32, 1), console_count.load(.acquire));
+    try std.testing.expect(log_values_match.load(.acquire));
+    try browser.evaluateTrue("document.title==='after switch'");
+}
+
+test "Chromium listing empty contexts does not silently create a page" {
+    var browser = try Browser.launch();
+    defer browser.deinit();
+    var contexts = browser.session.contexts();
+    const original = try contexts.list(allocator);
+    defer contexts.freeList(allocator, original);
+    for (original) |context| try contexts.close(context.id);
+    const empty = try contexts.list(allocator);
+    defer contexts.freeList(allocator, empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    var targets = browser.session.targets();
+    const actual = try targets.list(allocator);
+    defer targets.freeList(allocator, actual);
+    for (actual) |target| {
+        try std.testing.expect(!std.mem.eql(u8, target.kind, "page") and !std.mem.eql(u8, target.kind, "tab"));
+    }
+    const still_empty = try contexts.list(allocator);
+    defer contexts.freeList(allocator, still_empty);
+    try std.testing.expectEqual(@as(usize, 0), still_empty.len);
 }
 
 test "Chromium async cancellation stops pending wait and abandoned evaluation releases owned result" {
@@ -180,4 +269,17 @@ test "Chromium tracing returns actual timestamped browser events" {
     }
     try std.testing.expect(timestamped_event);
     try browser.evaluateTrue("document.title==='trace'");
+}
+
+test "Chromium late launch failure releases process profile and allocations exactly once" {
+    var installs = try driver.discover(allocator, .{ .kinds = &.{.brave}, .allow_managed_download = false }, .{});
+    defer installs.deinit();
+    if (installs.items.len == 0) return error.NoChromiumBrowserFound;
+    try std.testing.expectError(error.Timeout, driver.modern.launch(allocator, .{
+        .install = installs.items[0],
+        .headless = true,
+        .profile_mode = .ephemeral,
+        .timeout_policy = .{ .attach_ms = 0 },
+        .args = &.{ "--no-sandbox", "--disable-dev-shm-usage", "--disable-background-networking" },
+    }));
 }

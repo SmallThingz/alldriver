@@ -13,10 +13,7 @@ pub const ContextsClient = struct {
     pub fn list(self: *ContextsClient, allocator: std.mem.Allocator) ![]BrowsingContext {
         const payload = try executor.cdpGetTargets(&self.session.base);
         defer self.session.base.allocator.free(payload);
-        const contexts = try parseContextList(allocator, payload);
-        if (contexts.len > 0) return contexts;
-        allocator.free(contexts);
-        return self.synthesizeContextList(allocator);
+        return parseContextList(allocator, payload);
     }
 
     pub fn freeList(self: *ContextsClient, allocator: std.mem.Allocator, list_items: []BrowsingContext) void {
@@ -26,69 +23,33 @@ pub const ContextsClient = struct {
     }
 
     pub fn create(self: *ContextsClient, allocator: std.mem.Allocator) !BrowsingContext {
-        const payload = executor.cdpCreateTarget(&self.session.base, "about:blank") catch |err| switch (err) {
-            error.ProtocolCommandFailed => {
-                const existing = try self.ensureCurrentContextId();
-                return .{ .id = try allocator.dupe(u8, existing) };
-            },
-            else => return err,
-        };
-        defer self.session.base.allocator.free(payload);
-        const target_id = try parseCreatedContextId(self.session.base.allocator, payload);
-        defer self.session.base.allocator.free(target_id);
-
-        if (self.session.base.cdp_target_id) |existing| self.session.base.allocator.free(existing);
-        self.session.base.cdp_target_id = try self.session.base.allocator.dupe(u8, target_id);
-        if (self.session.base.cdp_attached_session_id) |attached| {
-            self.session.base.allocator.free(attached);
-            self.session.base.cdp_attached_session_id = null;
-        }
-
-        return .{ .id = try allocator.dupe(u8, target_id) };
-    }
-
-    pub fn close(self: *ContextsClient, context_id: []const u8) !void {
-        const payload = executor.cdpCloseTarget(&self.session.base, context_id) catch |err| switch (err) {
-            error.ProtocolCommandFailed => null,
-            else => return err,
-        };
-        if (payload) |raw| {
-            self.session.base.allocator.free(raw);
-            if (self.session.base.cdp_target_id) |target_id| {
-                if (std.mem.eql(u8, target_id, context_id)) {
-                    self.session.base.allocator.free(target_id);
-                    self.session.base.cdp_target_id = null;
-                }
-            }
-            if (self.session.base.cdp_attached_session_id) |attached| {
-                self.session.base.allocator.free(attached);
-                self.session.base.cdp_attached_session_id = null;
-            }
-        }
-    }
-
-    fn synthesizeContextList(self: *ContextsClient, allocator: std.mem.Allocator) ![]BrowsingContext {
-        const target_id = try self.ensureCurrentContextId();
-        const out = try allocator.alloc(BrowsingContext, 1);
-        errdefer allocator.free(out);
-        out[0] = .{ .id = try allocator.dupe(u8, target_id) };
-        return out;
-    }
-
-    fn ensureCurrentContextId(self: *ContextsClient) ![]const u8 {
-        if (self.session.base.cdp_target_id) |target_id| return target_id;
-
         const payload = try executor.cdpCreateTarget(&self.session.base, "about:blank");
         defer self.session.base.allocator.free(payload);
         const target_id = try parseCreatedContextId(self.session.base.allocator, payload);
-        errdefer self.session.base.allocator.free(target_id);
-
-        self.session.base.cdp_target_id = target_id;
-        if (self.session.base.cdp_attached_session_id) |attached| {
-            self.session.base.allocator.free(attached);
-            self.session.base.cdp_attached_session_id = null;
+        defer self.session.base.allocator.free(target_id);
+        errdefer {
+            const closed = executor.cdpCloseTarget(&self.session.base, target_id) catch null;
+            if (closed) |result| self.session.base.allocator.free(result);
         }
-        return self.session.base.cdp_target_id.?;
+        const result_id = try allocator.dupe(u8, target_id);
+        errdefer allocator.free(result_id);
+        try executor.selectTarget(&self.session.base, target_id);
+        return .{ .id = result_id };
+    }
+
+    pub fn close(self: *ContextsClient, context_id: []const u8) !void {
+        const payload = try executor.cdpCloseTarget(&self.session.base, context_id);
+        defer self.session.base.allocator.free(payload);
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.session.base.allocator, payload, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+        if (result != .object) return error.InvalidResponse;
+        const success = result.object.get("success") orelse return error.InvalidResponse;
+        if (success != .bool or !success.bool) return error.ProtocolCommandFailed;
+        if (self.session.base.cdp_target_id) |target_id| {
+            if (std.mem.eql(u8, target_id, context_id)) executor.clearSelectedTarget(&self.session.base);
+        }
     }
 };
 
@@ -104,7 +65,9 @@ fn parseContextList(allocator: std.mem.Allocator, payload: []const u8) ![]Browsi
 
     for (target_infos) |item| {
         if (!isPageLike(item.kind)) continue;
-        try out.append(allocator, .{ .id = try allocator.dupe(u8, item.id) });
+        const id = try allocator.dupe(u8, item.id);
+        errdefer allocator.free(id);
+        try out.append(allocator, .{ .id = id });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -140,4 +103,20 @@ test "parse created context id from Target.createTarget payload" {
     const id = try parseCreatedContextId(allocator, "{\"id\":7,\"result\":{\"targetId\":\"ctx-abc\"}}");
     defer allocator.free(id);
     try std.testing.expectEqualStrings("ctx-abc", id);
+}
+
+fn allocationContextList(allocator: std.mem.Allocator) !void {
+    const contexts = try parseContextList(allocator, "{\"result\":{\"targetInfos\":[{\"targetId\":\"a\",\"type\":\"page\"},{\"targetId\":\"b\",\"type\":\"worker\"},{\"targetId\":\"c\",\"type\":\"page\"}]}}");
+    defer {
+        for (contexts) |context| allocator.free(context.id);
+        allocator.free(contexts);
+    }
+    try std.testing.expectEqual(@as(usize, 2), contexts.len);
+}
+
+test "context list remains empty and handles every allocation failure" {
+    const contexts = try parseContextList(std.testing.allocator, "{\"result\":{\"targetInfos\":[]}}");
+    defer std.testing.allocator.free(contexts);
+    try std.testing.expectEqual(@as(usize, 0), contexts.len);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationContextList, .{});
 }

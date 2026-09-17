@@ -15,10 +15,7 @@ pub const TargetsClient = struct {
     pub fn list(self: *TargetsClient, allocator: std.mem.Allocator) ![]TargetInfo {
         const payload = try executor.cdpGetTargets(&self.session.base);
         defer self.session.base.allocator.free(payload);
-        const targets = try parseTargetList(allocator, payload);
-        if (targets.len > 0) return targets;
-        allocator.free(targets);
-        return self.synthesizeTargetList(allocator);
+        return parseTargetList(allocator, payload);
     }
 
     pub fn freeList(self: *TargetsClient, allocator: std.mem.Allocator, targets: []TargetInfo) void {
@@ -31,27 +28,19 @@ pub const TargetsClient = struct {
     }
 
     pub fn attach(self: *TargetsClient, target_id: []const u8) !void {
-        const payload = try executor.cdpAttachToTarget(&self.session.base, target_id, true);
-        defer self.session.base.allocator.free(payload);
-        const attached_session_id = try extractAttachedSessionId(self.session.base.allocator, payload);
-        if (self.session.base.cdp_target_id) |current| self.session.base.allocator.free(current);
-        self.session.base.cdp_target_id = try self.session.base.allocator.dupe(u8, target_id);
-        if (self.session.base.cdp_attached_session_id) |attached| {
-            self.session.base.allocator.free(attached);
-        }
-        self.session.base.cdp_attached_session_id = attached_session_id;
+        try executor.selectTarget(&self.session.base, target_id);
     }
 
     pub fn detach(self: *TargetsClient, target_id: []const u8) !void {
+        if (self.session.base.transport != .cdp_ws) return error.UnsupportedProtocol;
+        if (self.session.base.endpoint == null) return error.MissingEndpoint;
         const attached_session_id = blk: {
             if (self.session.base.cdp_attached_session_id) |existing| {
                 if (self.session.base.cdp_target_id) |current| {
                     if (std.mem.eql(u8, current, target_id)) break :blk try self.session.base.allocator.dupe(u8, existing);
                 }
             }
-            const attach_payload = try executor.cdpAttachToTarget(&self.session.base, target_id, true);
-            defer self.session.base.allocator.free(attach_payload);
-            break :blk try extractAttachedSessionId(self.session.base.allocator, attach_payload);
+            return error.TargetNotAttached;
         };
         defer self.session.base.allocator.free(attached_session_id);
 
@@ -66,61 +55,15 @@ pub const TargetsClient = struct {
             error.ProtocolCommandFailed => {
                 const diag = self.session.base.lastDiagnostic();
                 if (!isStaleDetachSessionDiagnostic(diag)) return err;
-                clearDetachedState(self, target_id, attached_session_id, detached_current_target);
+                if (detached_current_target) executor.clearSelectedTarget(&self.session.base);
                 return;
             },
             else => return err,
         };
         defer self.session.base.allocator.free(detach_payload);
-        clearDetachedState(self, target_id, attached_session_id, detached_current_target);
-    }
-
-    fn synthesizeTargetList(self: *TargetsClient, allocator: std.mem.Allocator) ![]TargetInfo {
-        const target_id = try self.ensureCurrentTargetId();
-        const out = try allocator.alloc(TargetInfo, 1);
-        errdefer allocator.free(out);
-        out[0] = .{
-            .id = try allocator.dupe(u8, target_id),
-            .kind = try allocator.dupe(u8, "page"),
-        };
-        return out;
-    }
-
-    fn ensureCurrentTargetId(self: *TargetsClient) ![]const u8 {
-        if (self.session.base.cdp_target_id) |target_id| return target_id;
-
-        const payload = try executor.cdpCreateTarget(&self.session.base, "about:blank");
-        defer self.session.base.allocator.free(payload);
-        const target_id = try parseCreatedTargetId(self.session.base.allocator, payload);
-        errdefer self.session.base.allocator.free(target_id);
-        self.session.base.cdp_target_id = target_id;
-        if (self.session.base.cdp_attached_session_id) |attached| {
-            self.session.base.allocator.free(attached);
-            self.session.base.cdp_attached_session_id = null;
-        }
-        return self.session.base.cdp_target_id.?;
+        if (detached_current_target) executor.clearSelectedTarget(&self.session.base);
     }
 };
-
-fn clearDetachedState(
-    self: *TargetsClient,
-    target_id: []const u8,
-    attached_session_id: []const u8,
-    detached_current_target: bool,
-) void {
-    if (self.session.base.cdp_target_id) |current| {
-        if (std.mem.eql(u8, current, target_id)) {
-            self.session.base.allocator.free(current);
-            self.session.base.cdp_target_id = null;
-        }
-    }
-    if (self.session.base.cdp_attached_session_id) |attached| {
-        if (detached_current_target or std.mem.eql(u8, attached, attached_session_id)) {
-            self.session.base.allocator.free(attached);
-            self.session.base.cdp_attached_session_id = null;
-        }
-    }
-}
 
 fn isStaleDetachSessionDiagnostic(diag: ?types.Diagnostic) bool {
     const value = diag orelse return false;
@@ -170,6 +113,25 @@ test "parse target list handles Target.getTargets payload" {
     try std.testing.expectEqual(@as(usize, 2), targets.len);
     try std.testing.expectEqualStrings("target-1", targets[0].id);
     try std.testing.expectEqualStrings("page", targets[0].kind);
+}
+
+fn allocationTargetList(allocator: std.mem.Allocator) !void {
+    const targets = try parseTargetList(allocator, "{\"result\":{\"targetInfos\":[{\"targetId\":\"a\",\"type\":\"page\"},{\"targetId\":\"b\",\"type\":\"worker\"}]}}");
+    defer {
+        for (targets) |target| {
+            allocator.free(target.id);
+            allocator.free(target.kind);
+        }
+        allocator.free(targets);
+    }
+    try std.testing.expectEqual(@as(usize, 2), targets.len);
+}
+
+test "target list remains empty and handles every allocation failure" {
+    const targets = try parseTargetList(std.testing.allocator, "{\"result\":{\"targetInfos\":[]}}");
+    defer std.testing.allocator.free(targets);
+    try std.testing.expectEqual(@as(usize, 0), targets.len);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationTargetList, .{});
 }
 
 test "extract attached session id from Target.attachToTarget payload" {
