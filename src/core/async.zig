@@ -116,8 +116,9 @@ pub fn AsyncResult(comptime T: type) type {
             return self.state == .pending and self.canceler != null;
         }
 
-        /// Joins the worker and releases an unconsumed owned byte-buffer result.
-        /// Successful await transfers that buffer to the caller exactly once.
+        /// Joins the worker and releases an unconsumed owned result. Buffers
+        /// use the operation allocator; managed structs invoke their deinit.
+        /// Successful await transfers ownership to the caller exactly once.
         pub fn deinit(self: *Self) void {
             if (self.thread) |t| t.join();
             switch (self.state) {
@@ -128,9 +129,19 @@ pub fn AsyncResult(comptime T: type) type {
         }
 
         fn discardResult(self: *Self, value: T) void {
-            // Library buffer-producing runners allocate with this allocator.
-            // Other result types are values and carry no implicit ownership.
-            if (T == []u8) self.allocator.free(value);
+            if (T == []u8) {
+                self.allocator.free(value);
+            } else switch (@typeInfo(T)) {
+                .@"struct" => {
+                    // Launch futures own Sessions, which include browser
+                    // processes, subscriptions and profile directories.
+                    if (@hasDecl(T, "deinit")) {
+                        var owned = value;
+                        owned.deinit();
+                    }
+                },
+                else => {},
+            }
         }
 
         fn worker(self: *Self) void {
@@ -355,4 +366,35 @@ test "cancel cannot access context while completion destroys it" {
     try std.testing.expect(!op.requestCancel());
     try std.testing.expect(!state.cancel_called.load(.acquire));
     try std.testing.expectEqual(@as(u32, 19), try op.await(1000));
+}
+
+test "unawaited managed results deinitialize and awaited results transfer ownership" {
+    const Managed = struct {
+        allocator: std.mem.Allocator,
+        bytes: []u8,
+        destroyed: *usize,
+        pub fn deinit(self: *@This()) void {
+            self.allocator.free(self.bytes);
+            self.destroyed.* += 1;
+        }
+    };
+    const Runner = struct {
+        fn run(a: std.mem.Allocator, context: *anyopaque) anyerror!Managed {
+            const destroyed: *usize = @ptrCast(@alignCast(context));
+            return .{ .allocator = a, .bytes = try a.dupe(u8, "owned session resource"), .destroyed = destroyed };
+        }
+        fn destroy(_: std.mem.Allocator, _: *anyopaque) void {}
+    };
+    const allocator = std.testing.allocator;
+    var destroyed: usize = 0;
+    const abandoned = try AsyncResult(Managed).spawn(allocator, &destroyed, Runner.run, Runner.destroy);
+    abandoned.deinit();
+    try std.testing.expectEqual(@as(usize, 1), destroyed);
+    const consumed = try AsyncResult(Managed).spawn(allocator, &destroyed, Runner.run, Runner.destroy);
+    var result = try consumed.await(1000);
+    consumed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), destroyed);
+    try std.testing.expectEqualStrings("owned session resource", result.bytes);
+    result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), destroyed);
 }

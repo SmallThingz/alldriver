@@ -14,8 +14,7 @@ pub const HardErrorLog = logging.HardErrorLog;
 pub const HardErrorLogger = logging.HardErrorLogger;
 
 const default_browser_kinds = [_]types.BrowserKind{
-    .chrome,  .edge, .firefox, .brave,    .vivaldi, .duckduckgo, .lightpanda, .librewolf,
-    .mullvad, .tor,  .operagx, .sidekick, .shift,   .epic,       .arc,        .palemoon,
+    .chrome, .edge, .brave, .vivaldi, .operagx, .sidekick, .shift, .epic, .arc,
 };
 
 pub const AutoLaunchOptions = struct {
@@ -84,7 +83,8 @@ pub fn launchAsync(
         opts: types.LaunchOptions,
     };
     const ctx = try allocator.create(Ctx);
-    errdefer allocator.destroy(ctx);
+    var transferred = false;
+    errdefer if (!transferred) allocator.destroy(ctx);
     ctx.* = .{ .opts = try cloneLaunchOptions(allocator, opts) };
 
     const Runner = struct {
@@ -101,6 +101,7 @@ pub fn launchAsync(
         }
     };
 
+    transferred = true;
     return async_mod.AsyncResult(ModernSession).spawn(allocator, ctx, Runner.run, Runner.destroy);
 }
 
@@ -112,7 +113,8 @@ pub fn launchAutoAsync(
         opts: AutoLaunchOptions,
     };
     const ctx = try allocator.create(Ctx);
-    errdefer allocator.destroy(ctx);
+    var transferred = false;
+    errdefer if (!transferred) allocator.destroy(ctx);
     ctx.* = .{ .opts = try cloneAutoLaunchOptions(allocator, opts) };
 
     const Runner = struct {
@@ -128,6 +130,7 @@ pub fn launchAutoAsync(
         }
     };
 
+    transferred = true;
     return async_mod.AsyncResult(ModernSession).spawn(allocator, ctx, Runner.run, Runner.destroy);
 }
 
@@ -185,7 +188,8 @@ pub fn launchElectronWebViewAsync(
         opts: types.ElectronWebViewLaunchOptions,
     };
     const ctx = try allocator.create(Ctx);
-    errdefer allocator.destroy(ctx);
+    var transferred = false;
+    errdefer if (!transferred) allocator.destroy(ctx);
     ctx.* = .{ .opts = try cloneElectronLaunchOptions(allocator, opts) };
 
     const Runner = struct {
@@ -202,6 +206,7 @@ pub fn launchElectronWebViewAsync(
         }
     };
 
+    transferred = true;
     return async_mod.AsyncResult(ModernSession).spawn(allocator, ctx, Runner.run, Runner.destroy);
 }
 
@@ -331,7 +336,10 @@ fn cloneAutoLaunchOptions(
         .timeout_policy = opts.timeout_policy,
         .args = args,
     };
-    errdefer freeAutoLaunchOptions(allocator, &out);
+    errdefer allocator.free(out.kinds);
+    errdefer if (out.explicit_path) |path| allocator.free(path);
+    errdefer if (out.managed_cache_dir) |path| allocator.free(path);
+    errdefer if (out.profile_dir) |path| allocator.free(path);
 
     if (opts.explicit_path) |path| out.explicit_path = try allocator.dupe(u8, path);
     if (opts.managed_cache_dir) |path| out.managed_cache_dir = try allocator.dupe(u8, path);
@@ -353,7 +361,7 @@ test "launchAsync propagates launch errors" {
         .install = .{
             .kind = .safari,
             .engine = .webkit,
-            .path = "/bin/false",
+            .path = "missing-browser",
             .version = null,
             .source = .explicit,
         },
@@ -369,7 +377,7 @@ test "launchAuto validates explicit path before launch" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.InvalidExplicitPath, launchAuto(allocator, .{
         .kinds = &.{.chrome},
-        .explicit_path = "/definitely/not/a/browser",
+        .explicit_path = ".tmp/nonexistent-browser-for-test",
     }));
 }
 
@@ -377,8 +385,61 @@ test "launchAutoAsync propagates discovery errors" {
     const allocator = std.testing.allocator;
     var op = try launchAutoAsync(allocator, .{
         .kinds = &.{.chrome},
-        .explicit_path = "/definitely/not/a/browser",
+        .explicit_path = ".tmp/nonexistent-browser-for-test",
     });
     defer op.deinit();
     try std.testing.expectError(error.InvalidExplicitPath, op.await(5_000));
+}
+
+test "launch option cloning releases partial allocations" {
+    const Case = struct {
+        fn exercise(allocator: std.mem.Allocator) !void {
+            var launch_opts = try cloneLaunchOptions(allocator, .{
+                .install = .{ .kind = .chrome, .engine = .chromium, .path = "browser", .version = "1.2.3", .source = .explicit },
+                .profile_mode = .ephemeral,
+                .profile_dir = "profile",
+                .args = &.{ "--first", "--second" },
+            });
+            defer freeLaunchOptions(allocator, &launch_opts);
+            var auto_opts = try cloneAutoLaunchOptions(allocator, .{
+                .kinds = &.{ .brave, .chrome },
+                .explicit_path = "browser",
+                .managed_cache_dir = "cache",
+                .profile_dir = "profile",
+                .args = &.{ "--first", "--second" },
+            });
+            defer freeAutoLaunchOptions(allocator, &auto_opts);
+            var electron_opts = try cloneElectronLaunchOptions(allocator, .{
+                .executable_path = "electron",
+                .app_path = "app",
+                .profile_dir = "profile",
+                .args = &.{ "--first", "--second" },
+            });
+            defer freeElectronLaunchOptions(allocator, &electron_opts);
+            try std.testing.expectEqualStrings("--second", auto_opts.args[1]);
+            try std.testing.expectEqualStrings("1.2.3", launch_opts.install.version.?);
+            try std.testing.expectEqualStrings("app", electron_opts.app_path.?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.exercise, .{});
+}
+
+test "launch async handle allocation failures destroy the transferred context once" {
+    // Empty args avoid an array allocation. Each sweep stops before a worker
+    // can launch a browser: context, option fields, then result-handle allocation.
+    for (0..3) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, launchAsync(failing.allocator(), .{
+            .install = .{ .kind = .chrome, .engine = .chromium, .path = "browser", .source = .explicit },
+            .profile_mode = .ephemeral,
+        }));
+    }
+    for (0..3) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, launchAutoAsync(failing.allocator(), .{ .kinds = &.{.chrome} }));
+    }
+    for (0..3) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, launchElectronWebViewAsync(failing.allocator(), .{ .executable_path = "electron" }));
+    }
 }
