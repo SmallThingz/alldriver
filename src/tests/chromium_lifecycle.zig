@@ -207,6 +207,26 @@ test "Chromium listing empty contexts does not silently create a page" {
     try std.testing.expectEqual(@as(usize, 0), still_empty.len);
 }
 
+test "Chromium explicit reselection restores fresh network observation after an RPC timeout" {
+    var browser = try Browser.launch();
+    defer browser.deinit();
+    try browser.navigateHtml("<!doctype html><title>recovery target</title>");
+    const target = try allocator.dupe(u8, browser.session.base.cdp_target_id.?);
+    defer allocator.free(target);
+    const previous_timeout = browser.session.base.timeout_policy.network_ms;
+    browser.session.base.timeout_policy.network_ms = 40;
+    var runtime = browser.session.runtime();
+    try std.testing.expectError(error.Timeout, runtime.evaluate("new Promise(()=>{})"));
+    browser.session.base.timeout_policy.network_ms = previous_timeout;
+    try std.testing.expect(!browser.session.base.network_tracking_valid);
+    try std.testing.expectError(error.NetworkObservationLost, browser.session.waitFor(.network_idle, .{ .timeout_ms = 2000 }));
+    var targets = browser.session.targets();
+    try targets.attach(target);
+    try std.testing.expect(browser.session.base.network_tracking_valid);
+    try browser.evaluateTrue("document.title==='recovery target'");
+    _ = try browser.session.waitFor(.network_idle, .{ .timeout_ms = 2000 });
+}
+
 test "Chromium async cancellation stops pending wait and abandoned evaluation releases owned result" {
     var browser = try Browser.launch();
     defer browser.deinit();

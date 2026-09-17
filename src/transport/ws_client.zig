@@ -7,6 +7,7 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
     receive_timeout_ms: u32 = 30_000,
+    send_timeout_ms: u32 = 30_000,
     failed: bool = false,
     pub const max_message_size = 64 * 1024 * 1024;
 
@@ -16,6 +17,35 @@ pub const Client = struct {
         port: u16,
         path: []const u8,
     ) !Client {
+        return connectWithTimeout(allocator, host, port, path, 30_000);
+    }
+
+    pub fn connectWithTimeout(allocator: std.mem.Allocator, host: []const u8, port: u16, path: []const u8, timeout_ms: u32) !Client {
+        if (timeout_ms == 0) return error.Timeout;
+        const Result = union(enum) { connection: anyerror!Client, timeout: anyerror!void };
+        var buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(compat.io(), &buffer);
+        defer while (select.cancel()) |result| {
+            switch (result) {
+                .connection => |connection| if (connection) |value| {
+                    var client = value;
+                    client.deinit();
+                } else |_| {},
+                .timeout => {},
+            }
+        };
+        try select.concurrent(.connection, connectBlocking, .{ allocator, host, port, path });
+        try select.concurrent(.timeout, receiveTimeout, .{timeout_ms});
+        return switch (try select.await()) {
+            .connection => |connection| connection,
+            .timeout => |done| {
+                try done;
+                return error.Timeout;
+            },
+        };
+    }
+
+    fn connectBlocking(allocator: std.mem.Allocator, host: []const u8, port: u16, path: []const u8) anyerror!Client {
         const address = if (std.mem.eql(u8, host, "localhost"))
             try std.Io.net.IpAddress.parseIp4("127.0.0.1", port)
         else
@@ -39,8 +69,7 @@ pub const Client = struct {
 
         try io_util.writeAll(&stream, handshake);
 
-        var client = Client{ .allocator = allocator, .stream = stream };
-        const response = try client.receiveWithTimeout(allocator, true);
+        const response = try readHttpHeaders(allocator, &stream);
         defer allocator.free(response);
 
         if (!isStatus101(response)) return error.HandshakeFailed;
@@ -54,7 +83,7 @@ pub const Client = struct {
             return error.HandshakeFailed;
         }
 
-        return client;
+        return .{ .allocator = allocator, .stream = stream };
     }
 
     pub fn deinit(self: *Client) void {
@@ -65,6 +94,23 @@ pub const Client = struct {
     pub fn sendText(self: *Client, payload: []const u8) !void {
         if (self.failed) return error.ConnectionClosed;
         if (payload.len > max_message_size) return error.FrameTooLarge;
+        const Result = union(enum) { sent: anyerror!void, timeout: anyerror!void };
+        var buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(compat.io(), &buffer);
+        defer select.cancelDiscard();
+        errdefer self.failed = true;
+        try select.concurrent(.sent, sendTextBlocking, .{ self, payload });
+        try select.concurrent(.timeout, receiveTimeout, .{self.send_timeout_ms});
+        switch (try select.await()) {
+            .sent => |sent| try sent,
+            .timeout => |done| {
+                try done;
+                return error.Timeout;
+            },
+        }
+    }
+
+    fn sendTextBlocking(self: *Client, payload: []const u8) anyerror!void {
         var header: [14]u8 = undefined;
         var hlen: usize = 0;
 
@@ -91,14 +137,13 @@ pub const Client = struct {
         @memcpy(header[hlen .. hlen + 4], &mask);
         hlen += 4;
 
-        try io_util.writeAll(&self.stream, header[0..hlen]);
-
         var masked = try self.allocator.alloc(u8, payload.len);
         defer self.allocator.free(masked);
 
         for (payload, 0..) |b, i| {
             masked[i] = b ^ mask[i % 4];
         }
+        try io_util.writeAll(&self.stream, header[0..hlen]);
         try io_util.writeAll(&self.stream, masked);
     }
 
@@ -451,4 +496,33 @@ test "websocket upgrade reads real headers without consuming coalesced first fra
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("ok", text);
     try std.testing.expect(!headerHasToken("HTTP/1.1 101\r\nConnection: upgrade-invalid\r\n\r\n", "Connection", "upgrade"));
+}
+
+fn stalledUpgradeServer(server: *std.Io.net.Server) void {
+    var peer = server.accept(compat.io()) catch return;
+    defer peer.close(compat.io());
+    const request = readHttpHeaders(std.testing.allocator, &peer) catch return;
+    defer std.testing.allocator.free(request);
+    var byte: [1]u8 = undefined;
+    _ = io_util.read(&peer, &byte) catch return;
+}
+
+test "websocket total connect deadline cancels a stalled upgrade" {
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(compat.io(), .{});
+    defer server.deinit(compat.io());
+    var task = try std.Io.concurrent(compat.io(), stalledUpgradeServer, .{&server});
+    defer task.cancel(compat.io());
+    try std.testing.expectError(error.Timeout, Client.connectWithTimeout(std.testing.allocator, "127.0.0.1", server.socket.address.getPort(), "/devtools/page/stall", 40));
+}
+
+test "websocket send deadline cancels backpressure and invalidates a partially sent frame" {
+    var pair = try TestPair.init();
+    defer pair.deinit();
+    pair.client.send_timeout_ms = 20;
+    const bytes = try std.testing.allocator.alloc(u8, 8 * 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    try std.testing.expectError(error.Timeout, pair.client.sendText(bytes));
+    try std.testing.expectError(error.ConnectionClosed, pair.client.sendText("next"));
 }
