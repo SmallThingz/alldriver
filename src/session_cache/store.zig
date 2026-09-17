@@ -83,7 +83,7 @@ pub const SessionCacheStore = struct {
         defer self.allocator.free(path);
 
         if (!force_refresh) {
-            if (self.load(self.allocator, entry.domain, entry.profile_key) catch null) |existing| {
+            if (try self.load(self.allocator, entry.domain, entry.profile_key)) |existing| {
                 var mutable = existing;
                 deinitEntry(self.allocator, &mutable);
                 return;
@@ -115,11 +115,11 @@ pub const SessionCacheStore = struct {
 
     pub fn cleanupExpired(self: *SessionCacheStore) !u32 {
         var dir = try compat.cwd().openDir(self.root_dir, .{ .iterate = true });
-        defer dir.close();
+        defer dir.close(compat.io());
 
         var removed: u32 = 0;
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(compat.io())) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
 
@@ -129,8 +129,9 @@ pub const SessionCacheStore = struct {
             const payload = readFileAlloc(self.allocator, file_path, 8 * 1024 * 1024) catch continue;
             defer self.allocator.free(payload);
 
-            const expires = parseExpiresFromPayload(self.allocator, payload) catch {
-                compat.cwd().deleteFile(file_path) catch {};
+            const expires = parseExpiresFromPayload(self.allocator, payload) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                compat.cwd().deleteFile(file_path) catch continue;
                 removed += 1;
                 continue;
             };
@@ -190,58 +191,68 @@ fn materializeEntryForSave(
 ) !types.SessionCacheEntry {
     const mask = resolveMask(options);
     const captured_at = if (source.captured_at_ms == 0) nowMs() else source.captured_at_ms;
-    const expires_at = if (ttl_ms) |ttl| captured_at + ttl else source.expires_at_ms;
+    const expires_at = if (ttl_ms) |ttl| try std.math.add(u64, captured_at, ttl) else source.expires_at_ms;
 
-    var out: types.SessionCacheEntry = .{
-        .domain = try allocator.dupe(u8, source.domain),
-        .profile_key = try allocator.dupe(u8, source.profile_key),
-        .user_agent = if (mask.user_agent) try allocator.dupe(u8, source.user_agent) else try allocator.dupe(u8, ""),
-        .cookies = if (mask.cookies) try cloneCookies(allocator, source.cookies) else try allocator.alloc(types.Cookie, 0),
-        .local_storage = if (mask.local_storage) try cloneStorageValues(allocator, source.local_storage) else try allocator.alloc(types.StorageValue, 0),
-        .session_storage = if (mask.session_storage) try cloneStorageValues(allocator, source.session_storage) else try allocator.alloc(types.StorageValue, 0),
-        .current_url = if (mask.current_url and source.current_url != null) try allocator.dupe(u8, source.current_url.?) else null,
-        .extra_headers = if (mask.extra_headers) try cloneHeaders(allocator, source.extra_headers) else try allocator.alloc(types.Header, 0),
-        .captured_at_ms = captured_at,
-        .expires_at_ms = expires_at,
-        .schema_version = schema_version,
-    };
-    errdefer deinitEntry(allocator, &out);
-    return out;
+    var selected = source;
+    selected.captured_at_ms = captured_at;
+    selected.expires_at_ms = expires_at;
+    selected.schema_version = schema_version;
+    if (!mask.user_agent) selected.user_agent = "";
+    if (!mask.cookies) selected.cookies = &.{};
+    if (!mask.local_storage) selected.local_storage = &.{};
+    if (!mask.session_storage) selected.session_storage = &.{};
+    if (!mask.current_url) selected.current_url = null;
+    if (!mask.extra_headers) selected.extra_headers = &.{};
+    return cloneOwned(types.SessionCacheEntry, allocator, selected);
 }
 
-fn serializeEntry(allocator: std.mem.Allocator, entry: types.SessionCacheEntry) ![]u8 {
-    var root = std.json.ObjectMap.init(allocator);
-    defer root.deinit();
+fn serializeEntry(output_allocator: std.mem.Allocator, entry: types.SessionCacheEntry) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(output_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var root: std.json.ObjectMap = .empty;
 
-    try root.put("schema_version", .{ .integer = entry.schema_version });
-    try root.put("domain", .{ .string = entry.domain });
-    try root.put("profile_key", .{ .string = entry.profile_key });
-    try root.put("captured_at_ms", .{ .integer = @intCast(entry.captured_at_ms) });
+    try root.put(allocator, "schema_version", .{ .integer = entry.schema_version });
+    try root.put(allocator, "domain", .{ .string = entry.domain });
+    try root.put(allocator, "profile_key", .{ .string = entry.profile_key });
+    try root.put(allocator, "captured_at_ms", .{ .number_string = try std.fmt.allocPrint(allocator, "{d}", .{entry.captured_at_ms}) });
     if (entry.expires_at_ms) |expires_at| {
-        try root.put("expires_at_ms", .{ .integer = @intCast(expires_at) });
+        try root.put(allocator, "expires_at_ms", .{ .number_string = try std.fmt.allocPrint(allocator, "{d}", .{expires_at}) });
     } else {
-        try root.put("expires_at_ms", .null);
+        try root.put(allocator, "expires_at_ms", .null);
     }
-    try root.put("user_agent", .{ .string = entry.user_agent });
-    try root.put("cookies", try cookiesToJson(allocator, entry.cookies));
-    try root.put("local_storage", try storageToJson(allocator, entry.local_storage));
-    try root.put("session_storage", try storageToJson(allocator, entry.session_storage));
+    try root.put(allocator, "user_agent", .{ .string = entry.user_agent });
+    try root.put(allocator, "cookies", try cookiesToJson(allocator, entry.cookies));
+    try root.put(allocator, "local_storage", try storageToJson(allocator, entry.local_storage));
+    try root.put(allocator, "session_storage", try storageToJson(allocator, entry.session_storage));
     if (entry.current_url) |url| {
-        try root.put("current_url", .{ .string = url });
+        try root.put(allocator, "current_url", .{ .string = url });
     } else {
-        try root.put("current_url", .null);
+        try root.put(allocator, "current_url", .null);
     }
-    try root.put("extra_headers", try headersToJson(allocator, entry.extra_headers));
+    try root.put(allocator, "extra_headers", try headersToJson(allocator, entry.extra_headers));
 
-    return std.json.Stringify.valueAlloc(allocator, std.json.Value{ .object = root }, .{});
+    return std.json.Stringify.valueAlloc(output_allocator, std.json.Value{ .object = root }, .{});
 }
 
-fn parseEntry(allocator: std.mem.Allocator, payload: []const u8) !types.SessionCacheEntry {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+fn parseEntry(output_allocator: std.mem.Allocator, payload: []const u8) !types.SessionCacheEntry {
+    var arena = std.heap.ArenaAllocator.init(output_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.CorruptEntry,
+    };
     defer parsed.deinit();
 
     if (parsed.value != .object) return error.CorruptEntry;
     const obj = parsed.value.object;
+    if (obj.get("expires_at_ms")) |expires| {
+        if (expires != .null and intFieldAsU64(obj, "expires_at_ms") == null) return error.CorruptEntry;
+    }
+    if (obj.get("captured_at_ms")) |_| {
+        if (intFieldAsU64(obj, "captured_at_ms") == null) return error.CorruptEntry;
+    }
 
     const schema = getIntField(obj, "schema_version") orelse return error.CorruptEntry;
     if (schema < 0 or schema > std.math.maxInt(u32)) return error.IncompatibleSchema;
@@ -267,7 +278,7 @@ fn parseEntry(allocator: std.mem.Allocator, payload: []const u8) !types.SessionC
         .schema_version = @intCast(schema),
     };
     errdefer deinitEntry(allocator, &entry);
-    return entry;
+    return cloneOwned(types.SessionCacheEntry, output_allocator, entry);
 }
 
 fn resolveMask(options: types.SessionCacheOptions) types.SessionCachePayloadMask {
@@ -318,6 +329,7 @@ fn atomicWriteFile(path: []const u8, data: []const u8) !void {
     const tmp_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}.tmp.{d}", .{ path, compat.nanoTimestamp() });
     defer std.heap.page_allocator.free(tmp_path);
 
+    errdefer compat.cwd().deleteFile(tmp_path) catch {};
     try compat.cwd().writeFile(.{
         .sub_path = tmp_path,
         .data = data,
@@ -330,10 +342,9 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8, max_size: usize
 }
 
 fn parseExpiresFromPayload(allocator: std.mem.Allocator, payload: []const u8) !?u64 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return null;
-    return intFieldAsU64(parsed.value.object, "expires_at_ms");
+    var entry = try parseEntry(allocator, payload);
+    defer deinitEntry(allocator, &entry);
+    return entry.expires_at_ms;
 }
 
 fn nowMs() u64 {
@@ -357,7 +368,7 @@ fn getIntField(obj: std.json.ObjectMap, key: []const u8) ?i64 {
             const truncated = @trunc(n);
             if (truncated != n) break :blk null;
             if (truncated < @as(f64, @floatFromInt(std.math.minInt(i64))) or
-                truncated > @as(f64, @floatFromInt(std.math.maxInt(i64))))
+                truncated >= @as(f64, @floatFromInt(std.math.maxInt(i64))))
             {
                 break :blk null;
             }
@@ -368,6 +379,9 @@ fn getIntField(obj: std.json.ObjectMap, key: []const u8) ?i64 {
 }
 
 fn intFieldAsU64(obj: std.json.ObjectMap, key: []const u8) ?u64 {
+    if (obj.get(key)) |value| {
+        if (value == .number_string) return std.fmt.parseInt(u64, value.number_string, 10) catch null;
+    }
     const raw = getIntField(obj, key) orelse return null;
     if (raw < 0) return null;
     return std.math.cast(u64, raw);
@@ -383,19 +397,19 @@ fn cookiesToJson(allocator: std.mem.Allocator, cookies: []const types.Cookie) !s
     var arr = std.ArrayList(std.json.Value).empty;
     defer arr.deinit(allocator);
     for (cookies) |cookie| {
-        var obj = std.json.ObjectMap.init(allocator);
-        try obj.put("name", .{ .string = cookie.name });
-        try obj.put("value", .{ .string = cookie.value });
-        try obj.put("domain", .{ .string = cookie.domain });
-        try obj.put("path", .{ .string = cookie.path });
-        try obj.put("secure", .{ .bool = cookie.secure });
-        try obj.put("httpOnly", .{ .bool = cookie.http_only });
+        var obj = std.json.ObjectMap.empty;
+        try obj.put(allocator, "name", .{ .string = cookie.name });
+        try obj.put(allocator, "value", .{ .string = cookie.value });
+        try obj.put(allocator, "domain", .{ .string = cookie.domain });
+        try obj.put(allocator, "path", .{ .string = cookie.path });
+        try obj.put(allocator, "secure", .{ .bool = cookie.secure });
+        try obj.put(allocator, "httpOnly", .{ .bool = cookie.http_only });
         if (cookie.expires_unix_seconds) |expires| {
-            try obj.put("expires", .{ .integer = expires });
+            try obj.put(allocator, "expires", .{ .integer = expires });
         } else {
-            try obj.put("expires", .null);
+            try obj.put(allocator, "expires", .null);
         }
-        try obj.put("sameSite", .{ .string = @tagName(cookie.same_site) });
+        try obj.put(allocator, "sameSite", .{ .string = @tagName(cookie.same_site) });
         try arr.append(allocator, .{ .object = obj });
     }
     return .{ .array = .{ .items = try arr.toOwnedSlice(allocator), .capacity = arr.items.len, .allocator = allocator } };
@@ -405,9 +419,9 @@ fn storageToJson(allocator: std.mem.Allocator, values: []const types.StorageValu
     var arr = std.ArrayList(std.json.Value).empty;
     defer arr.deinit(allocator);
     for (values) |item| {
-        var obj = std.json.ObjectMap.init(allocator);
-        try obj.put("key", .{ .string = item.key });
-        try obj.put("value", .{ .string = item.value });
+        var obj = std.json.ObjectMap.empty;
+        try obj.put(allocator, "key", .{ .string = item.key });
+        try obj.put(allocator, "value", .{ .string = item.value });
         try arr.append(allocator, .{ .object = obj });
     }
     return .{ .array = .{ .items = try arr.toOwnedSlice(allocator), .capacity = arr.items.len, .allocator = allocator } };
@@ -417,16 +431,16 @@ fn headersToJson(allocator: std.mem.Allocator, headers: []const types.Header) !s
     var arr = std.ArrayList(std.json.Value).empty;
     defer arr.deinit(allocator);
     for (headers) |h| {
-        var obj = std.json.ObjectMap.init(allocator);
-        try obj.put("name", .{ .string = h.name });
-        try obj.put("value", .{ .string = h.value });
+        var obj = std.json.ObjectMap.empty;
+        try obj.put(allocator, "name", .{ .string = h.name });
+        try obj.put(allocator, "value", .{ .string = h.value });
         try arr.append(allocator, .{ .object = obj });
     }
     return .{ .array = .{ .items = try arr.toOwnedSlice(allocator), .capacity = arr.items.len, .allocator = allocator } };
 }
 
 fn parseCookies(allocator: std.mem.Allocator, value: std.json.Value) ![]types.Cookie {
-    if (value != .array) return allocator.alloc(types.Cookie, 0);
+    if (value != .array) return error.CorruptEntry;
     var out: std.ArrayList(types.Cookie) = .empty;
     errdefer {
         for (out.items) |cookie| {
@@ -438,7 +452,7 @@ fn parseCookies(allocator: std.mem.Allocator, value: std.json.Value) ![]types.Co
         out.deinit(allocator);
     }
     for (value.array.items) |item| {
-        if (item != .object) continue;
+        if (item != .object) return error.CorruptEntry;
         const obj = item.object;
         const raw_same_site = getStringField(obj, "sameSite") orelse "unspecified";
         const same_site: types.CookieSameSite = if (std.ascii.eqlIgnoreCase(raw_same_site, "strict"))
@@ -450,8 +464,8 @@ fn parseCookies(allocator: std.mem.Allocator, value: std.json.Value) ![]types.Co
         else
             .unspecified;
         try out.append(allocator, .{
-            .name = try allocator.dupe(u8, getStringField(obj, "name") orelse ""),
-            .value = try allocator.dupe(u8, getStringField(obj, "value") orelse ""),
+            .name = try allocator.dupe(u8, getStringField(obj, "name") orelse return error.CorruptEntry),
+            .value = try allocator.dupe(u8, getStringField(obj, "value") orelse return error.CorruptEntry),
             .domain = try allocator.dupe(u8, getStringField(obj, "domain") orelse ""),
             .path = try allocator.dupe(u8, getStringField(obj, "path") orelse "/"),
             .secure = getBoolField(obj, "secure") orelse false,
@@ -464,7 +478,7 @@ fn parseCookies(allocator: std.mem.Allocator, value: std.json.Value) ![]types.Co
 }
 
 fn parseStorageValues(allocator: std.mem.Allocator, value: std.json.Value) ![]types.StorageValue {
-    if (value != .array) return allocator.alloc(types.StorageValue, 0);
+    if (value != .array) return error.CorruptEntry;
     var out: std.ArrayList(types.StorageValue) = .empty;
     errdefer {
         for (out.items) |item| {
@@ -474,18 +488,18 @@ fn parseStorageValues(allocator: std.mem.Allocator, value: std.json.Value) ![]ty
         out.deinit(allocator);
     }
     for (value.array.items) |item| {
-        if (item != .object) continue;
+        if (item != .object) return error.CorruptEntry;
         const obj = item.object;
         try out.append(allocator, .{
-            .key = try allocator.dupe(u8, getStringField(obj, "key") orelse ""),
-            .value = try allocator.dupe(u8, getStringField(obj, "value") orelse ""),
+            .key = try allocator.dupe(u8, getStringField(obj, "key") orelse return error.CorruptEntry),
+            .value = try allocator.dupe(u8, getStringField(obj, "value") orelse return error.CorruptEntry),
         });
     }
     return out.toOwnedSlice(allocator);
 }
 
 fn parseHeaders(allocator: std.mem.Allocator, value: std.json.Value) ![]types.Header {
-    if (value != .array) return allocator.alloc(types.Header, 0);
+    if (value != .array) return error.CorruptEntry;
     var out: std.ArrayList(types.Header) = .empty;
     errdefer {
         for (out.items) |h| {
@@ -495,85 +509,63 @@ fn parseHeaders(allocator: std.mem.Allocator, value: std.json.Value) ![]types.He
         out.deinit(allocator);
     }
     for (value.array.items) |item| {
-        if (item != .object) continue;
+        if (item != .object) return error.CorruptEntry;
         const obj = item.object;
         try out.append(allocator, .{
-            .name = try allocator.dupe(u8, getStringField(obj, "name") orelse ""),
-            .value = try allocator.dupe(u8, getStringField(obj, "value") orelse ""),
+            .name = try allocator.dupe(u8, getStringField(obj, "name") orelse return error.CorruptEntry),
+            .value = try allocator.dupe(u8, getStringField(obj, "value") orelse return error.CorruptEntry),
         });
     }
     return out.toOwnedSlice(allocator);
 }
 
-fn cloneCookies(allocator: std.mem.Allocator, src: []const types.Cookie) ![]types.Cookie {
-    const out = try allocator.alloc(types.Cookie, src.len);
-    var initialized: usize = 0;
-    errdefer {
-        var idx: usize = 0;
-        while (idx < initialized) : (idx += 1) {
-            allocator.free(out[idx].name);
-            allocator.free(out[idx].value);
-            allocator.free(out[idx].domain);
-            allocator.free(out[idx].path);
-        }
-        allocator.free(out);
+// Clone with cleanup at every partially initialized aggregate boundary.
+fn cloneOwned(comptime T: type, allocator: std.mem.Allocator, source: T) !T {
+    switch (@typeInfo(T)) {
+        .pointer => |ptr| {
+            const out = try allocator.alloc(ptr.child, source.len);
+            var initialized: usize = 0;
+            errdefer {
+                for (out[0..initialized]) |value| freeOwned(ptr.child, allocator, value);
+                allocator.free(out);
+            }
+            for (source, 0..) |value, i| {
+                out[i] = try cloneOwned(ptr.child, allocator, value);
+                initialized += 1;
+            }
+            return out;
+        },
+        .@"struct" => |info| {
+            var out: T = undefined;
+            var initialized: usize = 0;
+            errdefer inline for (info.fields, 0..) |field, i| {
+                if (i < initialized) freeOwned(field.type, allocator, @field(out, field.name));
+            };
+            inline for (info.fields) |field| {
+                @field(out, field.name) = try cloneOwned(field.type, allocator, @field(source, field.name));
+                initialized += 1;
+            }
+            return out;
+        },
+        .optional => |info| return if (source) |value| try cloneOwned(info.child, allocator, value) else null,
+        else => return source,
     }
-    for (src, 0..) |cookie, idx| {
-        out[idx] = .{
-            .name = try allocator.dupe(u8, cookie.name),
-            .value = try allocator.dupe(u8, cookie.value),
-            .domain = try allocator.dupe(u8, cookie.domain),
-            .path = try allocator.dupe(u8, cookie.path),
-            .secure = cookie.secure,
-            .http_only = cookie.http_only,
-            .expires_unix_seconds = cookie.expires_unix_seconds,
-            .same_site = cookie.same_site,
-        };
-        initialized += 1;
-    }
-    return out;
 }
 
-fn cloneStorageValues(allocator: std.mem.Allocator, src: []const types.StorageValue) ![]types.StorageValue {
-    const out = try allocator.alloc(types.StorageValue, src.len);
-    var initialized: usize = 0;
-    errdefer {
-        var idx: usize = 0;
-        while (idx < initialized) : (idx += 1) {
-            allocator.free(out[idx].key);
-            allocator.free(out[idx].value);
-        }
-        allocator.free(out);
+fn freeOwned(comptime T: type, allocator: std.mem.Allocator, value: T) void {
+    switch (@typeInfo(T)) {
+        .pointer => |ptr| {
+            for (value) |item| freeOwned(ptr.child, allocator, item);
+            allocator.free(value);
+        },
+        .@"struct" => |info| inline for (info.fields) |field| {
+            freeOwned(field.type, allocator, @field(value, field.name));
+        },
+        .optional => |info| if (value) |item| {
+            freeOwned(info.child, allocator, item);
+        },
+        else => {},
     }
-    for (src, 0..) |item, idx| {
-        out[idx] = .{
-            .key = try allocator.dupe(u8, item.key),
-            .value = try allocator.dupe(u8, item.value),
-        };
-        initialized += 1;
-    }
-    return out;
-}
-
-fn cloneHeaders(allocator: std.mem.Allocator, src: []const types.Header) ![]types.Header {
-    const out = try allocator.alloc(types.Header, src.len);
-    var initialized: usize = 0;
-    errdefer {
-        var idx: usize = 0;
-        while (idx < initialized) : (idx += 1) {
-            allocator.free(out[idx].name);
-            allocator.free(out[idx].value);
-        }
-        allocator.free(out);
-    }
-    for (src, 0..) |h, idx| {
-        out[idx] = .{
-            .name = try allocator.dupe(u8, h.name),
-            .value = try allocator.dupe(u8, h.value),
-        };
-        initialized += 1;
-    }
-    return out;
 }
 
 test "session cache round-trip load/save" {
@@ -591,12 +583,12 @@ test "session cache round-trip load/save" {
         .domain = "example.com",
         .profile_key = "default",
         .user_agent = "UA",
-        .cookies = &.{.{
+        .cookies = @constCast(&[_]types.Cookie{.{
             .name = "sid",
             .value = "abc",
             .domain = "example.com",
             .path = "/",
-        }},
+        }}),
         .captured_at_ms = nowMs(),
         .expires_at_ms = null,
         .schema_version = schema_version,
@@ -679,4 +671,106 @@ test "session cache ttl expiry invalidates on load" {
 
     const loaded = try store.load(allocator, "expired.example", "p");
     try std.testing.expect(loaded == null);
+}
+
+fn richFixture() types.SessionCacheEntry {
+    return .{
+        .domain = "example.com",
+        .profile_key = "profile",
+        .user_agent = "Agent",
+        .cookies = @constCast(&[_]types.Cookie{.{ .name = "session", .value = "quoted\"\nvalue", .domain = ".example.com", .path = "/private", .secure = true, .http_only = false, .same_site = .strict, .expires_unix_seconds = 123456789 }}),
+        .local_storage = @constCast(&[_]types.StorageValue{.{ .key = "local", .value = "λ" }}),
+        .session_storage = @constCast(&[_]types.StorageValue{.{ .key = "session", .value = "value" }}),
+        .current_url = "https://example.com/private",
+        .extra_headers = @constCast(&[_]types.Header{.{ .name = "X-Test", .value = "yes" }}),
+        .captured_at_ms = 1234,
+        .expires_at_ms = null,
+        .schema_version = schema_version,
+    };
+}
+
+fn allocationRoundtrip(allocator: std.mem.Allocator) !void {
+    var saved = try materializeEntryForSave(allocator, richFixture(), 1000, .{ .preset = .rich_state });
+    defer deinitEntry(allocator, &saved);
+    const bytes = try serializeEntry(allocator, saved);
+    defer allocator.free(bytes);
+    var loaded = try parseEntry(allocator, bytes);
+    defer deinitEntry(allocator, &loaded);
+    try std.testing.expectEqualDeep(saved, loaded);
+}
+
+test "rich session payload roundtrips every field with allocation failures" {
+    try allocationRoundtrip(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationRoundtrip, .{});
+}
+
+test "cache rejects malformed JSON and malformed nested payloads without leaks" {
+    for ([_][]const u8{
+        "{",                                                                                                    "[]",
+        "{\"schema_version\":1,\"domain\":\"x\"}",                                                              "{\"schema_version\":1,\"domain\":\"x\",\"profile_key\":\"p\",\"cookies\":[1]}",
+        "{\"schema_version\":1,\"domain\":\"x\",\"profile_key\":\"p\",\"local_storage\":[{\"key\":\"x\"}]}",    "{\"schema_version\":1,\"domain\":\"x\",\"profile_key\":\"p\",\"expires_at_ms\":-1}",
+        "{\"schema_version\":1,\"domain\":\"x\",\"profile_key\":\"p\",\"expires_at_ms\":9.223372036854776e18}",
+    }) |payload| {
+        try std.testing.expectError(error.CorruptEntry, parseEntry(std.testing.allocator, payload));
+    }
+}
+
+test "cache masks omit data and TTL overflow is an error" {
+    var saved = try materializeEntryForSave(std.testing.allocator, richFixture(), null, .{ .preset = .minimal });
+    defer deinitEntry(std.testing.allocator, &saved);
+    try std.testing.expectEqual(@as(usize, 1), saved.cookies.len);
+    try std.testing.expectEqualStrings("", saved.user_agent);
+    try std.testing.expectEqual(@as(usize, 0), saved.local_storage.len);
+    try std.testing.expectEqual(@as(usize, 0), saved.session_storage.len);
+    try std.testing.expectEqual(@as(usize, 0), saved.extra_headers.len);
+    try std.testing.expect(saved.current_url == null);
+    try std.testing.expectError(error.Overflow, materializeEntryForSave(std.testing.allocator, richFixture(), std.math.maxInt(u64), .{}));
+}
+
+test "cache timestamp serialization preserves full unsigned range" {
+    var fixture = richFixture();
+    fixture.captured_at_ms = std.math.maxInt(u64);
+    fixture.expires_at_ms = std.math.maxInt(u64);
+    const bytes = try serializeEntry(std.testing.allocator, fixture);
+    defer std.testing.allocator.free(bytes);
+    var parsed = try parseEntry(std.testing.allocator, bytes);
+    defer deinitEntry(std.testing.allocator, &parsed);
+    try std.testing.expectEqual(fixture.captured_at_ms, parsed.captured_at_ms);
+    try std.testing.expectEqual(fixture.expires_at_ms, parsed.expires_at_ms);
+}
+
+test "cache disk refresh corruption cleanup and invalidation contracts" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "contracts" });
+    defer allocator.free(root);
+    var store = try SessionCacheStore.open(allocator, root);
+    defer store.deinit();
+    var fixture = richFixture();
+    try store.saveWithOptions(fixture, null, true, .{ .preset = .rich_state });
+    fixture.user_agent = "replacement";
+    try store.saveWithOptions(fixture, null, false, .{ .preset = .rich_state });
+    var original = (try store.load(allocator, fixture.domain, fixture.profile_key)).?;
+    defer deinitEntry(allocator, &original);
+    try std.testing.expectEqualStrings("Agent", original.user_agent);
+    try std.testing.expectEqualDeep(richFixture().local_storage, original.local_storage);
+    try store.save(fixture, null, true);
+    var refreshed = (try store.load(allocator, fixture.domain, fixture.profile_key)).?;
+    defer deinitEntry(allocator, &refreshed);
+    try std.testing.expectEqualStrings("replacement", refreshed.user_agent);
+    try std.testing.expectEqual(@as(usize, 0), refreshed.local_storage.len);
+    const path = try cachePathFor(allocator, store.root_dir, fixture.domain, fixture.profile_key);
+    defer allocator.free(path);
+    try atomicWriteFile(path, "{");
+    try std.testing.expect((try store.load(allocator, fixture.domain, fixture.profile_key)) == null);
+    try std.testing.expect(!(try store.invalidate(fixture.domain, fixture.profile_key)));
+    try atomicWriteFile(path, "[]");
+    try std.testing.expectEqual(@as(u32, 1), try store.cleanupExpired());
+    try store.save(fixture, 0, true);
+    try std.testing.expectEqual(@as(u32, 1), try store.cleanupExpired());
+    try store.save(fixture, null, true);
+    try std.testing.expectEqual(@as(u32, 0), try store.cleanupExpired());
+    try std.testing.expect(try store.invalidate(fixture.domain, fixture.profile_key));
+    try std.testing.expect(!(try store.invalidate(fixture.domain, fixture.profile_key)));
 }
