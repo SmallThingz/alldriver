@@ -24,8 +24,8 @@ pub fn build(b: *std.Build) void {
     const vm_lab_dir = b.option(
         []const u8,
         "vm_lab_dir",
-        "Shared VM lab root directory (default: /home/a/vm_lab)",
-    ) orelse "/home/a/vm_lab";
+        "VM lab root directory (default: .tmp/vm-lab)",
+    ) orelse ".tmp/vm-lab";
     const vm_host = b.option(
         []const u8,
         "vm_host",

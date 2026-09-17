@@ -88,6 +88,8 @@ pub const LocalServer = struct {
         var header_buf: [512]u8 = undefined;
         const headers = try std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nX-Origin: local-server\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{ body.len, if (std.mem.eql(u8, path, "/")) "text/html" else "text/plain" });
         try io_util.writeAll(stream, headers);
+        if (std.mem.startsWith(u8, path, "/slow-"))
+            try std.Io.sleep(compat.io(), .fromMilliseconds(800), .awake);
         try io_util.writeAll(stream, body);
     }
 };
@@ -136,6 +138,23 @@ fn expectRecord(session: *driver.modern.ModernSession, path: []const u8, status:
         if (compat.milliTimestamp() - started > 5000) return error.MissingCompletedNetworkRecord;
         compat.sleepMs(20);
     }
+}
+
+test "Chromium network idle waits for response bodies image requests and a quiet interval" {
+    const server = try LocalServer.start();
+    defer server.deinit();
+    var browser = try @import("chromium_behavior.zig").Browser.launch();
+    defer browser.deinit();
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{server.listener.socket.address.getPort()});
+    defer allocator.free(url);
+    var page = browser.session.page();
+    try page.navigate(url);
+    try browser.evaluateTrue("(()=>{window.bodyDone=false;window.imageDone=false;fetch('/slow-body').then(r=>r.text()).then(t=>{window.bodyDone=t==='origin response'});const i=new Image();i.onload=i.onerror=()=>window.imageDone=true;i.src='/slow-image';window.slowImage=i;return !('__alldriver_active_requests' in window)})()");
+    try std.testing.expectError(error.Timeout, browser.session.base.waitFor(.network_idle, .{ .timeout_ms = 100, .poll_interval_ms = 10 }));
+    const result = try browser.session.base.waitFor(.network_idle, .{ .timeout_ms = 4000, .poll_interval_ms = 20 });
+    try std.testing.expect(result.elapsed_ms >= 500);
+    try browser.evaluateTrue("window.bodyDone && window.imageDone");
+    try std.testing.expect(!server.failed.load(.acquire));
 }
 
 test "Chromium interception changes real requests and records actual responses" {

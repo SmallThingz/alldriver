@@ -5,4 +5,5 @@ comptime {
     _ = @import("tests/chromium_lifecycle.zig");
     _ = @import("tests/chromium_downloads.zig");
     _ = @import("tests/chromium_storage.zig");
+    _ = @import("tests/chromium_waits.zig");
 }

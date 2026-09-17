@@ -959,13 +959,23 @@ fn waitForScriptsSettledMilestone(self: *Session, timeout_ms: u32) bool {
     const max_wait_ms: u32 = @min(timeout_ms, 10_000);
     const start = compat.milliTimestamp();
     while (elapsedSince(start) < max_wait_ms) {
-        const payload = executor.evaluate(
+        const probe_elapsed = elapsedSince(start);
+        if (probe_elapsed >= max_wait_ms) return false;
+        const payload = executor.evaluateWithTimeout(
             self,
-            "(function(){const ready=document.readyState==='complete'; const noReq=(!window.__alldriver_active_requests||window.__alldriver_active_requests===0); return ready && noReq;})();",
+            "document.readyState==='complete'",
+            max_wait_ms - @as(u32, @intCast(probe_elapsed)),
         ) catch return false;
         defer self.allocator.free(payload);
-        if (std.mem.indexOf(u8, payload, "true") != null) return true;
-        compat.sleepMs(50);
+        self.network_lock.lock();
+        const valid = self.network_tracking_valid;
+        const quiet = self.network_inflight.count() == 0 and compat.milliTimestamp() - @max(start, self.network_last_activity_ms) >= 500;
+        self.network_lock.unlock();
+        if (!valid) return false;
+        if (quiet and std.mem.indexOf(u8, payload, "true") != null) return true;
+        const elapsed = elapsedSince(start);
+        if (elapsed >= max_wait_ms) return false;
+        compat.sleepMs(@min(50, max_wait_ms - elapsed));
     }
     return false;
 }

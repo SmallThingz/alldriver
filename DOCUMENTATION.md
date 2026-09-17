@@ -24,6 +24,8 @@ Domain clients (`page`, `runtime`, `network`, `input`, `log`, `storage`, `contex
 
 `waitFor(target, options)` supports `dom_ready`, `network_idle`, `selector_visible`, `url_contains`, `cookie_present`, `storage_key_present`, and `js_truthy`. `waitForCookie` is a convenience wrapper. Set `timeout_ms`, `poll_interval_ms`, and an optional `CancelToken` in wait options.
 
+`network_idle` requires document completion, no observed in-flight requests, and a 500 ms quiet window. If the protocol connection loses event continuity, it returns `NetworkObservationLost`; selecting a target establishes a fresh observation stream. Wait deadlines and cancellation also cover pending JavaScript promises.
+
 Async operations return an owned handle. Call `await(timeout_ms)` to obtain the result, then `deinit()` to join and release the handle. A successful result can be consumed only once; a second successful-result await returns `AlreadyConsumed`. An await timeout does not cancel the work.
 
 - `isCancelable()` reports whether pending work supports cooperative cancellation.
@@ -97,7 +99,7 @@ The network client supports request/response callbacks, interception rules, `rec
 
 `onEvent(filter, callback)` returns a subscription ID removed by `offEvent(id)`. Event kinds cover navigation/reload, waits, actions, network observations, challenge heuristics, and cookie changes. Empty `filter.kinds` selects all kinds. Domain filters match exact hosts or subdomains case-insensitively; events without a domain are not domain-filtered. Failure and cancellation are separate from successful completion.
 
-Lifecycle subscriptions and telemetry consume protocol notifications during session commands. For network delivery while the caller is idle, use the dedicated request/response or raw network callbacks described above.
+Lifecycle subscriptions and telemetry consume protocol notifications during session commands. Lifecycle callbacks run synchronously; queue further driver commands until the callback returns. For network delivery while the caller is idle, use the dedicated request/response or raw network callbacks described above.
 
 Use `setTimeoutPolicy`, `timeoutPolicy`, and `lastDiagnostic` for operation policy and failures. `driver.modern.setHardErrorLogger` replaces the default diagnostic sink. The library does not provide detection-bypass or challenge-solving primitives.
 
