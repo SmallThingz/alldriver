@@ -1,6 +1,6 @@
 # Examples
 
-These examples target Zig 0.16.0. Desktop launch examples select Chromium browsers; compilation alone does not validate their runtime behavior.
+These examples target Zig 0.17.0. Desktop launch examples select Chromium browsers; compilation alone does not validate their runtime behavior.
 
 ## Build All Examples
 

@@ -2248,7 +2248,7 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         try cmdMatrixCollect(allocator, root, &.{ "--strict-ga", "--matrix-root", matrix_root, "--out", summary_path });
     }
 
-    try runInherit(allocator, &.{ "zig", "build", "-Doptimize=ReleaseSafe" }, root, &env);
+    try runInherit(allocator, &.{ "zig", "build", "-Doptimize=safe" }, root, &env);
 
     const bundle_dir = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release", release_id.? });
     defer allocator.free(bundle_dir);
