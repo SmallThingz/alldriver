@@ -1,6 +1,6 @@
 # alldriver API
 
-`alldriver` requires Zig 0.16.0. The supported browser scope is Chromium over CDP. The required real-browser suite targets Brave; Chrome and Edge use the same Chromium protocol surface, but a Brave run does not independently certify every browser/version/OS combination.
+`alldriver` requires Zig 0.17.0. The supported browser scope is Chromium over CDP. The required real-browser suite targets Brave; Chrome and Edge use the same Chromium protocol surface, but a Brave run does not independently certify every browser/version/OS combination.
 
 Firefox and other Gecko browsers, BiDi, Safari/WebKit, Lightpanda, and platform-specific webviews are outside the currently validated scope. Their discovery entries or existing APIs are not support guarantees.
 

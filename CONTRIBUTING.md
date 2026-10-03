@@ -1,6 +1,6 @@
 # Contributing
 
-Use Zig **0.16.0**, Git, and an installed Brave browser for the required Chromium integration gate.
+Use Zig **0.17.0**, Git, and an installed Brave browser for the required Chromium integration gate.
 
 ```sh
 zig build

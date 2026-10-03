@@ -805,8 +805,8 @@ const DetectionSignals = struct {
 
     fn signalCount(self: DetectionSignals) usize {
         var count: usize = 0;
-        inline for (std.meta.fields(DetectionSignals)) |field| {
-            if (@field(self, field.name)) count += 1;
+        inline for (@typeInfo(DetectionSignals).@"struct".field_names) |field_name| {
+            if (@field(self, field_name)) count += 1;
         }
         return count;
     }

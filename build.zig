@@ -146,16 +146,12 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const tools_step = b.step("tools", "Run alldriver_tools commands (pass args after --)");
     const run_tools_cmd = b.addRunArtifact(tools_exe);
     tools_step.dependOn(&run_tools_cmd.step);
-    if (b.args) |args| {
-        run_tools_cmd.addArgs(args);
-    }
+    run_tools_cmd.addPassthruArgs();
 
     const example_specs = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "example-01-discover", .path = "examples/01_discover.zig" },

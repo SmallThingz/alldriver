@@ -1,6 +1,6 @@
 # alldriver
 
-Chromium browser automation for Zig 0.16, using the Chrome DevTools Protocol (CDP).
+Chromium browser automation for Zig 0.17, using the Chrome DevTools Protocol (CDP).
 
 Launch or attach to a browser, navigate pages, send trusted input, inspect network traffic, and collect screenshots, traces, logs, and downloads. The public API lives under `driver.modern`.
 
@@ -33,7 +33,7 @@ Install with `zig fetch --save git+https://github.com/SmallThingz/alldriver`, th
 
 ## Validation
 
-Use Zig **0.16.0** and an installed Brave browser:
+Use Zig **0.17.0** and an installed Brave browser:
 
 ```sh
 zig build

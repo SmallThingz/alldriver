@@ -128,7 +128,7 @@ pub const CwdDir = struct {
     pub fn createFile(
         self: CwdDir,
         sub_path: []const u8,
-        flags: std.Io.File.CreateFlags,
+        flags: std.Io.Dir.CreateFileOptions,
     ) std.Io.File.OpenError!std.Io.File {
         return self.inner.createFile(io(), sub_path, flags);
     }
@@ -136,7 +136,7 @@ pub const CwdDir = struct {
     pub fn openFile(
         self: CwdDir,
         sub_path: []const u8,
-        flags: std.Io.File.OpenFlags,
+        flags: std.Io.Dir.OpenFileOptions,
     ) std.Io.File.OpenError!std.Io.File {
         return self.inner.openFile(io(), sub_path, flags);
     }
@@ -190,11 +190,11 @@ pub fn openDirAbsolute(path: []const u8, options: std.Io.Dir.OpenOptions) std.Io
     return std.Io.Dir.openDirAbsolute(io(), path, options);
 }
 
-pub fn openFileAbsolute(path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+pub fn openFileAbsolute(path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
     return std.Io.Dir.openFileAbsolute(io(), path, flags);
 }
 
-pub fn createFileAbsolute(path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+pub fn createFileAbsolute(path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
     return std.Io.Dir.createFileAbsolute(io(), path, flags);
 }
 
