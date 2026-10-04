@@ -684,7 +684,7 @@ fn waitForDebugEndpointReady(
 fn childExitedPosixNoHang(child: *std.process.Child) bool {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return false;
     const pid = child.id orelse return true;
-    var status: if (@import("builtin").link_libc) c_int else u32 = undefined;
+    var status: i32 = undefined;
     const result = std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG);
     switch (std.posix.errno(result)) {
         .SUCCESS => {

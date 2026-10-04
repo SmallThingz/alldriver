@@ -412,7 +412,7 @@ fn cookiesToJson(allocator: std.mem.Allocator, cookies: []const types.Cookie) !s
         try obj.put(allocator, "sameSite", .{ .string = @tagName(cookie.same_site) });
         try arr.append(allocator, .{ .object = obj });
     }
-    return .{ .array = .{ .items = try arr.toOwnedSlice(allocator), .capacity = arr.items.len, .allocator = allocator } };
+    return .{ .array = .fromOwnedSlice(allocator, try arr.toOwnedSlice(allocator)) };
 }
 
 fn storageToJson(allocator: std.mem.Allocator, values: []const types.StorageValue) !std.json.Value {
@@ -424,7 +424,7 @@ fn storageToJson(allocator: std.mem.Allocator, values: []const types.StorageValu
         try obj.put(allocator, "value", .{ .string = item.value });
         try arr.append(allocator, .{ .object = obj });
     }
-    return .{ .array = .{ .items = try arr.toOwnedSlice(allocator), .capacity = arr.items.len, .allocator = allocator } };
+    return .{ .array = .fromOwnedSlice(allocator, try arr.toOwnedSlice(allocator)) };
 }
 
 fn headersToJson(allocator: std.mem.Allocator, headers: []const types.Header) !std.json.Value {
@@ -436,7 +436,7 @@ fn headersToJson(allocator: std.mem.Allocator, headers: []const types.Header) !s
         try obj.put(allocator, "value", .{ .string = h.value });
         try arr.append(allocator, .{ .object = obj });
     }
-    return .{ .array = .{ .items = try arr.toOwnedSlice(allocator), .capacity = arr.items.len, .allocator = allocator } };
+    return .{ .array = .fromOwnedSlice(allocator, try arr.toOwnedSlice(allocator)) };
 }
 
 fn parseCookies(allocator: std.mem.Allocator, value: std.json.Value) ![]types.Cookie {
@@ -538,11 +538,11 @@ fn cloneOwned(comptime T: type, allocator: std.mem.Allocator, source: T) !T {
         .@"struct" => |info| {
             var out: T = undefined;
             var initialized: usize = 0;
-            errdefer inline for (info.fields, 0..) |field, i| {
-                if (i < initialized) freeOwned(field.type, allocator, @field(out, field.name));
+            errdefer inline for (info.field_names, info.field_types, 0..) |field_name, field_type, i| {
+                if (i < initialized) freeOwned(field_type, allocator, @field(out, field_name));
             };
-            inline for (info.fields) |field| {
-                @field(out, field.name) = try cloneOwned(field.type, allocator, @field(source, field.name));
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                @field(out, field_name) = try cloneOwned(field_type, allocator, @field(source, field_name));
                 initialized += 1;
             }
             return out;
@@ -558,8 +558,8 @@ fn freeOwned(comptime T: type, allocator: std.mem.Allocator, value: T) void {
             for (value) |item| freeOwned(ptr.child, allocator, item);
             allocator.free(value);
         },
-        .@"struct" => |info| inline for (info.fields) |field| {
-            freeOwned(field.type, allocator, @field(value, field.name));
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, field_type| {
+            freeOwned(field_type, allocator, @field(value, field_name));
         },
         .optional => |info| if (value) |item| {
             freeOwned(info.child, allocator, item);

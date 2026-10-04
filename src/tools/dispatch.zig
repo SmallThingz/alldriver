@@ -805,8 +805,8 @@ const DetectionSignals = struct {
 
     fn signalCount(self: DetectionSignals) usize {
         var count: usize = 0;
-        inline for (std.meta.fields(DetectionSignals)) |field| {
-            if (@field(self, field.name)) count += 1;
+        inline for (@typeInfo(DetectionSignals).@"struct".field_names) |field_name| {
+            if (@field(self, field_name)) count += 1;
         }
         return count;
     }
@@ -2248,7 +2248,7 @@ fn cmdReleaseBundle(allocator: Allocator, root: []const u8, args: []const []cons
         try cmdMatrixCollect(allocator, root, &.{ "--strict-ga", "--matrix-root", matrix_root, "--out", summary_path });
     }
 
-    try runInherit(allocator, &.{ "zig", "build", "-Doptimize=ReleaseSafe" }, root, &env);
+    try runInherit(allocator, &.{ "zig", "build", "-Doptimize=safe" }, root, &env);
 
     const bundle_dir = try path_util.pathJoin(allocator, &.{ root, "artifacts", "release", release_id.? });
     defer allocator.free(bundle_dir);
